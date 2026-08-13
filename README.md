@@ -153,8 +153,14 @@ cursor, the pass fails with a message telling you to run a fresh full pass.
 
 ## Sizing
 
-Roughly 12–14 GB per 100M files, ~20 GB with indexes. `init` refuses to start if free
-space is below `--min-free-gb` (default 30).
+Measured on `/TeamSpace/Public`: 68 MB for 240,010 files and 65,355 directories, i.e.
+**~283 bytes per file** all-in (including the crawl-time uniqueness index). Extrapolating,
+100M files is roughly **28 GB**, or **~40 GB** once the analysis indexes are built.
+
+That figure is sensitive to how directory-dense the tree is — this one runs about one
+directory per four files, and directory rows are the expensive ones because they carry
+the materialised path. `init` refuses to start if free space is below `--min-free-gb`
+(default 30), so raise it for a large root.
 
 Directories are normalised out of the file rows — `dirs` holds the materialised path,
 `files` holds `dir_id + name` — which both keeps the database compact and makes
