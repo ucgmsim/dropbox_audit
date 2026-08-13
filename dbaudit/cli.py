@@ -23,6 +23,8 @@ from .crawler import Crawler
 from .limiter import AdaptiveLimiter
 from .lock import InstanceLock, LockHeld
 from .store import Store
+from .verify import verify_subtree
+from . import report as reports
 
 log = logging.getLogger("dbaudit")
 
@@ -295,6 +297,130 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_verify(args) -> int:
+    store = Store(args.db)
+    if not store.is_initialised():
+        print(f"error: {args.db} is not initialised", file=sys.stderr)
+        return 2
+    target = args.path or store.get_meta("root")
+    print(f"verifying {target} against an independent rclone walk ...")
+    try:
+        result = verify_subtree(store, target)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"  database : {result.db_files:,} files, {human_bytes(result.db_bytes)}")
+    print(f"  rclone   : {result.rclone_files:,} files, {human_bytes(result.rclone_bytes)}")
+    print(f"  {result.differences} differences")
+    for name in result.only_in_rclone[:20]:
+        print(f"    missing from audit : {name}")
+    for name in result.only_in_db[:20]:
+        print(f"    not seen by rclone : {name}")
+    for name, db_size, remote_size in result.size_mismatches[:20]:
+        print(f"    size differs       : {name} (audit {db_size}, rclone {remote_size})")
+    return 0 if result.ok else 1
+
+
+def _space_usage(remote: str):
+    """Dropbox's own view of usage, for the reconciliation residual."""
+    import requests
+
+    tokens = TokenProvider(remote=remote)
+    resp = requests.post(
+        "https://api.dropboxapi.com/2/users/get_space_usage",
+        headers={"Authorization": f"Bearer {tokens.access_token()}"}, timeout=60,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    allocation = body.get("allocation") or {}
+    return body.get("used", 0), allocation.get("used"), allocation.get("allocated")
+
+
+def cmd_report(args) -> int:
+    store = Store(args.db)
+    if not store.is_initialised():
+        print(f"error: {args.db} is not initialised", file=sys.stderr)
+        return 2
+
+    prog = store.progress()
+    pending = store.pending_count() + store.running_count()
+    root = store.get_meta("root")
+    print(f"# Storage audit of {root}")
+    if pending:
+        print(f"\n  WARNING: the crawl is incomplete -- {pending} shard(s) outstanding.")
+        print("  Every figure below is a lower bound.")
+    print(f"\n{prog['files']:,} files, {prog['dirs']:,} directories, "
+          f"{human_bytes(prog['bytes'])} of live data\n")
+
+    print("## Reconciliation")
+    live = store.query("SELECT COALESCE(SUM(size), 0) FROM files")[0][0]
+    try:
+        account_used, team_used, team_allocated = _space_usage(store.get_meta("remote", "dropbox"))
+        _, _, residual = reports.reconcile(store, account_used)
+        print(f"  measured live bytes under {root}: {human_bytes(live)}")
+        print(f"  Dropbox reports for this account : {human_bytes(account_used)}")
+        if team_used:
+            print(f"  team space used / allocated      : {human_bytes(team_used)} / "
+                  f"{human_bytes(team_allocated or 0)}")
+        print(f"  unaccounted for                  : {human_bytes(residual)}")
+        print("  The unaccounted figure is version history, deleted-but-retained data,")
+        print("  AND anything outside this crawl root. It isolates version/deleted")
+        print("  overhead only when the root covers everything the account owns.")
+    except Exception as exc:
+        print(f"  (could not read live space usage: {type(exc).__name__}: {exc})")
+        print(f"  measured live bytes under {root}: {human_bytes(live)}")
+
+    print("\n## Reclaimable duplicates")
+    total_dupe = reports.total_reclaimable_duplicates(store)
+    print(f"  identical content stored more than once: {human_bytes(total_dupe)} reclaimable")
+    for row in reports.duplicate_report(store, limit=args.top)[:args.top]:
+        print(f"  {human_bytes(row.reclaimable):>12}  x{row.copies:<4} "
+              f"{human_bytes(row.size):>10} each  {row.example[:80]}")
+
+    print("\n## Cold data")
+    for years in (2, 5, 10):
+        count, total = reports.bytes_older_than(store, years)
+        print(f"  untouched for {years:>2}y+ : {human_bytes(total):>12} in {count:,} files")
+    print("  by year last modified:")
+    for row in reports.cold_bytes(store):
+        print(f"    {row.year}  {human_bytes(row.bytes):>12}  {row.files:,} files")
+
+    print("\n## Largest directories (recursive)")
+    for row in reports.top_dirs(store, limit=args.top):
+        print(f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {row.path[:90]}")
+
+    print("\n## Per top-level folder")
+    for row in reports.top_level_summary(store):
+        print(f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {row.path[:90]}")
+
+    print("\n## Small-file hotspots")
+    hotspots = reports.small_file_hotspots(
+        store, min_files=args.hotspot_min_files, max_mean_size=args.hotspot_max_mean, limit=args.top)
+    if not hotspots:
+        print(f"  none with >={args.hotspot_min_files:,} files averaging "
+              f"<={human_bytes(args.hotspot_max_mean)}")
+    for row in hotspots:
+        print(f"  {row.files:>10,} files  mean {human_bytes(row.mean_size):>10}  "
+              f"{human_bytes(row.bytes):>12}  {row.path[:70]}")
+
+    print("\n## By file type")
+    for row in reports.extension_profile(store, limit=args.top):
+        label = "(no extension)" if row.ext == "(none)" else f".{row.ext}"
+        print(f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {label}")
+    return 0
+
+
+def cmd_export(args) -> int:
+    store = Store(args.db)
+    if not store.is_initialised():
+        print(f"error: {args.db} is not initialised", file=sys.stderr)
+        return 2
+    for path in reports.export_csv(store, args.out):
+        print(f"wrote {path}")
+    return 0
+
+
 def cmd_index(args) -> int:
     setup_logging(args.verbose)
     store = Store(args.db)
@@ -341,6 +467,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="show progress")
     p_status.add_argument("--db", required=True)
     p_status.set_defaults(func=cmd_status)
+
+    p_verify = sub.add_parser(
+        "verify", help="re-walk a subtree with rclone and diff it against the database")
+    p_verify.add_argument("--db", required=True)
+    p_verify.add_argument("path", nargs="?", help="subtree to check (default: the crawl root)")
+    p_verify.set_defaults(func=cmd_verify)
+
+    p_report = sub.add_parser("report", help="storage-reduction report")
+    p_report.add_argument("--db", required=True)
+    p_report.add_argument("--top", type=int, default=25)
+    p_report.add_argument("--hotspot-min-files", type=int, default=100_000)
+    p_report.add_argument("--hotspot-max-mean", type=int, default=65536)
+    p_report.set_defaults(func=cmd_report)
+
+    p_export = sub.add_parser("export", help="write the reports as CSV")
+    p_export.add_argument("--db", required=True)
+    p_export.add_argument("--out", required=True)
+    p_export.set_defaults(func=cmd_export)
 
     p_index = sub.add_parser("index", help="build analysis indexes")
     p_index.add_argument("--db", required=True)

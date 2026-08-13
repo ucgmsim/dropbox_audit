@@ -28,6 +28,7 @@ ANALYSIS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS files_hash ON files(content_hash)",
     "CREATE INDEX IF NOT EXISTS files_size ON files(size)",
     "CREATE INDEX IF NOT EXISTS files_smod ON files(server_modified)",
+    "CREATE INDEX IF NOT EXISTS files_ext ON files(ext)",
     "CREATE INDEX IF NOT EXISTS dirs_parent ON dirs(parent_id)",
     "CREATE INDEX IF NOT EXISTS dirs_pathlower ON dirs(path_lower)",
 ]
@@ -71,6 +72,21 @@ def _epoch(stamp: str | None) -> int | None:
 
 def _depth_of(path: str) -> int:
     return path.rstrip("/").count("/")
+
+
+MAX_EXT_LEN = 12
+
+
+def _extension(name: str) -> str:
+    """Lowercased extension, or '' -- stored so the type profile is a plain GROUP BY.
+
+    Bounded in length so that dotted filenames (``run.2024-01-01.backup.tar``) do not
+    turn arbitrary text into a pseudo-extension.
+    """
+    dot = name.rfind(".")
+    if dot <= 0 or dot == len(name) - 1 or len(name) - dot - 1 > MAX_EXT_LEN:
+        return ""
+    return name[dot + 1:].lower()
 
 
 class Store:
@@ -406,13 +422,15 @@ class Store:
                     size = int(entry["size"])
                     content_hash = entry.get("content_hash")
                     sharing = entry.get("sharing_info") or {}
+                    file_name = entry.get("name") or path_display.rsplit("/", 1)[-1]
                     file_rows.append(
                         (
                             entry.get("id"),
                             dir_id,
-                            entry.get("name") or path_display.rsplit("/", 1)[-1],
+                            file_name,
+                            _extension(file_name),
                             size,
-                            bytes.fromhex(content_hash) if content_hash else None,
+                            self._hash_bytes(conn, content_hash, path_display),
                             entry.get("rev"),
                             self._cached_epoch(entry.get("client_modified"), time_cache),
                             self._cached_epoch(entry.get("server_modified"), time_cache),
@@ -451,11 +469,12 @@ class Store:
 
             if file_rows:
                 conn.executemany(
-                    "INSERT INTO files(dbx_id, dir_id, name, size, content_hash, rev, "
+                    "INSERT INTO files(dbx_id, dir_id, name, ext, size, content_hash, rev, "
                     "  client_modified, server_modified, modified_by, is_downloadable, "
-                    "  shard_id, seen_run) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "  shard_id, seen_run) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(dbx_id) DO UPDATE SET "
-                    "  dir_id=excluded.dir_id, name=excluded.name, size=excluded.size, "
+                    "  dir_id=excluded.dir_id, name=excluded.name, ext=excluded.ext, "
+                    "  size=excluded.size, "
                     "  content_hash=excluded.content_hash, rev=excluded.rev, "
                     "  client_modified=excluded.client_modified, "
                     "  server_modified=excluded.server_modified, "
@@ -501,6 +520,24 @@ class Store:
             raise
 
         return stats
+
+    @staticmethod
+    def _hash_bytes(conn, content_hash, path_display):
+        """Never let one malformed hash cost us a whole shard.
+
+        Dropbox always returns 64 hex chars, but a file recorded without its hash is
+        a far better outcome than a subtree that fails to crawl.
+        """
+        if not content_hash:
+            return None
+        try:
+            return bytes.fromhex(content_hash)
+        except (ValueError, TypeError):
+            conn.execute(
+                "INSERT INTO api_events(ts, kind, detail) VALUES(?, 'bad_content_hash', ?)",
+                (time.time(), path_display[:500]),
+            )
+            return None
 
     def _cached_epoch(self, stamp, cache):
         if not stamp:

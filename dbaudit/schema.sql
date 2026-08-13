@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS files (
     dbx_id          TEXT UNIQUE,
     dir_id          INTEGER NOT NULL,
     name            TEXT NOT NULL,
+    ext             TEXT,
     size            INTEGER NOT NULL,
     content_hash    BLOB,
     rev             TEXT,
