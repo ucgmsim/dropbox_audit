@@ -74,26 +74,32 @@ safe while `run` is going:
 |---|---|---|
 | `--workers` | 8 | Measured sweet spot. 16 starts drawing 429s. |
 | `--rps` | 5.0 | Global request budget, shared by all workers. |
-| `--min-split-depth` | 2 | Levels always split, regardless of queue depth. |
-| `--split-depth` | 6 | Upper bound on splitting, *not* a target. |
+| `--queue-target` | 2 x workers | Shards kept pending. Raising it usually goes *slower*. |
+| `--split-depth` | 6 | Hard bound on how deep splitting may go. |
 | `--max-shards` | 2,000,000 | Safety cap on shard creation. |
 | `--progress-interval` | 30 | Seconds between progress log lines. |
 
-The two split settings deserve a word, because they do different jobs.
+**Resist the urge to raise `--queue-target`.** Late in a crawl you will often see
+`status` reporting only one or two shards running while eight workers are
+configured — one big subtree is still being listed and the rest are idle. The
+obvious fix is to split more aggressively so there is always work queued. It was
+tried twice on `/TeamSpace/Public` and both variants were dramatically worse than
+leaving it alone:
 
-`--min-split-depth` splits the top levels **unconditionally**. This is the one that
-prevents stragglers. Splitting deeper is otherwise gated on the queue starving, and
-that gate has a blind spot: early in a crawl the queue is healthy, which is exactly
-when the biggest subtrees get claimed, so they open a recursive cursor and can never
-be split afterwards. Measured on `/TeamSpace/Public`, one such shard held the crawl
-at 2 of 8 workers for most of its run — and raising `--split-depth` from 2 to 6
-changed nothing, because the gate never opened.
+| Setting | Shards | Result (5 min, same subtree) |
+|---|---|---|
+| default (`2 x workers`) | 72–115 | **~319,000 files** |
+| split top 2 levels unconditionally | 17,908 | 18k files in the first 30s, vs 53k |
+| keep 200 shards queued | 17,878 | throughput collapsed to **4 files/s** |
 
-`--split-depth` is only an upper bound on how far starvation-driven splitting may go.
+The scarce resource is *requests*, not workers. A recursive listing of a large
+subtree returns 2000 entries per call; a shard covering one small directory returns
+a handful. Splitting trades one high-yield call for many low-yield ones — which is
+precisely rclone's per-directory cost model, the thing this tool exists to avoid. An
+idle worker costs one concurrent request; an over-split tree costs the whole budget.
 
-If `status` shows few shards running while many workers are configured, you are
-straggler-bound: raise `--min-split-depth` (each extra level costs roughly one
-listing per directory at that depth, so 3 is cheap and 4 starts to add up).
+So stragglers are accepted deliberately. Raise `--queue-target` only if your tree is
+shallow and wide enough that shards stay large.
 
 **If 429s start climbing** (`status` shows the last hour), lower `--workers` first,
 then `--rps`. The limiter already backs off on its own — a 429 parks *every* worker

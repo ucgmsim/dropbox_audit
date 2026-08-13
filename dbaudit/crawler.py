@@ -12,18 +12,14 @@ directories at depth 3. A worker can therefore spend one API call splitting a sh
 into its children instead of listing it recursively. The choice is always made
 *before* a cursor exists, so splitting never throws away work.
 
-Two rules decide it, and both are needed:
+The rule is **keep just `queue_target` shards pending** (default: twice the worker
+count): a worker splits what it claims while the queue is below target, and lists
+recursively once it is stocked.
 
-1. **Always split the top few levels** (`min_split_depth`). Costs a handful of
-   listings and guarantees no single top-level subtree becomes one shard.
-2. **Split deeper only when the queue is starving** (fewer than ``2 x workers``
-   pending, bounded by `split_depth`), which keeps shard creation self-limiting.
-
-Rule 2 alone is not enough, and measurement is what showed it: the queue is healthy
-early on, which is exactly when the biggest subtrees are claimed, so they open a
-recursive cursor before the gate ever opens. On /TeamSpace/Public that left the
-crawl running on 2 of 8 workers for most of its duration, and raising `split_depth`
-changed nothing at all.
+Splitting is kept deliberately rare. Measurement showed that splitting harder to
+keep workers busy is a trap -- it trades 2000-entry recursive calls for many
+near-empty ones, and collapsed throughput by two orders of magnitude on a real
+subtree. `_should_split` carries the numbers.
 """
 
 from __future__ import annotations
@@ -65,7 +61,7 @@ class Crawler:
         limiter,
         workers: int = 8,
         split_depth: int = 6,
-        min_split_depth: int = 2,
+        queue_target: int | None = None,
         max_shards: int = 2_000_000,
         max_page_attempts: int = 8,
         backoff_base: float = 2.0,
@@ -76,7 +72,9 @@ class Crawler:
         self.limiter = limiter
         self.workers = max(1, int(workers))
         self.split_depth = int(split_depth)
-        self.min_split_depth = int(min_split_depth)
+        # Default 2 x workers: just enough pending shards to keep every worker fed,
+        # and deliberately no more. See _should_split for why more is worse.
+        self.queue_target = max(1, int(queue_target)) if queue_target else 2 * self.workers
         self.max_shards = int(max_shards)
         self.max_page_attempts = int(max_page_attempts)
         self.backoff_base = float(backoff_base)
@@ -124,22 +122,34 @@ class Crawler:
             return False  # a recursive cursor is already open
         if shard.depth >= self.split_depth:
             return False
-        if self.store.shard_count() >= self.max_shards:
-            return False
 
-        # Near the top of the tree, split unconditionally.
+        # Split only enough to keep the queue barely stocked -- that is, split as
+        # LITTLE as possible.
         #
-        # Starvation-gated splitting alone has a blind spot: the queue is healthy
-        # early on, exactly when the biggest subtrees are claimed, so they open a
-        # recursive cursor and can never be split afterwards. Measured on
-        # /TeamSpace/Public, one such shard held the crawl at 2 of 8 workers for
-        # most of the run, and raising the depth bound changed nothing because the
-        # gate never opened. Breaking up the first couple of levels costs a handful
-        # of listings and removes the whole failure mode.
-        if shard.depth < min(self.min_split_depth, self.split_depth):
-            return True
-
-        return self.store.pending_count() < 2 * self.workers
+        # This is counter-intuitive, and three A/B runs on /TeamSpace/Public were
+        # needed to learn it. The instinct is that more shards means more
+        # parallelism, so a straggler leaving workers idle should be fixed by
+        # splitting harder. Both attempts at that were much worse, on the same
+        # subtree against a 5-minute baseline of ~319,000 files:
+        #
+        #   split the top 2 levels unconditionally -> 17,908 shards; 18k files in the
+        #                                             first 30s against 53k
+        #   keep 200 shards queued                 -> 17,878 shards; throughput
+        #                                             collapsed to 4 files/s
+        #
+        # The scarce resource is *requests*, not workers. A recursive listing of a
+        # large subtree returns 2000 entries per call; a shard covering one small
+        # directory returns a handful. Splitting therefore trades one high-yield call
+        # for many low-yield ones -- which is exactly rclone's per-directory cost
+        # model, the thing this crawler exists to avoid.
+        #
+        # An idle worker costs one concurrent request. An over-split tree costs the
+        # entire request budget. So the target stays low, and stragglers are accepted.
+        if self.store.pending_count() >= self.queue_target:
+            return False
+        # Checked last on purpose: it is a full count, and it only matters on the
+        # rare occasions we are actually about to split.
+        return self.store.shard_count() < self.max_shards
 
     # ---- per-shard work -------------------------------------------------
 
