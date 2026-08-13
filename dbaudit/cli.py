@@ -32,7 +32,11 @@ log = logging.getLogger("dbaudit")
 # ~4,600 entries/s with zero 429s; 16 started drawing them.
 DEFAULT_WORKERS = 8
 DEFAULT_RPS = 5.0
-DEFAULT_SPLIT_DEPTH = 2
+# A bound, not the primary control. Splitting is gated on the queue actually
+# starving, so it is self-limiting; the depth only needs to be deep enough to let
+# that gate act. At 2, big subtrees could not be split at all and the tail of a
+# crawl ran on 2 of 8 workers (measured on /TeamSpace/Public: 2,400 -> 1,163 files/s).
+DEFAULT_SPLIT_DEPTH = 6
 
 
 def free_bytes(path: str) -> int:
@@ -163,7 +167,8 @@ def _progress_reporter(store, stop: threading.Event, interval: float) -> None:
             done, total = prog["shards_done"], prog["shards_total"]
             if per_sec > 0 and done:
                 remaining = (total - done) / done * prog["files"]
-                eta = f" | eta {human_duration(remaining / per_sec)}"
+                # Rough: shards vary enormously in size, so this is a hint, not a promise.
+                eta = f" | eta~{human_duration(remaining / per_sec)}"
         last_files, last_time = prog["files"], now
         log.info(
             "shards %d/%d done (%d error) | %s files, %s dirs, %s%s%s",
@@ -463,7 +468,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--db", required=True)
     p_run.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     p_run.add_argument("--rps", type=float, default=DEFAULT_RPS)
-    p_run.add_argument("--split-depth", type=int, default=DEFAULT_SPLIT_DEPTH)
+    p_run.add_argument("--split-depth", type=int, default=DEFAULT_SPLIT_DEPTH,
+                       help="max levels a shard may be split into children (bound, "
+                            "not a target: splitting only happens when workers starve)")
     p_run.add_argument("--max-shards", type=int, default=2_000_000)
     p_run.add_argument("--incremental", action="store_true",
                        help="re-audit changes only, using the cursors from a completed pass")
