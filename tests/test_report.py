@@ -129,3 +129,29 @@ def test_export_csv_writes_every_report(tmp_path):
     assert "duplicates.csv" in names and "top_dirs.csv" in names
     body = open(tmp_path / "out" / "duplicates.csv").read()
     assert "reclaimable" in body and "100" in body
+
+
+def test_top_dirs_survives_rows_appearing_mid_report(tmp_path):
+    """Reports are run against live crawls, so the snapshot must be self-consistent.
+
+    Reading MAX(id) separately from the rows raced with the crawler and crashed with
+    IndexError on a real 12.6M-file database.
+    """
+    store = seed(tmp_path, [mk("x", 5, "a", d="/R/sub")])
+    conn = store.connect()
+    # A file whose directory was created after our snapshot of `dirs`.
+    conn.execute(
+        "INSERT INTO files(dbx_id, dir_id, name, size, seen_run) VALUES('id:new', 9999, 'n', 3, 1)"
+    )
+    rows = {r.path: r.bytes for r in top_dirs(store, limit=10)}
+    assert rows["/R/sub"] == 5  # known directories still roll up correctly
+
+
+def test_top_dirs_ignores_parent_ids_beyond_the_snapshot(tmp_path):
+    store = seed(tmp_path, [mk("x", 5, "a", d="/R/sub")])
+    conn = store.connect()
+    conn.execute(
+        "INSERT INTO dirs(id, parent_id, name, path_display, path_lower, depth, seen_run) "
+        "VALUES(500, 9999, 'orphan', '/R/orphan', '/r/orphan', 2, 1)"
+    )
+    assert top_dirs(store, limit=10)  # must not raise
