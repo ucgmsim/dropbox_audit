@@ -124,24 +124,28 @@ def top_dirs(store, limit: int = 50) -> list[DirRow]:
     depth order visits each directory once.
     """
     conn = store.connect()
-    max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM dirs").fetchone()[0]
-    if max_id == 0:
+    # Take the directory rows first and derive the array bounds from *them*, so the
+    # snapshot is self-consistent. Reading MAX(id) separately is a live-crawl race:
+    # directories inserted between the two queries overflow the arrays.
+    rows = conn.execute(
+        "SELECT id, parent_id, path_display FROM dirs ORDER BY depth DESC"
+    ).fetchall()
+    if not rows:
         return []
+    max_id = max(row[0] for row in rows)
 
     files_of = array("q", [0]) * (max_id + 1)
     bytes_of = array("q", [0]) * (max_id + 1)
     for dir_id, count, total in conn.execute(
         "SELECT dir_id, COUNT(*), COALESCE(SUM(size), 0) FROM files GROUP BY dir_id"
     ):
-        if dir_id is not None and dir_id <= max_id:
+        # Files may reference a directory created after the snapshot above.
+        if dir_id is not None and 0 < dir_id <= max_id:
             files_of[dir_id] = count
             bytes_of[dir_id] = total
 
-    rows = conn.execute(
-        "SELECT id, parent_id, path_display FROM dirs ORDER BY depth DESC"
-    ).fetchall()
     for dir_id, parent_id, _ in rows:
-        if parent_id is not None and 0 < parent_id <= max_id:
+        if parent_id is not None and 0 < parent_id <= max_id and 0 < dir_id <= max_id:
             files_of[parent_id] += files_of[dir_id]
             bytes_of[parent_id] += bytes_of[dir_id]
 
