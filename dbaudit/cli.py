@@ -127,12 +127,22 @@ def cmd_init(args) -> int:
 
     crawler = Crawler(store, lister, AdaptiveLimiter(), split_depth=args.split_depth)
     crawler.seed(root)
+    # Taken before the crawl starts, so the first incremental pass also catches
+    # anything that changed while the full crawl was running.
+    delta = None
+    try:
+        delta = crawler.seed_delta_cursor(root)
+    except Exception as exc:
+        print(f"  warning: could not record a delta cursor ({exc}); "
+              f"incremental passes will be unavailable", file=sys.stderr)
 
     print(f"initialised {args.db}")
     print(f"  root      : {root} ({len(page.entries)}+ entries at the top level)")
     print(f"  account   : {account.get('email', '?')} / team {(account.get('team') or {}).get('name', '?')}")
     print(f"  namespace : {tokens.root_namespace_id()}")
     print(f"  free disk : {human_bytes(available)}")
+    print(f"  delta     : {'recorded' if delta else 'unavailable'} "
+          f"(enables `run --incremental` later)")
     print(f"\nnext: python -m dbaudit run --db {args.db}")
     return 0
 

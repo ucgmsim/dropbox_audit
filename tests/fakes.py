@@ -70,6 +70,11 @@ class FakeLister:
             raise PathNotFound(f"no such folder: {path}")
         return self._page(path, recursive, 0)
 
+    def get_latest_cursor(self, path, recursive=True, include_deleted=True):
+        """A cursor positioned at the end of the current listing: no changes yet."""
+        self.calls.append(("latest", path, recursive))
+        return f"{path}|{int(recursive)}|{len(self._walk(path, recursive))}"
+
     def continue_(self, cursor):
         self.calls.append(("cont", cursor, None))
         self._continue_calls += 1
