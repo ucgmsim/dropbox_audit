@@ -52,7 +52,7 @@ class Crawler:
         lister,
         limiter,
         workers: int = 8,
-        split_depth: int = 2,
+        split_depth: int = 6,
         max_shards: int = 2_000_000,
         max_page_attempts: int = 8,
         backoff_base: float = 2.0,
