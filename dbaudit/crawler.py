@@ -158,11 +158,16 @@ class Crawler:
             attempts = 0
             self.limiter.on_success()
 
+            # A non-recursive listing does not return the folder itself, but guard
+            # anyway: enqueueing the shard's own path would spawn a shard that
+            # re-lists the same directory forever.
             children = (
                 [
                     (entry["path_display"], shard.depth + 1, "recursive")
                     for entry in page.entries
-                    if entry.get(".tag") == "folder" and entry.get("path_display")
+                    if entry.get(".tag") == "folder"
+                    and entry.get("path_display")
+                    and entry["path_display"].rstrip("/").lower() != shard.path.rstrip("/").lower()
                 ]
                 if mode == "split"
                 else ()

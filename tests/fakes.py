@@ -24,6 +24,14 @@ class FakeLister:
 
     def _walk(self, root, recursive):
         out, queue = [], [root]
+        if recursive:
+            # The real API returns the folder itself as the first entry of a
+            # recursive listing (verified against Dropbox 2026-08-13). A
+            # non-recursive listing does not.
+            out.append({
+                ".tag": "folder", "id": f"id:{root}", "name": root.rsplit("/", 1)[-1],
+                "path_display": root, "path_lower": root.lower(),
+            })
         while queue:
             current = queue.pop(0)
             for child in self.tree.get(current, []):

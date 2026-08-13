@@ -312,11 +312,16 @@ class Store:
         cache[account_id] = pid
         return pid
 
-    def ensure_dir(self, conn, path_display: str, cache, shard_id=None) -> int:
+    def ensure_dir(self, conn, path_display: str, cache, shard_id=None, created=None) -> int:
         """Return the id of ``path_display``, creating it and any missing ancestors.
 
         Called with the parent path of every file, so it must be cheap; the cache
         makes it roughly free within a page, since recursive listings are local.
+
+        ``created`` is a one-element list used as a counter of rows actually inserted.
+        Counting insertions rather than folder entries is what keeps SUM(shards.n_dirs)
+        equal to COUNT(*) FROM dirs: a recursive listing repeats its own root, and
+        ancestors are created from child paths without ever appearing as an entry.
         """
         path_display = path_display.rstrip("/")
         key = path_display.lower()
@@ -326,17 +331,20 @@ class Store:
 
         parent_path = path_display.rsplit("/", 1)[0]
         parent_id = (
-            self.ensure_dir(conn, parent_path, cache, shard_id)
+            self.ensure_dir(conn, parent_path, cache, shard_id, created)
             if parent_path and parent_path != path_display
             else None
         )
         name = path_display.rsplit("/", 1)[-1]
+        before = conn.total_changes
         conn.execute(
             "INSERT OR IGNORE INTO dirs(parent_id, name, path_display, path_lower, depth, "
             "                           shard_id, seen_run) VALUES(?, ?, ?, ?, ?, ?, ?)",
             (parent_id, name, path_display, key, _depth_of(path_display), shard_id,
              self._seen_run(conn)),
         )
+        if created is not None and conn.total_changes > before:
+            created[0] += 1
         dir_id = conn.execute("SELECT id FROM dirs WHERE path_lower=?", (key,)).fetchone()[0]
         if len(cache) >= DIR_CACHE_LIMIT:
             cache.clear()
@@ -372,6 +380,7 @@ class Store:
         dir_cache, principal_cache, time_cache = self._caches()
         seen_run = self._seen_run(conn)
         stats = PageStats()
+        created_dirs = [0]
 
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -393,7 +402,7 @@ class Store:
 
                 if tag == "file":
                     parent = path_display.rsplit("/", 1)[0] or "/"
-                    dir_id = self.ensure_dir(conn, parent, dir_cache, shard_id)
+                    dir_id = self.ensure_dir(conn, parent, dir_cache, shard_id, created_dirs)
                     size = int(entry["size"])
                     content_hash = entry.get("content_hash")
                     sharing = entry.get("sharing_info") or {}
@@ -417,7 +426,7 @@ class Store:
                     stats.bytes += size
 
                 elif tag == "folder":
-                    dir_id = self.ensure_dir(conn, path_display, dir_cache, shard_id)
+                    dir_id = self.ensure_dir(conn, path_display, dir_cache, shard_id, created_dirs)
                     sharing = entry.get("sharing_info") or {}
                     shared_folder_id = entry.get("shared_folder_id")
                     conn.execute(
@@ -433,11 +442,12 @@ class Store:
                             dir_id,
                         ),
                     )
-                    stats.dirs += 1
 
                 elif tag == "deleted":
                     deleted_paths.append(path_display)
                     stats.deleted += 1
+
+            stats.dirs = created_dirs[0]
 
             if file_rows:
                 conn.executemany(
