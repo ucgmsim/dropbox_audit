@@ -92,7 +92,7 @@ def test_split_mode_is_persisted_so_resume_stays_consistent(tmp_path):
 def test_healthy_queue_does_not_keep_splitting(tmp_path):
     tree = {"/R": [f"d{i}/" for i in range(20)]}
     tree.update({f"/R/d{i}": ["f.txt"] for i in range(20)})
-    store, crawler = build(tmp_path, FakeLister(tree), workers=1, split_depth=1)
+    store, crawler = build(tmp_path, FakeLister(tree), workers=1, split_depth=1, queue_target=1)
     crawler.seed("/R")
     crawler.run()
     assert store.query("SELECT COUNT(*) FROM shards WHERE mode='split'")[0][0] <= 1
@@ -175,36 +175,53 @@ def test_concurrent_workers_do_not_duplicate_or_lose_files(tmp_path):
     assert duplicates == 0
 
 
-def test_shallow_shards_split_even_when_the_queue_is_busy(tmp_path):
-    """The straggler fix: a huge subtree must not open a recursive cursor early.
+def test_splitting_stays_far_below_splitting_everything(tmp_path):
+    """Self-limiting, and that is the point.
 
-    Starvation-gated splitting alone never fires for shards claimed while the queue
-    is healthy -- which is exactly when the biggest subtrees get claimed.
+    Splitting every directory is rclone's cost model: one API call per directory.
+    Unbounded splitting produced 17,908 shards on a real subtree and collapsed
+    throughput to 4 files/s, so the tree here (341 splittable directories) must be
+    covered by far fewer shards than that.
     """
-    tree = {"/R": [f"d{i}/" for i in range(50)]}
-    tree.update({f"/R/d{i}": ["f.txt"] for i in range(50)})
-    store, crawler = build(tmp_path, FakeLister(tree), workers=1,
-                           split_depth=6, min_split_depth=2)
+    tree = {"/R": [f"d{i}/" for i in range(30)]}
+    for i in range(30):
+        tree[f"/R/d{i}"] = [f"s{j}/" for j in range(10)]
+        for j in range(10):
+            tree[f"/R/d{i}/s{j}"] = ["f.txt"]
+    store, crawler = build(tmp_path, FakeLister(tree), workers=2,
+                           split_depth=6, queue_target=4)
     crawler.seed("/R")
     crawler.run()
-    modes = dict(store.query("SELECT path, mode FROM shards"))
-    assert modes["/R"] == "split", "root must split despite 50 pending shards"
-    assert store.stats()["files"] == 50
+    shards = store.query("SELECT COUNT(*) FROM shards")[0][0]
+    assert shards < 150, f"split too eagerly: {shards} shards for 341 directories"
+    assert store.stats()["files"] == 300
 
 
-def test_min_split_depth_zero_restores_pure_starvation_gating(tmp_path):
-    tree = {"/R": [f"d{i}/" for i in range(50)]}
-    tree.update({f"/R/d{i}": ["f.txt"] for i in range(50)})
+def test_queue_target_defaults_to_twice_the_workers(tmp_path):
+    store, crawler = build(tmp_path, FakeLister(TREE), workers=5)
+    assert crawler.queue_target == 10
+
+
+def test_a_busy_queue_still_splits_when_it_drains(tmp_path):
+    """Self-arming: the queue target is re-checked on every claim, so a long shard
+    cannot leave workers idle."""
+    tree = {"/R": [f"d{i}/" for i in range(6)]}
+    for i in range(6):
+        tree[f"/R/d{i}"] = [f"s{j}/" for j in range(4)]
+        for j in range(4):
+            tree[f"/R/d{i}/s{j}"] = ["f.txt"]
     store, crawler = build(tmp_path, FakeLister(tree), workers=1,
-                           split_depth=6, min_split_depth=0)
+                           split_depth=6, queue_target=100)
     crawler.seed("/R")
     crawler.run()
-    assert store.stats()["files"] == 50
+    # With a target it can never reach, every splittable level gets split.
+    assert store.query("SELECT COUNT(*) FROM shards WHERE mode='split'")[0][0] >= 7
+    assert store.stats()["files"] == 24
 
 
-def test_min_split_depth_cannot_exceed_the_hard_bound(tmp_path):
+def test_queue_target_respects_the_depth_bound(tmp_path):
     store, crawler = build(tmp_path, FakeLister(TREE), workers=1,
-                           split_depth=0, min_split_depth=5)
+                           split_depth=0, queue_target=10_000)
     crawler.seed("/R")
     crawler.run()
     assert store.query("SELECT COUNT(*) FROM shards")[0][0] == 1  # never split

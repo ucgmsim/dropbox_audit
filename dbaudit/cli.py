@@ -37,9 +37,10 @@ DEFAULT_RPS = 5.0
 # that gate act. At 2, big subtrees could not be split at all and the tail of a
 # crawl ran on 2 of 8 workers (measured on /TeamSpace/Public: 2,400 -> 1,163 files/s).
 DEFAULT_SPLIT_DEPTH = 6
-# Levels always split, regardless of how busy the queue looks. Cheap insurance
-# against a huge subtree being claimed early and becoming an unsplittable straggler.
-DEFAULT_MIN_SPLIT_DEPTH = 2
+# How many shards to keep queued. High enough that a long-running shard never
+# leaves the other workers idle; low enough that per-shard API calls stay a rounding
+# error. 17,908 shards on one subtree was far too many; a few hundred is right.
+DEFAULT_QUEUE_TARGET = None  # => 2 x workers; see Crawler._should_split
 
 
 def free_bytes(path: str) -> int:
@@ -209,7 +210,7 @@ def cmd_run(args) -> int:
             store, lister, limiter,
             workers=args.workers,
             split_depth=args.split_depth,
-            min_split_depth=args.min_split_depth,
+            queue_target=args.queue_target,
             max_shards=args.max_shards,
         )
 
@@ -475,8 +476,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--split-depth", type=int, default=DEFAULT_SPLIT_DEPTH,
                        help="max levels a shard may be split into children (bound, "
                             "not a target: splitting only happens when workers starve)")
-    p_run.add_argument("--min-split-depth", type=int, default=DEFAULT_MIN_SPLIT_DEPTH,
-                       help="levels always split, even when the queue looks busy")
+    p_run.add_argument("--queue-target", type=int, default=DEFAULT_QUEUE_TARGET,
+                       help="shards to keep pending (default: 2 x workers). Raising "
+                            "this splits more aggressively and measured much slower")
     p_run.add_argument("--max-shards", type=int, default=2_000_000)
     p_run.add_argument("--incremental", action="store_true",
                        help="re-audit changes only, using the cursors from a completed pass")
