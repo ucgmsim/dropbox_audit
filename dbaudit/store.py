@@ -126,8 +126,22 @@ class Store:
                 (key, str(value)),
             )
 
+    def is_initialised(self) -> bool:
+        """True once `init` has created the schema. Probing must not raise."""
+        if not os.path.exists(self.path):
+            return False
+        row = self.connect().execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone()
+        return row is not None
+
     def get_meta(self, key: str, default=None):
-        row = self.connect().execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        try:
+            row = self.connect().execute(
+                "SELECT value FROM meta WHERE key=?", (key,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return default  # schema not created yet
         return default if row is None else row[0]
 
     def query(self, sql: str, params=()) -> list[tuple]:
