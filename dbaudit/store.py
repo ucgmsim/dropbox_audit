@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+
+# Not a Dropbox path -- every real one starts with "/" -- so it cannot collide.
+DELTA_SHARD_PATH = "<delta>"
 DIR_CACHE_LIMIT = 200_000
 TIME_CACHE_LIMIT = 50_000
 
@@ -256,12 +259,35 @@ class Store:
         finally:
             self._drop_caches()
 
-    def begin_incremental_pass(self) -> int:
-        """Re-open every completed shard at its stored cursor.
+    def set_delta_cursor(self, cursor: str) -> int:
+        """Record the whole-tree cursor that incremental passes continue from.
 
-        Dropbox keeps cursors valid after a listing completes, so continuing from one
-        returns only what changed since. This is what makes a repeat audit cost
-        minutes instead of hours.
+        Taken once, before the full crawl starts, so the first incremental pass also
+        picks up anything that changed *while* the crawl was running.
+        """
+        conn = self.connect()
+        conn.execute(
+            "INSERT INTO shards(path, depth, mode, state, cursor, created_at) "
+            "VALUES(?, -1, 'delta', 'done', ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET cursor=excluded.cursor",
+            (DELTA_SHARD_PATH, cursor, time.time()),
+        )
+        return conn.execute(
+            "SELECT id FROM shards WHERE path=?", (DELTA_SHARD_PATH,)
+        ).fetchone()[0]
+
+    def has_delta_cursor(self) -> bool:
+        row = self.connect().execute(
+            "SELECT cursor FROM shards WHERE path=?", (DELTA_SHARD_PATH,)
+        ).fetchone()
+        return bool(row and row[0])
+
+    def begin_incremental_pass(self) -> int:
+        """Re-open only the whole-tree delta cursor.
+
+        Continuing one root cursor costs one call per 2000 changes. Re-opening every
+        shard's own cursor instead would cost one call per shard -- tens of thousands
+        of calls to discover that nothing changed.
         """
         conn = self.connect()
         unfinished = conn.execute(
@@ -271,6 +297,11 @@ class Store:
             raise RuntimeError(
                 f"cannot start an incremental pass: {unfinished} shard(s) from the "
                 f"full pass are unfinished -- run a normal pass to completion first"
+            )
+        if not self.has_delta_cursor():
+            raise RuntimeError(
+                "cannot start an incremental pass: no delta cursor was recorded. "
+                "This database predates delta cursors; run a fresh full pass."
             )
         run = int(self.get_meta("seen_run", 1)) + 1
         try:
@@ -282,7 +313,8 @@ class Store:
             )
             conn.execute(
                 "UPDATE shards SET state='pending', owner=NULL, finished_at=NULL "
-                "WHERE cursor IS NOT NULL"
+                "WHERE path=?",
+                (DELTA_SHARD_PATH,),
             )
             conn.execute("COMMIT")
         except Exception:
@@ -485,15 +517,29 @@ class Store:
 
             for path in deleted_paths:
                 lowered = path.lower()
+                parent, _, leaf = lowered.rpartition("/")
+                # DeletedMetadata does not say whether the entry was a file or a
+                # folder, so handle both: drop a file at exactly this path, and drop
+                # any directory at or below it along with everything it contained.
                 conn.execute(
                     "DELETE FROM files WHERE dir_id IN (SELECT id FROM dirs WHERE path_lower=?) "
                     "  AND lower(name)=?",
-                    (lowered.rsplit("/", 1)[0] or "/", lowered.rsplit("/", 1)[-1]),
+                    (parent or "/", leaf),
+                )
+                conn.execute(
+                    "DELETE FROM files WHERE dir_id IN "
+                    "  (SELECT id FROM dirs WHERE path_lower=? OR path_lower LIKE ?)",
+                    (lowered, lowered + "/%"),
+                )
+                conn.execute(
+                    "DELETE FROM dirs WHERE path_lower=? OR path_lower LIKE ?",
+                    (lowered, lowered + "/%"),
                 )
                 conn.execute(
                     "INSERT INTO tombstones(path_lower, seen_run, ts) VALUES(?, ?, ?)",
                     (lowered, seen_run, time.time()),
                 )
+                self._drop_caches()  # cached dir ids may now point at deleted rows
 
             for path, depth, mode in child_shards:
                 conn.execute(
