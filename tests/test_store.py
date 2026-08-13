@@ -27,7 +27,8 @@ def test_commit_page_writes_rows_and_cursor(tmp_path):
     sid = store.add_shard("/TeamSpace/x", depth=2, mode="recursive")
     store.claim_shard("w1")
     stats = store.commit_page(sid, [FOLDER, FILE], cursor="c1", has_more=True)
-    assert stats.files == 1 and stats.dirs == 1 and stats.bytes == 10
+    # dirs counts rows created: /TeamSpace (ancestor) and /TeamSpace/x.
+    assert stats.files == 1 and stats.dirs == 2 and stats.bytes == 10
     assert store.get_shard(sid).cursor == "c1"
     assert store.stats()["files"] == 1
 
@@ -195,7 +196,21 @@ def test_progress_counters_track_committed_pages(tmp_path):
     store.claim_shard("w1")
     store.commit_page(sid, [FOLDER, FILE], cursor=None, has_more=False)
     prog = store.progress()
-    assert prog["files"] == 1 and prog["dirs"] == 1 and prog["bytes"] == 10 and prog["pages"] == 1
+    assert prog["files"] == 1 and prog["dirs"] == 2 and prog["bytes"] == 10 and prog["pages"] == 1
+
+
+def test_dir_counter_equals_actual_rows(tmp_path):
+    """SUM(shards.n_dirs) must equal COUNT(*) FROM dirs.
+
+    A recursive listing repeats its own root folder, so counting folder *entries*
+    would over-report; counting rows created is the honest number.
+    """
+    store = new_store(tmp_path)
+    sid = store.add_shard("/TeamSpace/x", 2, "recursive")
+    store.claim_shard("w1")
+    store.commit_page(sid, [FOLDER, FILE], cursor="c1", has_more=True)
+    store.commit_page(sid, [FOLDER], cursor=None, has_more=False)  # root repeated
+    assert store.progress()["dirs"] == store.stats()["dirs"]
 
 
 def test_build_indexes_is_idempotent(tmp_path):
