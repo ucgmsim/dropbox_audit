@@ -74,16 +74,26 @@ safe while `run` is going:
 |---|---|---|
 | `--workers` | 8 | Measured sweet spot. 16 starts drawing 429s. |
 | `--rps` | 5.0 | Global request budget, shared by all workers. |
-| `--split-depth` | 6 | Bound on how deep a shard may be split, *not* a target. |
+| `--min-split-depth` | 2 | Levels always split, regardless of queue depth. |
+| `--split-depth` | 6 | Upper bound on splitting, *not* a target. |
 | `--max-shards` | 2,000,000 | Safety cap on shard creation. |
 | `--progress-interval` | 30 | Seconds between progress log lines. |
 
-`--split-depth` deserves a word. Splitting only happens when the queue is starving
-(fewer than `2 x workers` shards pending), so it is self-limiting and the depth is
-just a bound on how far that can go. Setting it too low is the real risk: at 2, a
-large subtree could not be split at all and the tail of a crawl ran on 2 of 8 workers
-— measured on `/TeamSpace/Public`, throughput fell from 2,400 to 1,163 files/s. Raise
-it if `status` shows few shards running with many workers configured.
+The two split settings deserve a word, because they do different jobs.
+
+`--min-split-depth` splits the top levels **unconditionally**. This is the one that
+prevents stragglers. Splitting deeper is otherwise gated on the queue starving, and
+that gate has a blind spot: early in a crawl the queue is healthy, which is exactly
+when the biggest subtrees get claimed, so they open a recursive cursor and can never
+be split afterwards. Measured on `/TeamSpace/Public`, one such shard held the crawl
+at 2 of 8 workers for most of its run — and raising `--split-depth` from 2 to 6
+changed nothing, because the gate never opened.
+
+`--split-depth` is only an upper bound on how far starvation-driven splitting may go.
+
+If `status` shows few shards running while many workers are configured, you are
+straggler-bound: raise `--min-split-depth` (each extra level costs roughly one
+listing per directory at that depth, so 3 is cheap and 4 starts to add up).
 
 **If 429s start climbing** (`status` shows the last hour), lower `--workers` first,
 then `--rps`. The limiter already backs off on its own — a 429 parks *every* worker
