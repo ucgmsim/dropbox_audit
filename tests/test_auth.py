@@ -122,3 +122,60 @@ def test_expiry_within_refresh_margin_is_treated_as_stale():
     )
     assert tp.headers()["Authorization"] == "Bearer tok-abc"
     assert refreshed == [1]
+
+
+def test_refresh_is_not_attempted_on_every_call():
+    """Load-bearing: rclone refuses to refresh a token that has not nearly expired.
+
+    Without a cooldown, every API request inside the refresh margin would spawn
+    rclone subprocesses -- thousands of them, hours into a long crawl.
+    """
+    import datetime as dt
+
+    soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=300)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    stale = json.dumps(
+        {"dropbox": {"type": "dropbox", "token": json.dumps(
+            {"access_token": "still-valid", "expiry": soon})}}
+    )
+    refreshes, dumps = [], []
+    clock = [0.0]
+
+    def dump():
+        dumps.append(1)
+        return stale
+
+    tp = TokenProvider(
+        refresh_margin=600, refresh_cooldown=60,
+        _dump_fn=dump, _refresh_fn=lambda: refreshes.append(1),
+        _account_fn=lambda tok: {"root_info": {"root_namespace_id": "1"}},
+        _clock=lambda: clock[0],
+    )
+    for _ in range(50):
+        assert tp.access_token() == "still-valid"
+    assert len(refreshes) == 1, f"refreshed {len(refreshes)} times for 50 calls"
+    assert len(dumps) <= 2
+
+    clock[0] += 61  # past the cooldown: one more attempt is allowed
+    tp.access_token()
+    assert len(refreshes) == 2
+
+
+def test_expired_token_still_refreshes_despite_cooldown():
+    """A genuinely expired token must never be served, cooldown or not."""
+    expired = json.dumps(
+        {"dropbox": {"type": "dropbox", "token": json.dumps(
+            {"access_token": "old", "expiry": "2000-01-01T00:00:00Z"})}}
+    )
+    fresh = json.dumps(
+        {"dropbox": {"type": "dropbox", "token": json.dumps(
+            {"access_token": "new", "expiry": "2099-01-01T00:00:00Z"})}}
+    )
+    dumps = iter([expired, fresh, fresh, fresh])
+    tp = TokenProvider(
+        refresh_cooldown=1e9,
+        _dump_fn=lambda: next(dumps), _refresh_fn=lambda: None,
+        _account_fn=lambda tok: {"root_info": {"root_namespace_id": "1"}},
+    )
+    assert tp.access_token() == "new"

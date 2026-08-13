@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import threading
+import time
 
 API_BASE = "https://api.dropboxapi.com/2"
 _FRACTIONAL_SECONDS = re.compile(r"\.(\d+)")
@@ -82,13 +83,18 @@ class TokenProvider:
         self,
         remote: str = "dropbox",
         refresh_margin: int = 600,
+        refresh_cooldown: float = 60.0,
         *,
         _dump_fn=None,
         _refresh_fn=None,
         _account_fn=None,
+        _clock=None,
     ):
         self.remote = remote
         self.refresh_margin = refresh_margin
+        self.refresh_cooldown = refresh_cooldown
+        self._clock = _clock or time.monotonic
+        self._last_refresh_attempt = float("-inf")
         self._dump_fn = _dump_fn or _rclone_config_dump
         self._refresh_fn = _refresh_fn or (lambda: _rclone_force_refresh(remote))
         self._account_fn = _account_fn or _fetch_account
@@ -131,14 +137,24 @@ class TokenProvider:
             return float("-inf")  # unparseable: treat as expired so we refresh
 
     def _current_token(self) -> dict:
-        if self._token is not None and self._seconds_until_expiry(self._token) > self.refresh_margin:
-            return self._token
+        now = self._clock()
+        if self._token is not None:
+            ttl = self._seconds_until_expiry(self._token)
+            if ttl > self.refresh_margin:
+                return self._token
+            if ttl > 0 and now - self._last_refresh_attempt < self.refresh_cooldown:
+                # Inside our margin but still valid, and we asked rclone recently.
+                #
+                # This cooldown is load-bearing. rclone applies its *own* staleness
+                # rule (about ten seconds), so for the whole window between our
+                # margin and actual expiry it hands back the same token unchanged.
+                # Without the cooldown every API request would spawn three rclone
+                # subprocesses -- thousands of them, several hours into a run.
+                return self._token
 
         token = self._read_token()
         if self._seconds_until_expiry(token) <= self.refresh_margin:
-            # Ask rclone to refresh, then re-read. rclone applies its own staleness
-            # rule, so the token may come back unchanged; that is fine as long as it
-            # has not actually expired. Refreshing once per call avoids a spin loop.
+            self._last_refresh_attempt = now
             self._refresh_fn()
             token = self._read_token()
             if self._seconds_until_expiry(token) <= 0:
