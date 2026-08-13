@@ -173,3 +173,39 @@ def test_concurrent_workers_do_not_duplicate_or_lose_files(tmp_path):
         "SELECT COUNT(*) FROM (SELECT dbx_id FROM files GROUP BY dbx_id HAVING COUNT(*) > 1)"
     )[0][0]
     assert duplicates == 0
+
+
+def test_shallow_shards_split_even_when_the_queue_is_busy(tmp_path):
+    """The straggler fix: a huge subtree must not open a recursive cursor early.
+
+    Starvation-gated splitting alone never fires for shards claimed while the queue
+    is healthy -- which is exactly when the biggest subtrees get claimed.
+    """
+    tree = {"/R": [f"d{i}/" for i in range(50)]}
+    tree.update({f"/R/d{i}": ["f.txt"] for i in range(50)})
+    store, crawler = build(tmp_path, FakeLister(tree), workers=1,
+                           split_depth=6, min_split_depth=2)
+    crawler.seed("/R")
+    crawler.run()
+    modes = dict(store.query("SELECT path, mode FROM shards"))
+    assert modes["/R"] == "split", "root must split despite 50 pending shards"
+    assert store.stats()["files"] == 50
+
+
+def test_min_split_depth_zero_restores_pure_starvation_gating(tmp_path):
+    tree = {"/R": [f"d{i}/" for i in range(50)]}
+    tree.update({f"/R/d{i}": ["f.txt"] for i in range(50)})
+    store, crawler = build(tmp_path, FakeLister(tree), workers=1,
+                           split_depth=6, min_split_depth=0)
+    crawler.seed("/R")
+    crawler.run()
+    assert store.stats()["files"] == 50
+
+
+def test_min_split_depth_cannot_exceed_the_hard_bound(tmp_path):
+    store, crawler = build(tmp_path, FakeLister(TREE), workers=1,
+                           split_depth=0, min_split_depth=5)
+    crawler.seed("/R")
+    crawler.run()
+    assert store.query("SELECT COUNT(*) FROM shards")[0][0] == 1  # never split
+    assert files_in(store) == ALL_FILES

@@ -6,12 +6,24 @@ Two ideas carry the whole design.
 committed with the rows it follows, an interrupted crawl resumes exactly, losing at
 most the page in flight.
 
-*Adaptive splitting.* A fixed split depth leaves one worker grinding through a huge
-subtree while the rest idle -- in TeamSpace, `Public` alone holds 17,906 directories
-at depth 3. So a worker checks the queue when it claims a shard: if work is running
-short, it spends one API call splitting that shard into its children instead of
-listing it recursively. The choice is made *before* a cursor exists, so splitting
-never throws away work, and the queue deepens only when it is actually starving.
+*Splitting.* One worker grinding through a huge subtree while the rest idle is the
+main way this crawl wastes time -- in TeamSpace, `Public` alone holds 17,906
+directories at depth 3. A worker can therefore spend one API call splitting a shard
+into its children instead of listing it recursively. The choice is always made
+*before* a cursor exists, so splitting never throws away work.
+
+Two rules decide it, and both are needed:
+
+1. **Always split the top few levels** (`min_split_depth`). Costs a handful of
+   listings and guarantees no single top-level subtree becomes one shard.
+2. **Split deeper only when the queue is starving** (fewer than ``2 x workers``
+   pending, bounded by `split_depth`), which keeps shard creation self-limiting.
+
+Rule 2 alone is not enough, and measurement is what showed it: the queue is healthy
+early on, which is exactly when the biggest subtrees are claimed, so they open a
+recursive cursor before the gate ever opens. On /TeamSpace/Public that left the
+crawl running on 2 of 8 workers for most of its duration, and raising `split_depth`
+changed nothing at all.
 """
 
 from __future__ import annotations
@@ -53,6 +65,7 @@ class Crawler:
         limiter,
         workers: int = 8,
         split_depth: int = 6,
+        min_split_depth: int = 2,
         max_shards: int = 2_000_000,
         max_page_attempts: int = 8,
         backoff_base: float = 2.0,
@@ -63,6 +76,7 @@ class Crawler:
         self.limiter = limiter
         self.workers = max(1, int(workers))
         self.split_depth = int(split_depth)
+        self.min_split_depth = int(min_split_depth)
         self.max_shards = int(max_shards)
         self.max_page_attempts = int(max_page_attempts)
         self.backoff_base = float(backoff_base)
@@ -112,6 +126,19 @@ class Crawler:
             return False
         if self.store.shard_count() >= self.max_shards:
             return False
+
+        # Near the top of the tree, split unconditionally.
+        #
+        # Starvation-gated splitting alone has a blind spot: the queue is healthy
+        # early on, exactly when the biggest subtrees are claimed, so they open a
+        # recursive cursor and can never be split afterwards. Measured on
+        # /TeamSpace/Public, one such shard held the crawl at 2 of 8 workers for
+        # most of the run, and raising the depth bound changed nothing because the
+        # gate never opened. Breaking up the first couple of levels costs a handful
+        # of listings and removes the whole failure mode.
+        if shard.depth < min(self.min_split_depth, self.split_depth):
+            return True
+
         return self.store.pending_count() < 2 * self.workers
 
     # ---- per-shard work -------------------------------------------------
