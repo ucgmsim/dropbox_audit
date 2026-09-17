@@ -96,6 +96,17 @@ class ArchiveStore:
         the old index of it can no longer be trusted. A same-named archive in a
         different folder is untouched -- FaultSZ03_Source.tar exists in many fault
         folders and they are genuinely different archives.
+
+        Landing on the `ON CONFLICT` branch means the *same* set_hash was seen
+        again -- the live parts hash back to this archive's identity, so if this
+        row was `stale` it no longer is. That is the other half of the stale
+        story: `commit_batch`/`start_walk`/`finish` refuse to overwrite a `stale`
+        state (see their docstrings), but only `register` can be the one to lift
+        it, and only when the content actually verifies again. Both the `state`
+        and the `detail` reset are conditional on the row currently being
+        `stale`, so a merely-in-progress or already-`complete` archive being
+        re-registered (a routine re-listing of its parts) is not reset to
+        `registered` -- only a `stale` one is.
         """
         parts = list(parts)
         set_hash = ArchiveSet(parts).set_hash()
@@ -107,7 +118,9 @@ class ArchiveStore:
                                          set_hash, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(set_hash) DO UPDATE SET
-                       name=excluded.name, folder=excluded.folder, source=excluded.source""",
+                       name=excluded.name, folder=excluded.folder, source=excluded.source,
+                       state=CASE WHEN state='stale' THEN 'registered' ELSE state END,
+                       detail=CASE WHEN state='stale' THEN NULL ELSE detail END""",
                 (name, kind, source, folder, sum(p.size for p in parts), len(parts),
                  set_hash, time.time()))
             archive_id = conn.execute(
@@ -173,13 +186,22 @@ class ArchiveStore:
         another attempt on this one. Without this, a killed run's `walking`
         segments are never picked up again by `claim_segment`, and the archive can
         never finish.
+
+        A `stale` archive stays `stale`: the `CASE` guards `state` the same way
+        `commit_batch` and `finish` do, so a fingerprint check that fired while a
+        walk was in flight is not silently erased by the walk's own bookkeeping.
+        Only `register` may lift it, and only by re-verifying the content (see its
+        docstring). `started_at`/`error`/`finished_at` still get cleared normally
+        -- only the visible `state` text is protected.
         """
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             now = time.time()
             conn.execute(
-                """UPDATE archives SET state='walking', started_at=COALESCE(started_at, ?),
+                """UPDATE archives SET
+                       state=CASE WHEN state='stale' THEN 'stale' ELSE 'walking' END,
+                       started_at=COALESCE(started_at, ?),
                        error=NULL, finished_at=NULL
                    WHERE id=?""",
                 (now, archive_id))
@@ -206,6 +228,15 @@ class ArchiveStore:
         confirmed frontier, is set outright to `result.end_offset` here rather
         than the `MAX` that `mark_joined`/`reset_segment` use: a finished walk's
         own verdict on where the chain ended is authoritative.
+
+        `state` is the one protected column: a `stale` archive stays `stale` even
+        though a walk just concluded, via the same `CASE` guard `commit_batch` and
+        `start_walk` use. Every other column -- including `detail` -- is still
+        written normally (fix-round ruling: a guard that skipped the whole
+        statement would also lose the counters and timestamps), so `finish`'s own
+        `result.detail` does overwrite whatever reason `mark_stale` had recorded
+        there. The segments/members this walk produced remain on record either
+        way, for whenever `register` re-verifies the content and lifts the flag.
         """
         conn = self.connect()
         try:
@@ -214,7 +245,9 @@ class ArchiveStore:
                 "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM members WHERE archive_id=?",
                 (archive_id,)).fetchone()
             conn.execute(
-                """UPDATE archives SET state=?, end_offset=?, detail=?, n_members=?,
+                """UPDATE archives SET
+                       state=CASE WHEN state='stale' THEN 'stale' ELSE ? END,
+                       end_offset=?, detail=?, n_members=?,
                        member_bytes=?, cursor_offset=?, finished_at=?
                    WHERE id=?""",
                 (result.state, result.end_offset, result.detail, n_members, member_bytes,
@@ -345,13 +378,28 @@ class ArchiveStore:
         batch are already written to the members table, so the `ROLLBACK` below is
         actually exercised by the failure -- not merely raising before any SQL ran,
         which would pass the same assertions without proving atomicity at all.
+
+        `segments.members` is recomputed over the segment's own span *after* the
+        insert -- `COUNT(*) WHERE hdr_offset >= scan_from AND (stop_at IS NULL OR
+        hdr_offset < stop_at)` -- rather than incremented by `len(members)`. An
+        incrementing counter is exactly the kind of thing this store elsewhere
+        rejects (`stats`, `finish`): the design guarantees replays ("a restart
+        re-walks exactly that batch"), and `INSERT OR REPLACE` already makes the
+        *rows* replay-safe, so the count next to them has to be too, or resuming a
+        killed walk quietly inflates it on every single restart, not just on some
+        rare race. This is a plain range COUNT against the members primary key
+        (archive_id, hdr_offset), negligible next to the 1.6s a batch's own
+        Dropbox request costs.
+
+        `state` is guarded the same way `start_walk` and `finish` guard it: a
+        `stale` archive must not be silently un-flagged by the next worker batch
+        landing after `mark_stale` fired mid-walk.
         """
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "UPDATE segments SET cursor_offset=?, members=members+? WHERE id=?",
-                (next_offset, len(members), segment_id))
+            conn.execute("UPDATE segments SET cursor_offset=? WHERE id=?",
+                         (next_offset, segment_id))
 
             def rows():
                 for m in members:
@@ -363,7 +411,16 @@ class ArchiveStore:
                        size, type, mode, mtime, uname, gname, dir, name, linkname)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows())
             conn.execute(
-                """UPDATE archives SET state='walking',
+                """UPDATE segments SET members = (
+                       SELECT COUNT(*) FROM members
+                       WHERE members.archive_id = segments.archive_id
+                         AND members.hdr_offset >= segments.scan_from
+                         AND (segments.stop_at IS NULL OR members.hdr_offset < segments.stop_at)
+                   ) WHERE id=?""",
+                (segment_id,))
+            conn.execute(
+                """UPDATE archives SET
+                       state=CASE WHEN state='stale' THEN 'stale' ELSE 'walking' END,
                        requests=requests+?, bytes_fetched=bytes_fetched+?,
                        started_at=COALESCE(started_at, ?), updated_at=?
                    WHERE id=?""",
