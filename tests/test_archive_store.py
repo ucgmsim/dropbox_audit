@@ -329,6 +329,23 @@ def test_a_finished_stale_archive_keeps_its_stale_reason(tmp_path):
     assert row["detail"] == "fingerprint mismatch"
 
 
+def test_a_stale_archive_stays_stale_across_fail(tmp_path):
+    """Out-of-scope finding from the re-review: `fail` had the same unguarded
+    `state='error'` as `commit_batch`/`start_walk`/`finish` before their fix.
+    Reachable path this closes: stale -> fail -> 'error' -> a later `index` run
+    treats 'error' as retryable and re-walks it, mixing bytes from changed parts
+    into an old index. The error message itself still writes unconditionally --
+    knowing why a run failed is useful whatever the resulting state."""
+    store, archive_id, _ = registered(tmp_path)
+    store.mark_stale(archive_id, "fingerprint mismatch")
+
+    store.fail(archive_id, "Dropbox request failed: 503")
+
+    row = store.get("a.tar")
+    assert row["state"] == "stale"
+    assert row["error"] == "Dropbox request failed: 503"
+
+
 def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
     """The other half of Finding 1: register's ON CONFLICT branch never touched
     state, so an archive marked stale stayed stale forever even once the live parts
