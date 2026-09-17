@@ -116,6 +116,9 @@ def test_claiming_a_segment_is_exclusive(tmp_path):
     first = store.claim_segment(archive_id, "w1")
     second = store.claim_segment(archive_id, "w2")
     assert first["idx"] != second["idx"]
+    # T6-18's second requirement: the caller sees the row's *post*-claim values
+    # (state='walking', its own owner), not a stale pre-claim read.
+    assert first["state"] == "walking" and first["owner"] == "w1"
     assert store.claim_segment(archive_id, "w3") is None
 
 
@@ -157,7 +160,9 @@ def test_replacing_a_part_marks_the_old_archive_stale(tmp_path):
 
 
 def test_resetting_a_segment_drops_its_span_and_rearms_it(tmp_path):
-    """A segment whose start was wrong is reset: dropped rows, new start, re-armed."""
+    """A segment whose start was wrong is reset: dropped rows, new start, re-armed,
+    its own member count zeroed, and the archive's confirmed frontier raised to
+    match the corrected start (T6-8, T6-12)."""
     store, archive_id, _ = registered(tmp_path)
     segments = store.segments(archive_id)
     store.commit_batch(archive_id, segments[0]["id"], [member(0)], 512)
@@ -170,6 +175,8 @@ def test_resetting_a_segment_drops_its_span_and_rearms_it(tmp_path):
     row = seg(store, archive_id, segments[1]["id"])
     assert row["state"] == "pending" and row["joined"] == 1
     assert row["first_header"] == 4608 and row["cursor_offset"] is None
+    assert row["members"] == 0
+    assert store.get("a.tar")["cursor_offset"] == 4608
 
 
 def test_retiring_a_segment_drops_its_span_and_marks_it_beyond(tmp_path):
@@ -264,3 +271,71 @@ def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path)
     stats = store.stats(archive_id)
     assert stats["confirmed"] == 120
     assert stats["covered"] == 150  # 100 (seg0, whole span) + 50 (seg1, 150 - 100)
+
+
+# ---- Tests added by fix round 1 (task review Important findings 1 & 2, plus minor gaps) ----
+
+
+def test_start_walk_returns_the_confirmed_frontier_and_logs_a_run_start_event(tmp_path):
+    """Both start_walk's return value and its run_start event were untested: deleting
+    the log_event call, or returning None instead of cursor_offset, left the suite
+    green. `run_start_covered` is `covered` (segment progress), which is a different
+    number from the `confirmed` frontier `start_walk` returns -- pin both."""
+    store, archive_id, _ = registered(tmp_path)
+    seg1 = store.segments(archive_id)[1]["id"]  # span [100, 200)
+    store.set_segment_start(seg1, 140)
+    store.mark_joined(seg1)  # raises archives.cursor_offset (the confirmed frontier) to 140
+
+    returned = store.start_walk(archive_id)
+
+    assert returned == 140
+    stats = store.stats(archive_id)
+    assert stats["confirmed"] == 140
+    assert stats["run_started_at"] is not None
+    assert stats["run_start_covered"] == 40  # seg1's own covered contribution: 140 - 100
+
+
+def test_a_stale_archive_stays_stale_across_batches_and_finishing(tmp_path):
+    """Task review Finding 1: `mark_stale`'s flag must survive the very next worker
+    batch, a `start_walk` reclaim, and `finish` -- otherwise nothing ever reads it as
+    a trust signal, and the spec's "kept but flagged" promise for a stale archive is
+    hollow. Checked independently at each step so a regression in any one of the
+    three call sites is pinned by its own assertion."""
+    store, archive_id, segment_id = registered(tmp_path)
+    store.mark_stale(archive_id, "fingerprint mismatch")
+
+    store.commit_batch(archive_id, segment_id, [member(0)], 512)
+    assert store.get("a.tar")["state"] == "stale"
+
+    store.start_walk(archive_id)
+    assert store.get("a.tar")["state"] == "stale"
+
+    store.finish(archive_id, WalkResult("complete", 512, 1, ""))
+    assert store.get("a.tar")["state"] == "stale"
+
+
+def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
+    """The other half of Finding 1: register's ON CONFLICT branch never touched
+    state, so an archive marked stale stayed stale forever even once the live parts
+    hashed back to its identity again."""
+    store = new_store(tmp_path)
+    archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    store.mark_stale(archive_id, "fingerprint mismatch")
+    assert store.get("a.tar")["state"] == "stale"
+
+    again = store.register("a.tar", "tar", "/d", "dropbox", parts())
+
+    assert again == archive_id
+    row = store.get("a.tar")
+    assert row["state"] == "registered" and row["detail"] is None
+
+
+def test_replaying_a_batch_does_not_inflate_the_segment_member_count(tmp_path):
+    """Task review Finding 2: `members=members+len(...)` double-counts a replay,
+    even though the design guarantees replays ("a restart re-walks exactly that
+    batch"). Recomputing over the segment's span is what actually stays exact."""
+    store, archive_id, segment_id = registered(tmp_path)  # segment 0 spans [0, 100)
+    store.commit_batch(archive_id, segment_id, [member(0), member(10)], 512)
+    store.commit_batch(archive_id, segment_id, [member(0), member(10)], 512)  # replay
+
+    assert seg(store, archive_id, segment_id)["members"] == 2
