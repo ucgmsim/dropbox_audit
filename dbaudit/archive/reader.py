@@ -223,6 +223,10 @@ class DropboxRangeReader:
         if len(data) != length:
             raise ShortRead(f"{part.name}: asked {length} bytes at {offset}, "
                             f"got {len(data)}")
+        # The limiter takes a worker off on every 429 and puts one back only here.
+        # Without this, one 429 costs a stream for the rest of a multi-hour walk and
+        # a shared account ratchets the pool down to a single reader.
+        self.limiter.on_success()
         self.requests += 1
         self.bytes_fetched += len(data)
         return data
