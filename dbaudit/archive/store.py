@@ -268,12 +268,24 @@ class ArchiveStore:
             raise
 
     def fail(self, archive_id, error: str) -> None:
-        """Record a walk-level failure, as opposed to `fail_segment`'s one chain."""
+        """Record a walk-level failure, as opposed to `fail_segment`'s one chain.
+
+        `state` is guarded the same way `commit_batch`/`start_walk`/`finish` guard
+        it: a `stale` archive must stay `stale`, not become `error`. The reachable
+        path this closes is stale -> fail -> 'error' -> a later `index` run treats
+        `error` as retryable and re-walks it, mixing bytes from changed parts into
+        an old index -- precisely what the flag exists to prevent. `error` (the
+        message) and `finished_at` still write unconditionally: knowing why a run
+        failed is useful whatever the resulting state.
+        """
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
-                "UPDATE archives SET state='error', error=?, finished_at=? WHERE id=?",
+                """UPDATE archives SET
+                       state=CASE WHEN state='stale' THEN 'stale' ELSE 'error' END,
+                       error=?, finished_at=?
+                   WHERE id=?""",
                 (error, time.time(), archive_id))
             self.log_event(archive_id, "fail", error)
             conn.execute("COMMIT")
