@@ -167,6 +167,16 @@ class TokenProvider:
 
     # ---- public API ----------------------------------------------------
 
+    def invalidate(self) -> None:
+        """Drop the cached token after a 401, so the next call re-reads and refreshes it.
+
+        Expiry-based refreshing cannot cover a token the server has already rejected:
+        it may still look fresh here while Dropbox has stopped accepting it.
+        """
+        with self._lock:
+            self._token = None
+            self._last_refresh_attempt = float("-inf")
+
     def access_token(self) -> str:
         with self._lock:
             return self._current_token()["access_token"]
