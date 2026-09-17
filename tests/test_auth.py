@@ -179,3 +179,19 @@ def test_expired_token_still_refreshes_despite_cooldown():
         _account_fn=lambda tok: {"root_info": {"root_namespace_id": "1"}},
     )
     assert tp.access_token() == "new"
+
+
+def test_invalidate_forces_a_reread_of_the_token():
+    """After a 401 the cached token is worthless; the next call must go back to rclone."""
+    calls = []
+
+    def dump():
+        calls.append(1)
+        return json.dumps({"dropbox": {"token": json.dumps(
+            {"access_token": f"t{len(calls)}", "expiry": "2099-01-01T00:00:00Z"})}})
+
+    provider = TokenProvider(_dump_fn=dump, _refresh_fn=lambda: None)
+    assert provider.access_token() == "t1"
+    assert provider.access_token() == "t1"       # cached
+    provider.invalidate()
+    assert provider.access_token() == "t2"
