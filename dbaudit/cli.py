@@ -1,23 +1,39 @@
-"""Command line: init, run, status, index.
+"""Command line: init, run, status, index, and the `archive` group.
 
 `run` is the long-lived command. It is designed to be started under nohup, tmux or
 systemd and left alone: it takes an exclusive lock, reclaims any shards orphaned by
 a previous crash, logs progress on an interval, and on SIGINT/SIGTERM finishes the
 page in flight, commits it, and exits 0. Re-running `run` is how you resume.
+
+`archive index` is the same shape one layer down. It walks a tar's header chain over
+Dropbox byte ranges, one chain per part, and re-running it resumes from each chain's
+committed cursor. A chain that does not start at offset 0 has to scan for its first
+header, and a valid-looking header proves nothing -- a tar stored inside the tar hands
+a cold scan perfectly good ones. `_join` is what settles it: a chain is believed only
+once the chain before it walks into exactly the offset it started from.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import signal
 import socket
+import sqlite3
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from .api import HttpLister
+from .archive.parts import ArchiveSet, ArchiveSetError
+from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeReader,
+                             LocalRangeReader)
+from .archive.store import ArchiveStore
+from .archive.tarwalk import WalkResult, find_chain_start, walk
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
 from .limiter import AdaptiveLimiter
@@ -32,6 +48,16 @@ log = logging.getLogger("dbaudit")
 # ~4,600 entries/s with zero 429s; 16 started drawing them.
 DEFAULT_WORKERS = 8
 DEFAULT_RPS = 5.0
+# Chains for `archive index`. Deliberately NOT DEFAULT_WORKERS: that figure measures
+# `files/list_folder`, a different endpoint class, and conflating the two is a mistake
+# this project has already made once and corrected. The closest measured analogue for
+# scattered, latency-bound `files/download` reads is alpine_simulation_workflow commit
+# fccd755, where 8 concurrent streams ran clean. arr65 fixed this at 8 on 2026-09-18:
+# nothing here raises it or adapts it upward.
+ARCHIVE_WORKERS = 8
+# Dropbox's own content hash: SHA-256 over the concatenated SHA-256 digests of 4 MiB
+# blocks. Local archives are hashed the same way so both sources share one identity.
+DROPBOX_HASH_BLOCK = 4 << 20
 # A bound, not the primary control. Splitting is gated on the queue actually
 # starving, so it is self-limiting; the depth only needs to be deep enough to let
 # that gate act. At 2, big subtrees could not be split at all and the tail of a
@@ -451,6 +477,573 @@ def cmd_index(args) -> int:
     return 0
 
 
+# ---- archive: what is inside the tars ------------------------------------
+
+
+def _local_hash(path) -> str:
+    """Dropbox's content hash for a local file.
+
+    Computed here so a local archive and a Dropbox one land on the same identity
+    (`ArchiveSet.set_hash`): registering the parts from disk and then re-registering
+    the same parts from the folder they were uploaded to updates one row rather than
+    creating a second archive.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            block = handle.read(DROPBOX_HASH_BLOCK)
+            if not block:
+                break
+            digest.update(hashlib.sha256(block).digest())
+    return digest.hexdigest()
+
+
+def _folder_entries(lister, folder: str, name: str) -> list[dict]:
+    """Every file in `folder` whose name starts with `name`, across all pages.
+
+    The prefix is the filter, not a guess at the part naming: `ArchiveSet.from_entries`
+    is what decides whether those files actually form a gapless part sequence.
+    """
+    page = lister.list_folder(folder, recursive=False)
+    entries = [e for e in page.entries
+               if e.get(".tag") == "file" and e["name"].startswith(name)]
+    while page.has_more:
+        page = lister.continue_(page.cursor)
+        entries += [e for e in page.entries
+                    if e.get(".tag") == "file" and e["name"].startswith(name)]
+    return entries
+
+
+def _archive_set(args):
+    """Build an ArchiveSet from Dropbox or from a local directory."""
+    if args.local_dir:
+        directory = Path(args.local_dir)
+        entries = [{"name": p.name, "size": p.stat().st_size,
+                    "path_display": str(p), "id": "", "rev": "",
+                    "content_hash": _local_hash(p)}
+                   for p in sorted(directory.iterdir())
+                   # Same filter as the Dropbox branch: an unrelated file sitting in
+                   # the directory is not a part of this archive.
+                   if p.is_file() and p.name.startswith(args.name)]
+        return ArchiveSet.from_entries(entries, args.name), "local", str(directory)
+    _, lister = build_lister(args.remote)
+    return (ArchiveSet.from_entries(_folder_entries(lister, args.folder, args.name),
+                                    args.name),
+            "dropbox", args.folder)
+
+
+def _stored_archive_set(store, row) -> ArchiveSet:
+    """Rebuild the coordinate space from what `register` recorded."""
+    return ArchiveSet(store.parts_of(row["id"]))
+
+
+def _reader_for(row, archive_set, tokens=None, limiter=None):
+    """A reader per caller: a `requests.Session` is not thread-safe, so two chains
+    cannot share one.
+
+    Where a local archive's parts live is the folder recorded at registration -- `index`
+    has no `--local-dir` of its own. Task 8's `cat` builds its `ConcatFile` from this
+    helper and `_stored_archive_set`, so `cat` and `index` reach the bytes the same way.
+    """
+    if row["source"] == "local":
+        return LocalRangeReader(row["folder"], archive_set)
+    return DropboxRangeReader(archive_set, tokens, limiter)
+
+
+def _fingerprint(store, row, remote):
+    """Compare every registered part against what the folder holds right now.
+
+    Matching is by file id first and by name second: all 18 parts of v01p0_incomplete
+    moved between folders in five weeks, and an id survives that where a path does not.
+    Returns (missing, changed) part names.
+    """
+    _, lister = build_lister(remote)
+    entries = _folder_entries(lister, row["folder"], row["name"])
+    by_id = {e["id"]: e for e in entries if e.get("id")}
+    by_name = {e["name"]: e for e in entries}
+    missing, changed = [], []
+    for part in store.parts_of(row["id"]):
+        entry = by_id.get(part.dbx_id) or by_name.get(part.name)
+        if entry is None:
+            missing.append(part.name)
+        elif (entry.get("content_hash") or "") != part.content_hash:
+            changed.append(part.name)
+    return missing, changed
+
+
+def _open_archive_store(path):
+    """The archive store at `path`, or None if it holds no archive index.
+
+    `index` and `status` never create one: `register` initialises the schema, so a typo
+    in `--db` is a usage error rather than a silently created empty database.
+    """
+    if not os.path.exists(path):
+        return None
+    store = ArchiveStore(path)
+    try:
+        store.connect().execute("SELECT 1 FROM archives LIMIT 1").fetchone()
+    except sqlite3.DatabaseError:
+        # No such table, or the file is not a database at all -- both mean the same
+        # thing to a caller who mistyped --db.
+        return None
+    return store
+
+
+def cmd_archive_register(args) -> int:
+    try:
+        archive_set, source, folder = _archive_set(args)
+    except ArchiveSetError as exc:
+        # These messages already name the offending part.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except AuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:                    # a missing directory, or a failed listing
+        print(f"error: could not read {args.local_dir or args.folder}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    store = ArchiveStore(args.db)
+    store.init_schema()
+    archive_id = store.register(args.name, "tar", folder, source, archive_set.parts)
+    store.seed_segments(archive_id, archive_set.parts)
+
+    print(f"registered {args.name} from {source}")
+    print(f"  folder : {folder}")
+    print(f"  parts  : {len(archive_set.parts)}")
+    print(f"  size   : {human_bytes(archive_set.total_size)}")
+    print(f"\nnext: python -m dbaudit archive index --db {args.db} --archive {args.name}")
+    return 0
+
+
+class _Stopped(Exception):
+    """The run is over. Raised out of a commit callback so the batch is NOT written."""
+
+
+class _Run:
+    """What every chain in the pool shares.
+
+    One `TokenProvider` and one `AdaptiveLimiter` for the whole command: Dropbox limits
+    per account, and the provider caches its token behind a lock -- one per worker would
+    each shell out to rclone to refresh. Everything else (reader, window, cache) is per
+    chain, because a `requests.Session` is not thread-safe.
+    """
+
+    def __init__(self, args, store, row, archive_set, tokens, limiter, stop):
+        self.args = args
+        self.store = store
+        self.row = row
+        self.archive_id = row["id"]
+        self.archive_set = archive_set
+        self.tokens = tokens
+        self.limiter = limiter
+        self.stop = stop
+        self.lock = threading.Lock()
+        self.batches = 0
+
+    def commit(self, segment_id, members, next_offset, requests, bytes_fetched) -> None:
+        """Write one batch, or refuse to once `--max-batches` has been reached.
+
+        Refusing *before* the write is what makes `--max-batches N` mean exactly N
+        batches rather than N plus whatever was in flight. Holding the lock across the
+        write is fine: SQLite serialises writers anyway.
+        """
+        with self.lock:
+            limit = self.args.max_batches
+            if limit and self.batches >= limit:
+                raise _Stopped(f"--max-batches {limit} reached")
+            self.store.commit_batch(self.archive_id, segment_id, members, next_offset,
+                                    requests, bytes_fetched)
+            self.batches += 1
+            if limit and self.batches >= limit:
+                self.stop.set()
+
+
+def _walk_segment(run, segment) -> None:
+    """One chain: find where it starts if it has none, then walk to its boundary."""
+    args = run.args
+    reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
+    concat = ConcatFile(run.archive_set, reader, window_min=args.window_min,
+                        window_max=args.window_max)
+    spent = {"requests": 0, "bytes": 0}
+
+    def delta():
+        """What this reader has cost *since the last report*. The store adds what it is
+        given, so handing it the running total every time would compound it.
+        """
+        return (reader.requests - spent["requests"],
+                reader.bytes_fetched - spent["bytes"])
+
+    def charged():
+        spent["requests"], spent["bytes"] = reader.requests, reader.bytes_fetched
+
+    start = segment["first_header"]
+    if start is None:
+        start = find_chain_start(concat, segment["scan_from"])
+        if start is None:
+            # Not a failure in itself -- the join resets such a segment to its
+            # predecessor's exit like any other disagreement.
+            requests, fetched = delta()
+            run.store.fail_segment(segment["id"],
+                                   "no header between here and the end of the archive",
+                                   requests, fetched)
+            return
+        run.store.set_segment_start(segment["id"], start)
+    cursor = segment["cursor_offset"]
+    if cursor is None:
+        cursor = start
+
+    def commit(members, next_offset):
+        requests, fetched = delta()
+        run.commit(segment["id"], members, next_offset, requests, fetched)
+        # Only once the write went through. A refused batch leaves its reads
+        # uncharged -- a bounded undercount on an interrupted run, and the bytes it
+        # covers are not in the index either.
+        charged()
+
+    result = walk(concat, cursor, commit, batch_size=args.batch,
+                  stop_at=segment["stop_at"], should_stop=run.stop.is_set)
+    if result.state == "stopped":
+        # Back to pending with its committed cursor; the next run picks it up there.
+        run.store.release_segment(segment["id"])
+        return
+    # The cost that lands after the last batch -- the terminator probe, or a scan that
+    # found nothing -- would otherwise never be counted.
+    requests, fetched = delta()
+    run.store.finish_segment(segment["id"], result, requests, fetched)
+
+
+def _worker(run) -> None:
+    """Claim segments until there are none left, or until the run is stopping."""
+    owner = f"{os.getpid()}:{threading.get_ident()}"
+    try:
+        while not run.stop.is_set():
+            segment = run.store.claim_segment(run.archive_id, owner)
+            if segment is None:
+                return
+            try:
+                _walk_segment(run, segment)
+            except _Stopped:
+                run.store.release_segment(segment["id"])
+                return
+            except Exception as exc:
+                # One bad part must not kill the run: record it and take the next.
+                log.warning("segment %d failed: %s: %s", segment["idx"],
+                            type(exc).__name__, exc)
+                run.store.fail_segment(segment["id"], f"{type(exc).__name__}: {exc}")
+    except Exception:
+        log.exception("worker stopping after an unexpected failure")
+    finally:
+        run.store.close()          # this thread's own connection
+
+
+_OUTCOME, _REPAIRED, _BLOCKED = "outcome", "repaired", "blocked"
+
+
+def _join(store, archive_id):
+    """Confirm each chain's start against its predecessor's exit; repair what disagrees.
+
+    Walk from segment 0, which is joined by construction: a tar begins at offset 0, so
+    it needs no scan and no confirmation. After that a segment is believed only once the
+    chain before it walks into *exactly* the offset it started from. Equality is
+    stronger than the spec's "an offset that chain visited", and deliberately so: a tar
+    stored inside the tar hands a cold scan perfectly valid headers, and equality is the
+    only thing that tells the two apart. At worst it re-walks a chain that had resynced
+    on its own; it never accepts a false one.
+
+    Returns ("repaired", idx) after the first repair -- that segment is pending again,
+    so the caller runs the pool and joins again -- or ("outcome", WalkResult) once the
+    chain reaches a verdict, or ("blocked", segment) while some chain has none yet.
+
+    Run with no workers running, so nothing else is writing these rows.
+    """
+    segments = store.segments(archive_id)
+    index = 0
+    while True:
+        segment = segments[index]
+        if segment["state"] == "crossed":
+            # A chain only crosses at its own stop_at, and the last segment has none,
+            # so a crossed segment always has a successor.
+            following = segments[index + 1]
+            if following["first_header"] == segment["exit_offset"]:
+                if not following["joined"]:
+                    store.mark_joined(following["id"])
+                index += 1
+                continue
+            # Disagreement, or a chain that found no header at all. reset_segment drops
+            # that segment's rows and re-arms it from the offset handed down, atomically.
+            store.reset_segment(following["id"], segment["exit_offset"])
+            store.log_event(archive_id, "repair",
+                            f"segment {following['idx']} restarted at "
+                            f"{segment['exit_offset']}")
+            return _REPAIRED, following["idx"]
+        if segment["state"] in ("complete", "truncated", "corrupt"):
+            # The outcome is the *ending* segment's, not the last segment's: a tar's
+            # terminator is usually not in its last part. Everything after it was never
+            # on the chain, so its rows go.
+            for later in segments[index + 1:]:
+                if later["state"] != "beyond":
+                    store.retire_segment(later["id"])
+            # `members` is unused: `finish` recounts the rows it actually has.
+            return _OUTCOME, WalkResult(segment["state"], segment["exit_offset"], 0,
+                                        segment["detail"] or "")
+        return _BLOCKED, segment        # pending | walking | error: no verdict yet
+
+
+def cmd_archive_index(args) -> int:
+    setup_logging(args.verbose)
+    store = _open_archive_store(args.db)
+    if store is None:
+        print(f"error: {args.db} holds no registered archives; "
+              f"run `archive register` first", file=sys.stderr)
+        return 2
+    row = store.get(args.archive)
+    if row is None:
+        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
+        return 2
+
+    # Re-running `index` is how a walk resumes, so resuming a finished one reads
+    # nothing and writes nothing.
+    if row["state"] == "complete":
+        print(f"{row['name']}: complete ({row['n_members']:,} members)")
+        return 0
+    if row["state"] in ("truncated", "corrupt"):
+        print(f"error: {row['name']} is {row['state']}: {row['detail'] or ''}",
+              file=sys.stderr)
+        return 1
+    if row["state"] == "stale":
+        print(f"error: {row['name']} is stale ({row['detail'] or ''}); re-register it "
+              f"to index the parts as they are now", file=sys.stderr)
+        return 1
+
+    try:
+        lock = InstanceLock(args.lock or f"{args.db}.lock")
+        lock.__enter__()
+    except LockHeld as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    try:
+        return _run_index(args, store, row)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _run_index(args, store, row) -> int:
+    archive_id = row["id"]
+    archive_set = _stored_archive_set(store, row)
+    dropbox = row["source"] == "dropbox"
+
+    # A before/after fingerprint of every part, as the spec requires. Local archives
+    # are not fingerprinted: there is no cheap hash to ask for, and re-hashing 5 TiB
+    # would cost far more than the walk it is meant to protect.
+    if dropbox:
+        try:
+            missing, changed = _fingerprint(store, row, args.remote)
+        except AuthError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:
+            print(f"error: could not list {row['folder']}: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 1
+        if missing:
+            detail = (f"{len(missing)} part(s) missing from {row['folder']}: "
+                      f"{', '.join(missing[:5])}")
+            store.fail(archive_id, detail)
+            print(f"error: {detail}\n       re-register the archive with its new "
+                  f"--folder", file=sys.stderr)
+            return 1
+        if changed:
+            detail = (f"{len(changed)} part(s) changed since registration: "
+                      f"{', '.join(changed[:5])}")
+            store.mark_stale(archive_id, detail)
+            print(f"error: {detail}\n       the stored offsets describe bytes that are "
+                  f"no longer there; re-register to walk it again", file=sys.stderr)
+            return 1
+
+    workers = max(args.workers, 1)
+    tokens = limiter = None
+    if dropbox:
+        # One provider and one limiter for the whole command: Dropbox limits per
+        # account, and the provider caches its token behind a lock.
+        tokens = TokenProvider(remote=args.remote)
+        limiter = AdaptiveLimiter(rps=args.rps, max_concurrency=workers)
+
+    store.start_walk(archive_id)
+    stop = threading.Event()
+    hard = {"count": 0}
+
+    def handle(signum, frame):
+        hard["count"] += 1
+        if hard["count"] == 1:
+            # Flag first, then log: the log line is then proof the walk is already
+            # winding down rather than a promise that it is about to.
+            stop.set()
+            log.warning("signal %d: committing the batch in flight, then exiting", signum)
+        else:
+            log.warning("second signal: exiting immediately")
+            os._exit(1)
+
+    # Unlike `run`, these are put back: the tests call main() in-process and must not
+    # be left with pytest's SIGINT handling replaced.
+    previous = {}
+    run = _Run(args, store, row, archive_set, tokens, limiter, stop)
+    started = time.time()
+    outcome = blocked = None
+    exhausted = False
+    log.info("walking %s (%d parts, %s) with %d chains",
+             row["name"], row["n_parts"], human_bytes(row["total_size"]), workers)
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, handle)
+        # Each repair advances the confirmed frontier by at least one segment, so this
+        # is bounded by the segment count; in the worst case it degrades to a
+        # sequential walk. The bound is asserted rather than assumed.
+        for _round in range(len(store.segments(archive_id)) + 2):
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for future in [pool.submit(_worker, run) for _ in range(workers)]:
+                    future.result()
+            kind, payload = _join(store, archive_id)
+            if kind == _OUTCOME:
+                outcome = payload
+                break
+            if kind == _BLOCKED:
+                blocked = payload
+                break
+            log.info("segment %d did not meet the chain before it; re-walking it",
+                     payload)
+            if stop.is_set():
+                break
+        else:
+            # Unreachable by construction; if it ever happens it is a bug, not a stop.
+            exhausted = True
+            log.error("giving up after too many join rounds; see `archive status`")
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+    stale = None
+    if dropbox:
+        try:
+            missing, changed = _fingerprint(store, row, args.remote)
+        except Exception as exc:
+            log.warning("could not re-list %s to fingerprint it: %s: %s",
+                        row["folder"], type(exc).__name__, exc)
+        else:
+            if missing or changed:
+                stale = (f"parts changed while the walk ran: "
+                         f"{', '.join((missing + changed)[:5])}")
+                # Before the outcome is written: `finish` defends this flag and its
+                # reason, so the walk's own bookkeeping cannot erase it.
+                store.mark_stale(archive_id, stale)
+
+    if outcome is not None:
+        store.finish(archive_id, outcome)
+        store.build_indexes(archive_id)        # only once a walk is over, never during
+    elif blocked is not None and blocked["state"] == "error":
+        store.fail(archive_id, f"segment {blocked['idx']}: {blocked['error'] or 'failed'}")
+
+    stats = store.stats(archive_id)
+    rate_limited = limiter.rate_limit_events if limiter else 0
+    store.log_event(archive_id, "rate_limited", str(rate_limited))
+    ratio = (stats["bytes_fetched"] / stats["member_bytes"]) if stats["member_bytes"] else 0.0
+    print(f"{row['name']}: {stats['state']}")
+    print(f"  members       : {stats['n_members']:,} "
+          f"({human_bytes(stats['member_bytes'])} of member data)")
+    print(f"  requests      : {stats['requests']:,}")
+    print(f"  bytes fetched : {human_bytes(stats['bytes_fetched'])}")
+    print(f"  ratio         : {ratio:.3f} bytes fetched per member byte")
+    print(f"  429s          : {rate_limited}")
+    print(f"  elapsed       : {human_duration(time.time() - started)}")
+
+    if stale is not None:
+        print(f"error: {stale}; the members found are kept, but re-register before "
+              f"trusting them", file=sys.stderr)
+        return 1
+    if outcome is not None:
+        if outcome.state == "complete":
+            return 0
+        print(f"error: {row['name']} is {outcome.state}: {outcome.detail}",
+              file=sys.stderr)
+        return 1
+    if blocked is not None and blocked["state"] == "error":
+        print(f"error: segment {blocked['idx']}: {blocked['error']}", file=sys.stderr)
+        return 1
+    if exhausted:
+        print(f"error: {row['name']} did not settle; see `archive status`",
+              file=sys.stderr)
+        return 1
+    log.info("stopped before the chain reached a verdict; re-run to resume")
+    return 0
+
+
+def _print_archive_status(store, row) -> None:
+    stats = store.stats(row["id"])
+    total = stats["total_size"] or 1
+    ratio = (stats["bytes_fetched"] / stats["member_bytes"]) if stats["member_bytes"] else 0.0
+    print(f"{row['name']}  [{stats['state']}]")
+    print(f"  parts         : {row['n_parts']} ({human_bytes(stats['total_size'])})")
+    print(f"  members       : {stats['n_members']:,} "
+          f"({human_bytes(stats['member_bytes'])} of member data)")
+    print(f"  covered       : {human_bytes(stats['covered'])} "
+          f"({100.0 * stats['covered'] / total:.1f}%)")
+    print(f"  confirmed to  : {stats['confirmed']:,}")
+    print(f"  requests      : {stats['requests']:,}")
+    print(f"  bytes fetched : {human_bytes(stats['bytes_fetched'])}")
+    print(f"  ratio         : {ratio:.3f} bytes fetched per member byte")
+    if stats["state"] == "walking":
+        # On a multi-hour walk this is the only view of progress there is.
+        elapsed = (stats["updated_at"] or 0) - (stats["run_started_at"] or 0)
+        gained = stats["covered"] - (stats["run_start_covered"] or 0)
+        if elapsed > 0 and gained > 0:
+            rate = gained / elapsed
+            print(f"  rate          : {human_bytes(rate)}/s this run")
+            print(f"  eta           : "
+                  f"{human_duration((stats['total_size'] - stats['covered']) / rate)}")
+    print("  segments:")
+    for segment in store.segments(row["id"]):
+        span_end = segment["stop_at"]
+        if span_end is None:
+            span_end = stats["total_size"]
+        span = max(span_end - segment["scan_from"], 1)
+        cursor = segment["cursor_offset"]
+        if cursor is None:
+            progress = "-"
+        else:
+            done = min(max(cursor - segment["scan_from"], 0), span)
+            progress = f"{100.0 * done / span:.0f}%"
+        first = segment["first_header"]
+        note = (segment["error"] or segment["detail"] or "")[:60]
+        print((f"    [{segment['idx']:2d}] {segment['state']:<9}"
+               f" {'joined' if segment['joined'] else '      '}"
+               f"  first={'-' if first is None else first:>12}"
+               f"  cursor {progress:>5}"
+               f"  members={segment['members']:<7}{note}").rstrip())
+
+
+def cmd_archive_status(args) -> int:
+    store = _open_archive_store(args.db)
+    if store is None:
+        print(f"error: {args.db} holds no registered archives", file=sys.stderr)
+        return 2
+    if args.archive:
+        row = store.get(args.archive)
+        if row is None:
+            print(f"error: no archive named {args.archive!r} in {args.db}",
+                  file=sys.stderr)
+            return 2
+        rows = [row]
+    else:
+        rows = store.connect().execute("SELECT * FROM archives ORDER BY id").fetchall()
+    if not rows:
+        print(f"{args.db}: no archives registered yet")
+        return 0
+    for row in rows:
+        _print_archive_status(store, row)
+    return 0
+
+
 # ---- argument parsing ---------------------------------------------------
 
 
@@ -514,6 +1107,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_index = sub.add_parser("index", help="build analysis indexes")
     p_index.add_argument("--db", required=True)
     p_index.set_defaults(func=cmd_index)
+
+    p_archive = sub.add_parser("archive", help="index what is inside tar archives")
+    asub = p_archive.add_subparsers(dest="archive_cmd", required=True)
+
+    p_reg = asub.add_parser("register", help="record an archive, its parts and its segments")
+    p_reg.add_argument("--db", required=True)
+    p_reg.add_argument("--name", required=True, help="the archive's own name, e.g. big.tar")
+    where = p_reg.add_mutually_exclusive_group(required=True)
+    where.add_argument("--folder", help="Dropbox folder holding the parts")
+    where.add_argument("--local-dir", help="local directory holding the parts")
+    p_reg.add_argument("--remote", default="dropbox")
+    p_reg.set_defaults(func=cmd_archive_register)
+
+    p_idx = asub.add_parser("index", help="walk the header chains; safe to interrupt and re-run")
+    p_idx.add_argument("--db", required=True)
+    p_idx.add_argument("--archive", required=True)
+    p_idx.add_argument("--remote", default="dropbox")
+    p_idx.add_argument("--workers", type=int, default=ARCHIVE_WORKERS)
+    p_idx.add_argument("--rps", type=float, default=DEFAULT_RPS)
+    # Measured in Task 1: a request costs 1.60 s + 0.044 s/MiB, so the cap is generous
+    # and the floor is small because it is paid on every jump.
+    p_idx.add_argument("--window-min", type=int, default=WINDOW_MIN)
+    p_idx.add_argument("--window-max", type=int, default=WINDOW_MAX)
+    p_idx.add_argument("--batch", type=int, default=2000)
+    p_idx.add_argument("--max-batches", type=int, default=0, help="stop early; 0 means no limit")
+    p_idx.add_argument("--lock")
+    p_idx.set_defaults(func=cmd_archive_index)
+
+    p_ast = asub.add_parser("status", help="show archive indexing progress")
+    p_ast.add_argument("--db", required=True)
+    p_ast.add_argument("--archive")
+    p_ast.set_defaults(func=cmd_archive_status)
 
     return parser
 
