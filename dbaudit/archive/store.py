@@ -229,14 +229,21 @@ class ArchiveStore:
         than the `MAX` that `mark_joined`/`reset_segment` use: a finished walk's
         own verdict on where the chain ended is authoritative.
 
-        `state` is the one protected column: a `stale` archive stays `stale` even
-        though a walk just concluded, via the same `CASE` guard `commit_batch` and
-        `start_walk` use. Every other column -- including `detail` -- is still
-        written normally (fix-round ruling: a guard that skipped the whole
-        statement would also lose the counters and timestamps), so `finish`'s own
-        `result.detail` does overwrite whatever reason `mark_stale` had recorded
-        there. The segments/members this walk produced remain on record either
-        way, for whenever `register` re-verifies the content and lifts the flag.
+        `state` and `detail` are the two protected columns: a `stale` archive
+        stays `stale`, and keeps its stale reason, even though a walk just
+        concluded -- both guarded by the same `CASE WHEN state='stale' THEN
+        <keep the old value> ELSE <the walk's own> END` pattern (fix-round
+        amendment: a flag the next write silently erases is not a flag, and the
+        same argument applies to the reason behind it). Every other column
+        (`end_offset`, `n_members`, `member_bytes`, `finished_at`,
+        `cursor_offset`) is still written unconditionally -- a guard that skipped
+        the whole statement would lose those too. `result.detail`, the walk's own
+        outcome, is not lost when the guard fires: it is already on the segment
+        that produced it (`segments.detail`), and the `log_event` call below
+        records it a second time, so it stays recoverable from two places. The
+        stale reason would have been recoverable from none once overwritten here,
+        and it is the more urgent fact anyway -- it says the index may not
+        describe the bytes that are there now.
         """
         conn = self.connect()
         try:
@@ -247,7 +254,9 @@ class ArchiveStore:
             conn.execute(
                 """UPDATE archives SET
                        state=CASE WHEN state='stale' THEN 'stale' ELSE ? END,
-                       end_offset=?, detail=?, n_members=?,
+                       end_offset=?,
+                       detail=CASE WHEN state='stale' THEN detail ELSE ? END,
+                       n_members=?,
                        member_bytes=?, cursor_offset=?, finished_at=?
                    WHERE id=?""",
                 (result.state, result.end_offset, result.detail, n_members, member_bytes,

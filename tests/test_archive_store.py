@@ -314,6 +314,21 @@ def test_a_stale_archive_stays_stale_across_batches_and_finishing(tmp_path):
     assert store.get("a.tar")["state"] == "stale"
 
 
+def test_a_finished_stale_archive_keeps_its_stale_reason(tmp_path):
+    """Ruling amendment to Finding 1: a flag the next write silently erases is not
+    a flag, and the same argument applies to the reason behind it -- so `finish`
+    must guard `detail` the same way it guards `state`. The walk's own outcome is
+    not lost even so: it stays on `segments.detail` and in the `finish` event."""
+    store, archive_id, segment_id = registered(tmp_path)
+    store.mark_stale(archive_id, "fingerprint mismatch")
+
+    store.finish(archive_id, WalkResult("corrupt", 512, 1, "bad header at 512"))
+
+    row = store.get("a.tar")
+    assert row["state"] == "stale"
+    assert row["detail"] == "fingerprint mismatch"
+
+
 def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
     """The other half of Finding 1: register's ON CONFLICT branch never touched
     state, so an archive marked stale stayed stale forever even once the live parts
