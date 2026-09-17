@@ -1,0 +1,266 @@
+import pytest
+
+from dbaudit.archive.parts import Part
+from dbaudit.archive.store import ArchiveStore
+from dbaudit.archive.tarwalk import Member, WalkResult
+
+
+def parts(count=2, content="ab"):
+    return [Part(idx=i, name=f"a.tar.a{chr(ord('a') + i)}", size=100, offset=100 * i,
+                 path_display=f"/d/a.tar.a{chr(ord('a') + i)}", dbx_id=f"id:{i}",
+                 rev="r", content_hash=content * 32) for i in range(count)]
+
+
+def member(offset, name="f.bin", size=10):
+    return Member(hdr_offset=offset, data_offset=offset + 512, size=size, type="0",
+                  mode=0o644, mtime=1, uname="user", gname="proj00001",
+                  dir="run", name=name, linkname="")
+
+
+def new_store(tmp_path):
+    store = ArchiveStore(tmp_path / "archives.db")
+    store.init_schema()
+    return store
+
+
+def registered(tmp_path, count=2):
+    """A store with one archive, its parts and its segments. Returns the first segment id."""
+    store = new_store(tmp_path)
+    archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts(count))
+    store.seed_segments(archive_id, parts(count))
+    return store, archive_id, store.segments(archive_id)[0]["id"]
+
+
+def seg(store, archive_id, segment_id):
+    """The current row for one segment, found by id rather than assumed list position."""
+    return next(s for s in store.segments(archive_id) if s["id"] == segment_id)
+
+
+def test_registering_twice_is_the_same_archive(tmp_path):
+    store = new_store(tmp_path)
+    first = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    second = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    assert first == second
+
+
+def test_re_registering_moved_parts_updates_their_paths(tmp_path):
+    """The parts of v01p0_incomplete moved folders; the index must follow them."""
+    store = new_store(tmp_path)
+    archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    moved = [Part(**{**p.__dict__, "path_display": f"/new{p.path_display}"})
+             for p in parts()]
+    assert store.register("a.tar", "tar", "/new/d", "dropbox", moved) == archive_id
+    assert store.parts_of(archive_id)[0].path_display.startswith("/new")
+
+
+def test_different_content_is_a_different_archive(tmp_path):
+    store = new_store(tmp_path)
+    first = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    second = store.register("a.tar", "tar", "/d", "dropbox", parts(content="cd"))
+    assert first != second
+
+
+def test_a_batch_writes_members_and_the_cursor_together(tmp_path):
+    store, archive_id, segment_id = registered(tmp_path)
+    store.commit_batch(archive_id, segment_id, [member(0), member(1024)], 2048,
+                       requests=3, bytes_fetched=4096)
+    assert store.stats(archive_id)["n_members"] == 2
+    assert store.segments(archive_id)[0]["cursor_offset"] == 2048
+    assert store.get("a.tar")["requests"] == 3
+
+
+def test_a_failed_batch_leaves_neither_rows_nor_cursor(tmp_path):
+    store, archive_id, segment_id = registered(tmp_path)
+    bad = Member(1024, 1536, "not-an-int", "0", 0, 0, "", "", "run", "b.bin", "")
+    with pytest.raises(ValueError):
+        store.commit_batch(archive_id, segment_id, [member(0), bad], 2048)
+    assert store.stats(archive_id)["n_members"] == 0
+    assert store.segments(archive_id)[0]["cursor_offset"] is None
+
+
+def test_replaying_a_batch_does_not_duplicate(tmp_path):
+    store, archive_id, segment_id = registered(tmp_path)
+    store.commit_batch(archive_id, segment_id, [member(0), member(1024)], 2048)
+    store.commit_batch(archive_id, segment_id, [member(0), member(1024)], 2048)
+    assert store.stats(archive_id)["n_members"] == 2
+
+
+def test_finishing_records_the_outcome(tmp_path):
+    store, archive_id, segment_id = registered(tmp_path)
+    store.commit_batch(archive_id, segment_id, [member(0)], 1024)
+    store.finish(archive_id, WalkResult("complete", 1024, 1, ""))
+    row = store.get("a.tar")
+    assert row["state"] == "complete" and row["end_offset"] == 1024
+    assert row["finished_at"] is not None
+
+
+def test_find_members_returns_every_match(tmp_path):
+    """A tar may hold the same path twice; cat must not guess between them."""
+    store, archive_id, segment_id = registered(tmp_path)
+    store.commit_batch(archive_id, segment_id, [member(0), member(4096)], 8192)
+    assert len(store.find_members(archive_id, "run/f.bin")) == 2
+
+
+def test_seeding_creates_one_segment_per_part(tmp_path):
+    store, archive_id, _ = registered(tmp_path, count=3)
+    segments = store.segments(archive_id)
+    assert [s["scan_from"] for s in segments] == [0, 100, 200]
+    assert [s["stop_at"] for s in segments] == [100, 200, None]
+    # Segment 0 needs no scan and no confirmation: offset 0 is where a tar begins.
+    assert segments[0]["first_header"] == 0 and segments[0]["joined"] == 1
+    assert segments[1]["first_header"] is None and segments[1]["joined"] == 0
+
+
+def test_claiming_a_segment_is_exclusive(tmp_path):
+    store, archive_id, _ = registered(tmp_path)
+    first = store.claim_segment(archive_id, "w1")
+    second = store.claim_segment(archive_id, "w2")
+    assert first["idx"] != second["idx"]
+    assert store.claim_segment(archive_id, "w3") is None
+
+
+def test_repairing_a_segment_drops_only_its_own_members(tmp_path):
+    """A segment whose start was wrong must leave nothing behind when it is re-walked."""
+    store, archive_id, _ = registered(tmp_path)
+    segments = store.segments(archive_id)
+    store.commit_batch(archive_id, segments[0]["id"], [member(0)], 512)
+    store.commit_batch(archive_id, segments[1]["id"], [member(4096), member(8192)], 8704)
+    store.drop_members_between(archive_id, 4096, 8704)
+    remaining = [r["hdr_offset"] for r in store.query_members(archive_id)]
+    assert remaining == [0]
+
+
+# ---- Tests added by task-6-rulings.md (T6-3, T6-5, T6-8, T6-9, T6-10, T6-11, T6-13, T6-16) ----
+
+
+def test_replacing_a_part_marks_the_old_archive_stale(tmp_path):
+    """Same name, same folder, different content: the old index of that path is stale.
+
+    A same-named archive in a *different* folder is a different archive
+    (FaultSZ03_Source.tar exists in many fault folders) and must be left alone.
+    """
+    store = new_store(tmp_path)
+    first = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    elsewhere = store.register("a.tar", "tar", "/other", "dropbox", parts(content="ef"))
+    second = store.register("a.tar", "tar", "/d", "dropbox", parts(content="cd"))
+
+    assert store.get("a.tar")["id"] == second
+
+    first_row = store.connect().execute(
+        "SELECT state, detail FROM archives WHERE id=?", (first,)).fetchone()
+    assert first_row["state"] == "stale"
+    assert str(second) in first_row["detail"]
+
+    elsewhere_row = store.connect().execute(
+        "SELECT state FROM archives WHERE id=?", (elsewhere,)).fetchone()
+    assert elsewhere_row["state"] != "stale"
+
+
+def test_resetting_a_segment_drops_its_span_and_rearms_it(tmp_path):
+    """A segment whose start was wrong is reset: dropped rows, new start, re-armed."""
+    store, archive_id, _ = registered(tmp_path)
+    segments = store.segments(archive_id)
+    store.commit_batch(archive_id, segments[0]["id"], [member(0)], 512)
+    store.commit_batch(archive_id, segments[1]["id"], [member(4096), member(8192)], 8704)
+
+    store.reset_segment(segments[1]["id"], 4608)
+
+    remaining = [r["hdr_offset"] for r in store.query_members(archive_id)]
+    assert remaining == [0]  # segment 0's row is untouched
+    row = seg(store, archive_id, segments[1]["id"])
+    assert row["state"] == "pending" and row["joined"] == 1
+    assert row["first_header"] == 4608 and row["cursor_offset"] is None
+
+
+def test_retiring_a_segment_drops_its_span_and_marks_it_beyond(tmp_path):
+    """A segment lying entirely past where the chain ended has nothing to contribute."""
+    store, archive_id, _ = registered(tmp_path)
+    segments = store.segments(archive_id)
+    store.commit_batch(archive_id, segments[0]["id"], [member(0)], 512)
+    store.commit_batch(archive_id, segments[1]["id"], [member(4096)], 4608)
+
+    store.retire_segment(segments[1]["id"])
+
+    remaining = [r["hdr_offset"] for r in store.query_members(archive_id)]
+    assert remaining == [0]
+    row = seg(store, archive_id, segments[1]["id"])
+    assert row["state"] == "beyond" and row["members"] == 0 and row["joined"] == 0
+
+
+def test_releasing_a_segment_returns_it_to_pending_with_cursor_intact(tmp_path):
+    """A walk stopped early (Ctrl-C, --max-batches) must resume, not rescan."""
+    store, archive_id, _ = registered(tmp_path)
+    claimed = store.claim_segment(archive_id, "w1")
+    store.commit_batch(archive_id, claimed["id"], [member(0)], 512)
+
+    store.release_segment(claimed["id"])
+
+    row = seg(store, archive_id, claimed["id"])
+    assert row["state"] == "pending" and row["cursor_offset"] == 512
+    again = store.claim_segment(archive_id, "w2")
+    assert again["id"] == claimed["id"]
+
+
+def test_start_walk_reclaims_walking_and_error_segments(tmp_path):
+    """A killed run's segments must come back, or `index` can never finish."""
+    store, archive_id, _ = registered(tmp_path)
+    walking = store.claim_segment(archive_id, "w1")
+    store.commit_batch(archive_id, walking["id"], [member(0)], 512)   # then the process died
+    errored = store.claim_segment(archive_id, "w2")   # the only segment left pending
+    store.fail_segment(errored["id"], "boom")
+
+    store.start_walk(archive_id)
+
+    assert seg(store, archive_id, walking["id"])["state"] == "pending"
+    assert seg(store, archive_id, walking["id"])["cursor_offset"] == 512
+    assert seg(store, archive_id, errored["id"])["state"] == "pending"
+    assert store.get("a.tar")["state"] == "walking"
+    assert store.claim_segment(archive_id, "w3") is not None
+    assert store.claim_segment(archive_id, "w4") is not None
+    assert store.claim_segment(archive_id, "w5") is None
+
+
+def test_finish_segment_and_fail_segment_add_their_cost_to_the_archive(tmp_path):
+    """Reads made after the last batch must still count toward bytes_fetched."""
+    store, archive_id, segment_id = registered(tmp_path)
+    other = store.segments(archive_id)[1]["id"]
+
+    store.finish_segment(segment_id, WalkResult("complete", 100, 0, ""),
+                         requests=2, bytes_fetched=1024)
+    store.fail_segment(other, "boom", requests=3, bytes_fetched=2048)
+
+    row = store.get("a.tar")
+    assert row["requests"] == 5
+    assert row["bytes_fetched"] == 3072
+
+
+def test_seeding_twice_does_not_duplicate_or_disturb_a_walking_segment(tmp_path):
+    """Re-registering an archive must never disturb a walk already in progress."""
+    store, archive_id, _ = registered(tmp_path)
+    claimed = store.claim_segment(archive_id, "w1")
+    store.commit_batch(archive_id, claimed["id"], [member(0)], 512)
+
+    store.seed_segments(archive_id, parts())
+
+    segments = store.segments(archive_id)
+    assert len(segments) == 2
+    row = seg(store, archive_id, claimed["id"])
+    assert row["state"] == "walking" and row["cursor_offset"] == 512
+
+
+def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path):
+    """One finished segment, one mid-cursor, one untouched."""
+    store, archive_id, _ = registered(tmp_path, count=3)
+    segments = store.segments(archive_id)
+    seg0, seg1 = segments[0]["id"], segments[1]["id"]
+
+    store.finish_segment(seg0, WalkResult("complete", 100, 1, ""))   # whole span: [0, 100)
+
+    store.set_segment_start(seg1, 120)
+    store.mark_joined(seg1)                       # confirms the frontier up to 120
+    store.commit_batch(archive_id, seg1, [], 150)  # mid-walk: cursor advanced to 150
+    # segments[2] (scan_from=200, stop_at=None) is left untouched.
+
+    stats = store.stats(archive_id)
+    assert stats["confirmed"] == 120
+    assert stats["covered"] == 150  # 100 (seg0, whole span) + 50 (seg1, 150 - 100)
