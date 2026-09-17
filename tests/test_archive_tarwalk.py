@@ -109,6 +109,22 @@ def test_a_corrupt_header_is_not_mistaken_for_the_end(tmp_path):
     assert "ff" * 8 in result.detail
 
 
+def test_a_corrupt_second_terminator_block_is_not_hidden_by_a_truncated_probe(tmp_path):
+    """Ruling D: the whole 1024-byte probe belongs in the detail, not a 64-byte
+    prefix. The test above corrupts the first 8 bytes of the probe, which a 64-byte
+    prefix would also catch -- it doesn't discriminate the fix. A corruption sitting
+    in the *second* terminator block, behind a first block that looks like a valid
+    zero start of a terminator, is the case a truncated prefix hides completely."""
+    data = bytearray(build_tar(MEMBERS))
+    end = sum(512 + (-(-len(payload) // 512) * 512) for _, payload in MEMBERS)
+    assert data[end:end + 1024] == b"\x00" * 1024        # build_tar's own terminator
+    data[end + 512:end + 520] = b"\xff" * 8              # corrupt only the second block
+    seen, _, result = collect(tmp_path, bytes(data))
+    assert result.state == "corrupt"
+    assert result.end_offset == end
+    assert "ff" * 8 in result.detail
+
+
 def test_a_corrupt_first_block_commits_once_and_reports_corrupt(tmp_path):
     """tarfile.open() itself raises when the very first header is invalid (offset 0
     is special-cased inside tarfile.next()). That path must still commit -- Task 7
