@@ -16,6 +16,7 @@ once the chain before it walks into exactly the offset it started from.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import logging
 import os
@@ -23,6 +24,7 @@ import signal
 import socket
 import sqlite3
 import sys
+import tarfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +33,7 @@ from pathlib import Path
 from .api import HttpLister
 from .archive.parts import ArchiveSet, ArchiveSetError
 from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeReader,
-                             LocalRangeReader)
+                             LocalRangeReader, ReaderError)
 from .archive.store import ArchiveStore
 from .archive.tarwalk import WalkResult, find_chain_start, walk
 from .auth import AuthError, TokenProvider
@@ -58,6 +60,23 @@ ARCHIVE_WORKERS = 8
 # Dropbox's own content hash: SHA-256 over the concatenated SHA-256 digests of 4 MiB
 # blocks. Local archives are hashed the same way so both sources share one identity.
 DROPBOX_HASH_BLOCK = 4 << 20
+# `archive cat` (Task 8) already knows the member's exact data_offset and size from the
+# index, so it reads through a pass-through ConcatFile window (window_min=window_max=1)
+# instead of the walker's adaptive one, and chunks its own reads at this size. 16 MiB is
+# the measured point where transfer starts to dominate the 1.60 s round trip, and it is
+# already this codebase's window ceiling (WINDOW_MAX) for a single read -- so an EMOD3D
+# output file costs 2 requests, anything under 16 MiB costs 1, and a small file like
+# root_params.yaml is one small read rather than a padded minimum.
+CAT_CHUNK = 16 << 20
+# The file types `cat` will extract, decoded the same way Member.from_tarinfo
+# (tarwalk.py) decodes them -- a single header byte through decode("ascii", "replace").
+# Mirrors tarfile.REGULAR_TYPES minus GNUTYPE_SPARSE: a sparse member's data region is
+# not a plain byte range (it interleaves a sparse map with the real data), so reading
+# [data_offset, data_offset + size) for one would not reconstruct the file's bytes --
+# excluding it is a correctness fix, not a narrowing for its own sake.
+REGULAR_MEMBER_TYPES = frozenset(
+    b.decode("ascii", "replace")
+    for b in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE))
 # A bound, not the primary control. Splitting is gated on the queue actually
 # starving, so it is self-limiting; the depth only needs to be deep enough to let
 # that gate act. At 2, big subtrees could not be split at all and the tail of a
@@ -1075,6 +1094,133 @@ def cmd_archive_status(args) -> int:
     return 0
 
 
+def _print_candidates(matches) -> None:
+    """The offset/size/mtime of every member a path matched, so `--offset` can name
+    one of them. Shared by the two `cat` outcomes that need it: ambiguous (no
+    `--offset` given) and a given `--offset` that names none of them.
+    """
+    for match in matches:
+        print(f"  --offset {match['hdr_offset']}  size={match['size']}  "
+              f"mtime={match['mtime']}", file=sys.stderr)
+
+
+def cmd_archive_cat(args) -> int:
+    """Extract one member's bytes by path, addressed directly through the index
+    rather than a search: a walk already recorded `data_offset` and `size` for every
+    member, so retrieving one is a direct read, not a scan.
+
+    Task 11 uses this to pull a run's own management database out of a 5.08 TiB tar
+    and ask it what "incomplete" means. Everything before this command indexes; this
+    is the first one that retrieves, so a wrong answer here is a wrong artefact the
+    operator goes on to trust -- a database they query, a log they quote -- not just
+    a bad report, which is why every ambiguity below is refused rather than guessed.
+    """
+    store = _open_archive_store(args.db)
+    if store is None:
+        print(f"error: {args.db} holds no registered archives; "
+              f"run `archive register` first", file=sys.stderr)
+        return 2
+    row = store.get(args.archive)
+    if row is None:
+        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
+        return 2
+    if row["state"] == "stale":
+        # The parts changed since this archive was indexed (Task 6's flag), so the
+        # stored offsets may no longer describe the bytes actually on Dropbox now --
+        # writing whatever currently sits at those offsets into a file the operator
+        # will trust is worse than refusing outright.
+        print(f"error: {row['name']} is stale ({row['detail'] or ''}); its offsets may "
+              f"no longer match the parts -- re-register it before trusting them",
+              file=sys.stderr)
+        return 1
+
+    matches = store.find_members(row["id"], args.member)
+    if not matches:
+        print(f"error: no member {args.member!r} in {args.archive}", file=sys.stderr)
+        return 1
+
+    if args.offset is not None:
+        chosen = next((m for m in matches if m["hdr_offset"] == args.offset), None)
+        if chosen is None:
+            print(f"error: no member {args.member!r} at --offset {args.offset} in "
+                  f"{args.archive}; candidates:", file=sys.stderr)
+            _print_candidates(matches)
+            return 2
+    elif len(matches) > 1:
+        print(f"error: {len(matches)} members match {args.member!r}; choose one with "
+              f"--offset:", file=sys.stderr)
+        _print_candidates(matches)
+        return 2
+    else:
+        chosen = matches[0]
+
+    if chosen["type"] not in REGULAR_MEMBER_TYPES:
+        print(f"error: {args.member!r} is not a regular file (type "
+              f"{chosen['type']!r}) in {args.archive}", file=sys.stderr)
+        return 1
+
+    archive_set = _stored_archive_set(store, row)
+    tokens = limiter = None
+    if row["source"] == "dropbox":
+        try:
+            tokens = TokenProvider(remote=args.remote)
+        except AuthError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        # A single stream, not a pool -- but Dropbox's budget is account-wide
+        # regardless, so a 429 must still park this reader for the full Retry-After
+        # rather than a lone stream hammering straight past it (T8-7).
+        limiter = AdaptiveLimiter(rps=DEFAULT_RPS, max_concurrency=1)
+    reader = _reader_for(row, archive_set, tokens, limiter)
+    # A pass-through window (T8-6): the walker's adaptive window guesses generously
+    # because it does not know where the next header is, but cat already knows
+    # exactly what it wants. With the default window, the final fill of anything not
+    # finished in one request would drag part of the *next* member along -- real
+    # Dropbox traffic that never reaches the output. window_min=window_max=1 makes
+    # every fill read exactly what is asked, clamped only by the archive's own end.
+    concat = ConcatFile(archive_set, reader, window_min=1, window_max=1)
+    concat.seek(chosen["data_offset"])
+
+    try:
+        sink_cm = (open(args.out, "wb") if args.out
+                  else contextlib.nullcontext(sys.stdout.buffer))
+    except OSError as exc:
+        print(f"error: could not open --out {args.out!r}: {exc}", file=sys.stderr)
+        return 2
+
+    remaining = chosen["size"]
+    written = 0
+    with sink_cm as sink:
+        try:
+            while remaining > 0:
+                chunk = concat.read(min(remaining, CAT_CHUNK))
+                if not chunk:
+                    print(f"error: {args.archive} ended before all of {args.member!r} "
+                          f"was read ({remaining} byte(s) short)", file=sys.stderr)
+                    return 1
+                sink.write(chunk)
+                written += len(chunk)
+                remaining -= len(chunk)
+        except ReaderError as exc:
+            # A part is shorter than the index believes -- data lost or corrupted at
+            # the storage layer since this archive was indexed. Surfacing it as a
+            # clean failure beats letting a raw reader exception traceback out of a
+            # command whose whole point is to hand the caller a trustworthy file.
+            print(f"error: could not read {args.member!r} from {args.archive}: {exc}",
+                  file=sys.stderr)
+            return 1
+
+    # By construction the loop above only exits normally once written == the size it
+    # started from; kept as an explicit check rather than trusted implicitly, because
+    # a truncated file returned with exit 0 is the one failure mode here that leaves
+    # the operator with nothing to say why (T8-8).
+    if written != chosen["size"]:
+        print(f"error: wrote {written} of {chosen['size']} byte(s) for "
+              f"{args.member!r} in {args.archive}", file=sys.stderr)
+        return 1
+    return 0
+
+
 # ---- argument parsing ---------------------------------------------------
 
 
@@ -1170,6 +1316,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_ast.add_argument("--db", required=True)
     p_ast.add_argument("--archive")
     p_ast.set_defaults(func=cmd_archive_status)
+
+    p_cat = asub.add_parser(
+        "cat", help="extract one member's bytes by path, in the fewest range reads")
+    p_cat.add_argument("--db", required=True)
+    p_cat.add_argument("--archive", required=True)
+    p_cat.add_argument("--member", required=True, help="the member's path inside the archive")
+    p_cat.add_argument("--offset", type=int, default=None,
+                       help="disambiguate a path matching more than one member, by "
+                            "hdr_offset (a bare ambiguous cat prints the candidates)")
+    p_cat.add_argument("--out", help="write to this file instead of stdout")
+    p_cat.add_argument("--remote", default="dropbox")
+    p_cat.set_defaults(func=cmd_archive_cat)
 
     return parser
 
