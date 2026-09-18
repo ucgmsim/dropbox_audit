@@ -25,6 +25,7 @@ import socket
 import sqlite3
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1181,44 +1182,77 @@ def cmd_archive_cat(args) -> int:
     concat = ConcatFile(archive_set, reader, window_min=1, window_max=1)
     concat.seek(chosen["data_offset"])
 
-    try:
-        sink_cm = (open(args.out, "wb") if args.out
-                  else contextlib.nullcontext(sys.stdout.buffer))
-    except OSError as exc:
-        print(f"error: could not open --out {args.out!r}: {exc}", file=sys.stderr)
-        return 2
+    # --out is written through a temp file in the same directory, promoted onto the
+    # target only once every byte is confirmed written -- never opened (let alone
+    # truncated) directly. Fix round 1: at CAT_CHUNK granularity a multi-part database
+    # like Task 11's needs many reads, so a ReaderError or short read on any read but
+    # the first is the ordinary failure shape, not an edge case, and it must neither
+    # leave a partial file at the target nor destroy a good one already there. The
+    # same directory keeps the final os.replace atomic rather than a cross-filesystem
+    # copy; mkstemp's own uniqueness keeps two concurrent `cat`s from colliding.
+    # stdout has no such seam -- bytes already written to it cannot be recalled, so a
+    # failure partway through is reported but not undone.
+    tmp_path = None
+    if args.out:
+        out_dir = os.path.dirname(args.out) or "."
+        try:
+            fd, tmp_path = tempfile.mkstemp(dir=out_dir, prefix=".cat-", suffix=".tmp")
+        except OSError as exc:
+            print(f"error: could not open --out {args.out!r}: {exc}", file=sys.stderr)
+            return 2
+        sink_cm = os.fdopen(fd, "wb")
+    else:
+        sink_cm = contextlib.nullcontext(sys.stdout.buffer)
 
     remaining = chosen["size"]
     written = 0
-    with sink_cm as sink:
-        try:
-            while remaining > 0:
-                chunk = concat.read(min(remaining, CAT_CHUNK))
-                if not chunk:
-                    print(f"error: {args.archive} ended before all of {args.member!r} "
-                          f"was read ({remaining} byte(s) short)", file=sys.stderr)
-                    return 1
-                sink.write(chunk)
-                written += len(chunk)
-                remaining -= len(chunk)
-        except ReaderError as exc:
-            # A part is shorter than the index believes -- data lost or corrupted at
-            # the storage layer since this archive was indexed. Surfacing it as a
-            # clean failure beats letting a raw reader exception traceback out of a
-            # command whose whole point is to hand the caller a trustworthy file.
-            print(f"error: could not read {args.member!r} from {args.archive}: {exc}",
-                  file=sys.stderr)
+    try:
+        with sink_cm as sink:
+            try:
+                while remaining > 0:
+                    chunk = concat.read(min(remaining, CAT_CHUNK))
+                    if not chunk:
+                        print(f"error: {args.archive} ended before all of {args.member!r} "
+                              f"was read ({remaining} byte(s) short)", file=sys.stderr)
+                        return 1
+                    sink.write(chunk)
+                    written += len(chunk)
+                    remaining -= len(chunk)
+            except ReaderError as exc:
+                # A part is shorter than the index believes -- data lost or corrupted
+                # at the storage layer since this archive was indexed. Surfacing it as
+                # a clean failure beats letting a raw reader exception traceback out
+                # of a command whose whole point is to hand the caller a trustworthy
+                # file.
+                print(f"error: could not read {args.member!r} from {args.archive}: "
+                      f"{exc}", file=sys.stderr)
+                return 1
+
+        # By construction the loop above only exits normally once written == the size
+        # it started from; kept as an explicit check rather than trusted implicitly,
+        # because a truncated file returned with exit 0 is the one failure mode here
+        # that leaves the operator with nothing to say why (T8-8).
+        if written != chosen["size"]:
+            print(f"error: wrote {written} of {chosen['size']} byte(s) for "
+                  f"{args.member!r} in {args.archive}", file=sys.stderr)
             return 1
 
-    # By construction the loop above only exits normally once written == the size it
-    # started from; kept as an explicit check rather than trusted implicitly, because
-    # a truncated file returned with exit 0 is the one failure mode here that leaves
-    # the operator with nothing to say why (T8-8).
-    if written != chosen["size"]:
-        print(f"error: wrote {written} of {chosen['size']} byte(s) for "
-              f"{args.member!r} in {args.archive}", file=sys.stderr)
-        return 1
-    return 0
+        if tmp_path is not None:
+            try:
+                os.replace(tmp_path, args.out)
+            except OSError as exc:
+                print(f"error: could not write --out {args.out!r}: {exc}", file=sys.stderr)
+                return 2
+            tmp_path = None      # now lives at args.out; nothing left to clean up
+        return 0
+    finally:
+        # Reached on every failure return above (the temp file was never promoted) and
+        # on nothing else: the target is left exactly as it was, good copy or none.
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 # ---- argument parsing ---------------------------------------------------
