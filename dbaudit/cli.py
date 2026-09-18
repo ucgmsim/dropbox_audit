@@ -648,6 +648,13 @@ class _Run:
         Refusing *before* the write is what makes `--max-batches N` mean exactly N
         batches rather than N plus whatever was in flight. Holding the lock across the
         write is fine: SQLite serialises writers anyway.
+
+        Only a batch that carries members counts against the budget. A part lying
+        wholly inside one member has no header of its own, so its chain crosses the
+        moment it starts and commits nothing but a cursor -- which it still must do,
+        because that cursor is how the segment records that it crossed. Charging those
+        to the budget would buy no members at all, and `--max-batches` exists to bound
+        how much gets walked, which is measured in members.
         """
         with self.lock:
             limit = self.args.max_batches
@@ -655,9 +662,10 @@ class _Run:
                 raise _Stopped(f"--max-batches {limit} reached")
             self.store.commit_batch(self.archive_id, segment_id, members, next_offset,
                                     requests, bytes_fetched)
-            self.batches += 1
-            if limit and self.batches >= limit:
-                self.stop.set()
+            if members:
+                self.batches += 1
+                if limit and self.batches >= limit:
+                    self.stop.set()
 
 
 def _walk_segment(run, segment) -> None:
@@ -697,16 +705,21 @@ def _walk_segment(run, segment) -> None:
     def commit(members, next_offset):
         requests, fetched = delta()
         run.commit(segment["id"], members, next_offset, requests, fetched)
-        # Only once the write went through. A refused batch leaves its reads
-        # uncharged -- a bounded undercount on an interrupted run, and the bytes it
-        # covers are not in the index either.
-        charged()
+        charged()          # only once the write went through
 
-    result = walk(concat, cursor, commit, batch_size=args.batch,
-                  stop_at=segment["stop_at"], should_stop=run.stop.is_set)
+    try:
+        result = walk(concat, cursor, commit, batch_size=args.batch,
+                      stop_at=segment["stop_at"], should_stop=run.stop.is_set)
+    except _Stopped:
+        # The refused batch was read before it was refused, so its reads are charged
+        # here -- this is the last place that still knows what they cost.
+        requests, fetched = delta()
+        run.store.release_segment(segment["id"], requests, fetched)
+        return
     if result.state == "stopped":
         # Back to pending with its committed cursor; the next run picks it up there.
-        run.store.release_segment(segment["id"])
+        requests, fetched = delta()
+        run.store.release_segment(segment["id"], requests, fetched)
         return
     # The cost that lands after the last batch -- the terminator probe, or a scan that
     # found nothing -- would otherwise never be counted.
@@ -724,9 +737,6 @@ def _worker(run) -> None:
                 return
             try:
                 _walk_segment(run, segment)
-            except _Stopped:
-                run.store.release_segment(segment["id"])
-                return
             except Exception as exc:
                 # One bad part must not kill the run: record it and take the next.
                 log.warning("segment %d failed: %s: %s", segment["idx"],
