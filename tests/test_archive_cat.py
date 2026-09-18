@@ -6,7 +6,7 @@ tests/test_live_archive.py for the one live check, gated behind DBAUDIT_LIVE=1.
 import sys
 import tarfile
 
-from dbaudit.archive.reader import LocalRangeReader
+from dbaudit.archive.reader import LocalRangeReader, ShortRead
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.cli import main
 from tests.archive_fakes import build_tar, write_parts
@@ -242,3 +242,61 @@ def test_cat_out_in_a_missing_directory_exits_2(tmp_path, capsys):
     assert main(["archive", "cat", "--db", db, "--archive", "a.tar",
                  "--member", "run/small.txt", "--out", str(out)]) == 2
     assert str(out) in capsys.readouterr().err
+
+
+# ---- fix round 1: a multi-chunk --out failure must not touch the target path ----
+
+
+def _setup_for_a_mid_stream_failure(tmp_path, monkeypatch):
+    """A member big enough, with CAT_CHUNK shrunk, that a --out cat needs several
+    chunks -- and a reader that raises ShortRead on the *second* read_range call, so
+    at least one chunk has already reached `sink.write()` before the failure. Task
+    11's real use (a large multi-part database) needs many CAT_CHUNK-sized reads at
+    the real 16 MiB size, so this is the ordinary failure shape, not an edge case.
+    """
+    payload = b"z" * 50_000
+    source = tmp_path / "parts"
+    source.mkdir()
+    data = build_tar([("run/big.bin", payload)])
+    write_parts(source, data, part_size=len(data))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+
+    monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 8192)
+    calls = {"n": 0}
+    real_read = LocalRangeReader.read_range
+
+    def read_range(self, part_idx, offset, length):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ShortRead("simulated mid-stream corruption")
+        return real_read(self, part_idx, offset, length)
+
+    monkeypatch.setattr(LocalRangeReader, "read_range", read_range)
+    return db, calls
+
+
+def test_cat_out_a_multi_chunk_failure_leaves_no_file_at_the_target(tmp_path, monkeypatch):
+    db, calls = _setup_for_a_mid_stream_failure(tmp_path, monkeypatch)
+
+    out = tmp_path / "big.bin"
+    assert main(["archive", "cat", "--db", db, "--archive", "a.tar",
+                 "--member", "run/big.bin", "--out", str(out)]) == 1
+    assert calls["n"] >= 2                       # proves this really was multi-chunk
+    assert not out.exists()
+    # No temp file left behind alongside it either.
+    assert list(tmp_path.glob(".cat-*")) == []
+
+
+def test_cat_out_a_multi_chunk_failure_preserves_an_existing_file(tmp_path, monkeypatch):
+    db, calls = _setup_for_a_mid_stream_failure(tmp_path, monkeypatch)
+
+    out = tmp_path / "big.bin"
+    original = b"this is the previous good copy -- a failed cat must not destroy it\n"
+    out.write_bytes(original)
+
+    assert main(["archive", "cat", "--db", db, "--archive", "a.tar",
+                 "--member", "run/big.bin", "--out", str(out)]) == 1
+    assert calls["n"] >= 2
+    assert out.read_bytes() == original
