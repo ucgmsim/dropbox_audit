@@ -18,6 +18,10 @@ from dbaudit.lock import InstanceLock
 from tests.archive_fakes import build_tar, write_parts
 
 MEMBERS = [(f"run/file{i:02d}.bin", b"x" * (700 + i)) for i in range(30)]
+# One member big enough to swallow whole parts: split at 4096, parts 1-4 hold no header
+# at all, so those chains cross the moment they start and commit only a cursor.
+SWALLOWED = [("run/a.bin", b"a" * 1000), ("run/big.bin", b"b" * 20000),
+             ("run/c.bin", b"c" * 1000)]
 
 
 def local_archive(tmp_path, data=None, part_size=4096, name="parts"):
@@ -232,7 +236,7 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
     assert reads[0] == segment["cursor_offset"]
 
 
-def test_max_batches_commits_exactly_that_many_batches(tmp_path):
+def test_max_batches_commits_exactly_that_many_batches(tmp_path, monkeypatch):
     """--max-batches N means N batches, not N plus whatever was in flight when the
     limit was reached."""
     data = build_tar(MEMBERS)
@@ -240,10 +244,50 @@ def test_max_batches_commits_exactly_that_many_batches(tmp_path):
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
 
+    reads = {"n": 0, "bytes": 0}
+    real_read = LocalRangeReader.read_range
+
+    def read_range(self, part_idx, offset, length):
+        block = real_read(self, part_idx, offset, length)
+        reads["n"] += 1
+        reads["bytes"] += len(block)
+        return block
+
+    monkeypatch.setattr(LocalRangeReader, "read_range", read_range)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
+                 "--batch", "5", "--max-batches", "2",
+                 "--window-min", "1024", "--window-max", "4096"]) == 0
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert store.stats(row["id"])["n_members"] == 10
+    # The refused batch was still read before it was refused. Releasing a segment has to
+    # charge those reads or an interrupted run -- the normal workflow -- undercounts.
+    assert reads["n"] > 1
+    assert row["requests"] == reads["n"]
+    assert row["bytes_fetched"] == reads["bytes"]
+
+
+def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path):
+    """A part lying wholly inside one member has no header of its own: its chain crosses
+    at once, committing a cursor and nothing else. Charging that to the budget buys no
+    members, which is the opposite of what a smoke test wants -- Task 11 reads
+    `--batch 500 --max-batches 4` as 2,000 members.
+    """
+    source = local_archive(tmp_path, build_tar(SWALLOWED), part_size=4096)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
     assert main(["archive", "index", "--db", db, "--archive", "a.tar",
                  "--workers", "1", "--batch", "5", "--max-batches", "2"]) == 0
+
     store = ArchiveStore(db)
-    assert store.stats(store.get("a.tar")["id"])["n_members"] == 10
+    row = store.get("a.tar")
+    empty_crossings = [s for s in store.segments(row["id"])
+                       if s["state"] == "crossed" and s["members"] == 0]
+    assert len(empty_crossings) == 4        # the parts swallowed by big.bin
+    # Two batches carrying members: the one before those crossings and the one after.
+    assert store.stats(row["id"])["n_members"] == len(SWALLOWED)
+    assert row["state"] == "complete"
 
 
 # ---- fingerprints ------------------------------------------------------------

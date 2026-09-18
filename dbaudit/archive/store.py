@@ -608,6 +608,13 @@ class ArchiveStore:
         not in the last part, so the segment covering it typically has nothing of
         its own to contribute and its rows (found before the chain's true end was
         known) were never really on the chain.
+
+        `error` is cleared for that same reason. A trailing segment's scan fails
+        ("no header between here and the end of the archive") while its fate is
+        still unknown, and that failure stops being one the moment the join proves
+        the segment was never on the chain. Leaving it on the row makes `status`
+        report a fault beside the most ordinary state a segment has. `detail` is
+        kept: it still explains how the row got here.
         """
         conn = self.connect()
         try:
@@ -617,23 +624,44 @@ class ArchiveStore:
                 (segment_id,)).fetchone()
             self.drop_members_between(row["archive_id"], row["scan_from"], row["stop_at"])
             conn.execute(
-                "UPDATE segments SET state='beyond', members=0, joined=0 WHERE id=?",
+                "UPDATE segments SET state='beyond', members=0, joined=0, error=NULL "
+                "WHERE id=?",
                 (segment_id,))
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
 
-    def release_segment(self, segment_id) -> None:
-        """Hand a segment back to the queue without losing its progress.
+    def release_segment(self, segment_id, requests=0, bytes_fetched=0) -> None:
+        """Hand a segment back to the queue without losing its progress, or its cost.
 
         Called when a walk stops early (Ctrl-C, `--max-batches`), so the next run
         resumes from the committed cursor instead of rescanning for the start
         again. Mirrors `Store.release_shard` (dbaudit/store.py:220).
+
+        Takes a cost for the same reason `finish_segment` and `fail_segment` do:
+        reads made after the last committed batch are otherwise charged to
+        nothing. Here that is the batch a `--max-batches` stop refuses -- it was
+        read before it was refused -- and stopping early is this walker's normal
+        workflow rather than an exception, so the undercount would be routine.
         """
-        self.connect().execute(
-            "UPDATE segments SET state='pending', owner=NULL WHERE id=? AND state='walking'",
-            (segment_id,))
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            archive_id = conn.execute(
+                "SELECT archive_id FROM segments WHERE id=?", (segment_id,)).fetchone()[0]
+            conn.execute(
+                "UPDATE segments SET state='pending', owner=NULL "
+                "WHERE id=? AND state='walking'",
+                (segment_id,))
+            conn.execute(
+                "UPDATE archives SET requests=requests+?, bytes_fetched=bytes_fetched+? "
+                "WHERE id=?",
+                (requests, bytes_fetched, archive_id))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def finish_segment(self, segment_id, result, requests=0, bytes_fetched=0) -> None:
         """Record one chain's outcome, and the reader cost of producing it.

@@ -194,6 +194,48 @@ def test_retiring_a_segment_drops_its_span_and_marks_it_beyond(tmp_path):
     assert row["state"] == "beyond" and row["members"] == 0 and row["joined"] == 0
 
 
+def test_retiring_a_segment_clears_a_scan_failure_that_is_no_longer_one(tmp_path):
+    """`beyond` is the normal case, not a fault: a tar's terminator is usually not in
+    its last part, so a trailing segment legitimately has no header of its own. Its scan
+    failed while its fate was still unknown; once the join proves it was never on the
+    chain, leaving that error beside it tells an operator something is wrong when
+    nothing is. The detail stays -- it still explains the row.
+    """
+    store, archive_id, _ = registered(tmp_path)
+    segments = store.segments(archive_id)
+    # A chain that crossed on one run and found nothing on the next.
+    store.finish_segment(segments[1]["id"], WalkResult("crossed", 4608, 0, "crossed at 4608"))
+    store.fail_segment(segments[1]["id"], "no header between here and the end")
+    assert seg(store, archive_id, segments[1]["id"])["error"]
+
+    store.retire_segment(segments[1]["id"])
+
+    row = seg(store, archive_id, segments[1]["id"])
+    assert row["state"] == "beyond"
+    assert row["error"] is None
+    assert row["detail"] == "crossed at 4608"
+
+
+def test_releasing_a_segment_still_charges_what_it_read(tmp_path):
+    """Symmetric with finish_segment and fail_segment, and for the same reason: reads
+    that land after the last committed batch -- the batch a `--max-batches` stop refuses
+    -- are charged to nothing otherwise. An interrupted run is the normal workflow here,
+    so that undercount would be routine, and bytes_fetched / member_bytes is the
+    headline efficiency number for the whole project.
+    """
+    store, archive_id, _ = registered(tmp_path)
+    claimed = store.claim_segment(archive_id, "w1")
+    store.commit_batch(archive_id, claimed["id"], [member(0)], 512,
+                       requests=2, bytes_fetched=1024)
+
+    store.release_segment(claimed["id"], requests=3, bytes_fetched=2048)
+
+    row = store.get("a.tar")
+    assert row["requests"] == 5
+    assert row["bytes_fetched"] == 3072
+    assert seg(store, archive_id, claimed["id"])["state"] == "pending"
+
+
 def test_releasing_a_segment_returns_it_to_pending_with_cursor_intact(tmp_path):
     """A walk stopped early (Ctrl-C, --max-batches) must resume, not rescan."""
     store, archive_id, _ = registered(tmp_path)
