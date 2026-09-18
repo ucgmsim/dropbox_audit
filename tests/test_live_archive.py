@@ -94,3 +94,35 @@ def test_our_content_hash_is_the_one_dropbox_computed(live):
     assert local.stat().st_size < DROPBOX_HASH_BLOCK, (
         "this archive now spans several hash blocks; tighten this test to pin the "
         "block boundary as well as the construction")
+
+
+def test_cat_extracts_a_member_matching_the_downloaded_copy(live, tmp_path):
+    """Task 8 step 4 in miniature: retrieve one real member from Dropbox by offset,
+    and check it byte for byte against the same member pulled from the copy already
+    downloaded for this module with `tarfile`. Costs one or two `files/download`
+    range requests on a fixture this module already paid to fetch.
+
+    The member is picked from the index rather than hard-coded, and is the largest
+    regular one so the comparison is not over a handful of bytes.
+    """
+    db, local = live
+    dbaudit("archive", "index", "--db", db, "--archive", NAME)
+
+    from dbaudit.archive.store import ArchiveStore
+    from dbaudit.cli import REGULAR_MEMBER_TYPES
+
+    store = ArchiveStore(db)
+    archive_id = store.get(NAME)["id"]
+    regular = [r for r in store.query_members(archive_id) if r["type"] in REGULAR_MEMBER_TYPES]
+    assert regular, "no regular member found to compare"
+    largest = max(regular, key=lambda r: r["size"])
+    member_path = f"{largest['dir']}/{largest['name']}" if largest["dir"] else largest["name"]
+    assert largest["size"] > 1000, f"largest member is only {largest['size']} bytes"
+
+    out = tmp_path / "member.bin"
+    dbaudit("archive", "cat", "--db", db, "--archive", NAME, "--member", member_path,
+            "--offset", str(largest["hdr_offset"]), "--out", str(out))
+
+    with tarfile.open(local, mode="r:") as reference:
+        expected = reference.extractfile(member_path).read()
+    assert expected == out.read_bytes()
