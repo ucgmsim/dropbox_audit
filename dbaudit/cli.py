@@ -641,6 +641,11 @@ class _Run:
         self.stop = stop
         self.lock = threading.Lock()
         self.batches = 0
+        #: Set by a worker whose own machinery failed, as opposed to a bad part. A run
+        #: that ends this way must not exit 0: on a nohup'd walk the exit code is most
+        #: of what anyone sees, and "stopped cleanly" and "a chain blew up" are not the
+        #: same answer.
+        self.failed = False
 
     def commit(self, segment_id, members, next_offset, requests, bytes_fetched) -> None:
         """Write one batch, or refuse to once `--max-batches` has been reached.
@@ -686,35 +691,43 @@ def _walk_segment(run, segment) -> None:
     def charged():
         spent["requests"], spent["bytes"] = reader.requests, reader.bytes_fetched
 
-    start = segment["first_header"]
-    if start is None:
-        start = find_chain_start(concat, segment["scan_from"])
-        if start is None:
-            # Not a failure in itself -- the join resets such a segment to its
-            # predecessor's exit like any other disagreement.
-            requests, fetched = delta()
-            run.store.fail_segment(segment["id"],
-                                   "no header between here and the end of the archive",
-                                   requests, fetched)
-            return
-        run.store.set_segment_start(segment["id"], start)
-    cursor = segment["cursor_offset"]
-    if cursor is None:
-        cursor = start
-
     def commit(members, next_offset):
         requests, fetched = delta()
         run.commit(segment["id"], members, next_offset, requests, fetched)
         charged()          # only once the write went through
 
+    # Every exit below charges what the reader spent, so the try covers the scan too:
+    # this is the last place that still knows what it cost.
     try:
+        start = segment["first_header"]
+        if start is None:
+            start = find_chain_start(concat, segment["scan_from"])
+            if start is None:
+                # Not a failure in itself -- the join resets such a segment to its
+                # predecessor's exit like any other disagreement.
+                requests, fetched = delta()
+                run.store.fail_segment(
+                    segment["id"], "no header between here and the end of the archive",
+                    requests, fetched)
+                return
+            run.store.set_segment_start(segment["id"], start)
+        cursor = segment["cursor_offset"]
+        if cursor is None:
+            cursor = start
         result = walk(concat, cursor, commit, batch_size=args.batch,
                       stop_at=segment["stop_at"], should_stop=run.stop.is_set)
     except _Stopped:
-        # The refused batch was read before it was refused, so its reads are charged
-        # here -- this is the last place that still knows what they cost.
+        # The refused batch was read before it was refused.
         requests, fetched = delta()
         run.store.release_segment(segment["id"], requests, fetched)
+        return
+    except Exception as exc:
+        # One bad part must not kill the run: record why it died and what it cost, and
+        # let the worker take the next segment.
+        requests, fetched = delta()
+        log.warning("segment %d failed: %s: %s", segment["idx"], type(exc).__name__, exc)
+        run.store.fail_segment(segment["id"], f"{type(exc).__name__}: {exc}",
+                               requests, fetched)
         return
     if result.state == "stopped":
         # Back to pending with its committed cursor; the next run picks it up there.
@@ -735,14 +748,17 @@ def _worker(run) -> None:
             segment = run.store.claim_segment(run.archive_id, owner)
             if segment is None:
                 return
-            try:
-                _walk_segment(run, segment)
-            except Exception as exc:
-                # One bad part must not kill the run: record it and take the next.
-                log.warning("segment %d failed: %s: %s", segment["idx"],
-                            type(exc).__name__, exc)
-                run.store.fail_segment(segment["id"], f"{type(exc).__name__}: {exc}")
+            if run.stop.is_set():
+                # Claimed a moment before the stop. Hand it straight back rather than
+                # begin a scan, which has no bound of its own -- Task 1 measured seeds
+                # that found no header within 64 MiB.
+                run.store.release_segment(segment["id"])
+                return
+            _walk_segment(run, segment)
     except Exception:
+        # Not a bad part -- `_walk_segment` records those itself and carries on. This is
+        # the pool's own machinery failing, so the run must not report success.
+        run.failed = True
         log.exception("worker stopping after an unexpected failure")
     finally:
         run.store.close()          # this thread's own connection
@@ -956,7 +972,8 @@ def _run_index(args, store, row) -> int:
 
     stats = store.stats(archive_id)
     rate_limited = limiter.rate_limit_events if limiter else 0
-    store.log_event(archive_id, "rate_limited", str(rate_limited))
+    if rate_limited:
+        store.log_event(archive_id, "rate_limited", str(rate_limited))
     ratio = (stats["bytes_fetched"] / stats["member_bytes"]) if stats["member_bytes"] else 0.0
     print(f"{row['name']}: {stats['state']}")
     print(f"  members       : {stats['n_members']:,} "
@@ -970,6 +987,10 @@ def _run_index(args, store, row) -> int:
     if stale is not None:
         print(f"error: {stale}; the members found are kept, but re-register before "
               f"trusting them", file=sys.stderr)
+        return 1
+    if run.failed:
+        print(f"error: a chain stopped on an unexpected failure; see the log and "
+              f"`archive status`", file=sys.stderr)
         return 1
     if outcome is not None:
         if outcome.state == "complete":

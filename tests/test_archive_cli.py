@@ -5,6 +5,7 @@ monkeypatched `build_lister`, and where such a test has to read bytes it substit
 `LocalRangeReader` through `_reader_for` -- which is exactly the seam Task 8 reuses.
 """
 
+import contextlib
 import logging
 import os
 import signal
@@ -13,6 +14,7 @@ import threading
 from dbaudit.api import Page
 from dbaudit.archive.reader import LocalRangeReader
 from dbaudit.archive.store import ArchiveStore
+from dbaudit.archive.tarwalk import find_chain_start
 from dbaudit.cli import main
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import build_tar, write_parts
@@ -63,11 +65,38 @@ def fake_build_lister(pages):
     return build
 
 
+def event_count(db, archive_id, kind):
+    return ArchiveStore(db).connect().execute(
+        "SELECT COUNT(*) FROM events WHERE archive_id=? AND kind=?",
+        (archive_id, kind)).fetchone()[0]
+
+
 def run_starts(db, archive_id):
     """How many walks this archive has begun, from the events `start_walk` writes."""
-    return ArchiveStore(db).connect().execute(
-        "SELECT COUNT(*) FROM events WHERE archive_id=? AND kind='run_start'",
-        (archive_id,)).fetchone()[0]
+    return event_count(db, archive_id, "run_start")
+
+
+@contextlib.contextmanager
+def signal_handled():
+    """Yields an Event set once the CLI's signal handler has logged.
+
+    The handler sets its stop flag *before* logging, so the line arriving means the walk
+    is already winding down -- which is what lets a test send SIGINT from a worker thread
+    and know when the main thread has acted on it, instead of sleeping on a guess.
+    """
+    handled = threading.Event()
+
+    class Watch(logging.Handler):
+        def emit(self, record):
+            if record.getMessage().startswith("signal "):
+                handled.set()
+
+    watch = Watch()
+    logging.getLogger("dbaudit").addHandler(watch)
+    try:
+        yield handled
+    finally:
+        logging.getLogger("dbaudit").removeHandler(watch)
 
 
 def has_analysis_indexes(db):
@@ -98,6 +127,18 @@ def test_register_then_index_a_local_archive(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "complete" in out
     assert str(len(MEMBERS)) in out
+    assert "429s" in out          # T7-16: throttling is the first thing to look at
+
+    store = ArchiveStore(db)
+    archive_id = store.get("a.tar")["id"]
+    # Task 11's acceptance check, and the one behaviour an operator is asked to verify:
+    # every segment on the chain had its start confirmed by the chain before it. The
+    # trailing padding parts are `beyond` -- they were never on the chain.
+    on_chain = [s for s in store.segments(archive_id) if s["state"] != "beyond"]
+    assert len(on_chain) == 12
+    assert all(s["joined"] for s in on_chain)
+    # A local run has no 429s to report, so it should not leave an event saying "0".
+    assert event_count(db, archive_id, "rate_limited") == 0
 
 
 def test_an_interrupted_index_resumes(tmp_path):
@@ -170,35 +211,21 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
 
-    handled = threading.Event()
-
-    class Watch(logging.Handler):
-        def emit(self, record):
-            if record.getMessage().startswith("signal "):
-                handled.set()
-
-    watch = Watch()
-    logging.getLogger("dbaudit").addHandler(watch)
     real_commit = ArchiveStore.commit_batch
     sent = threading.Event()
-
-    def commit_batch(self, *args, **kwargs):
-        result = real_commit(self, *args, **kwargs)
-        if not sent.is_set():
-            sent.set()
-            os.kill(os.getpid(), signal.SIGINT)
-            # The handler runs on the main thread; the log line it writes is the
-            # proof that the stop flag is already set.
-            handled.wait(10.0)
-        return result
-
-    monkeypatch.setattr(ArchiveStore, "commit_batch", commit_batch)
     before = signal.getsignal(signal.SIGINT)
-    try:
+    with signal_handled() as handled:
+        def commit_batch(self, *args, **kwargs):
+            result = real_commit(self, *args, **kwargs)
+            if not sent.is_set():
+                sent.set()
+                os.kill(os.getpid(), signal.SIGINT)
+                handled.wait(10.0)
+            return result
+
+        monkeypatch.setattr(ArchiveStore, "commit_batch", commit_batch)
         assert main(["archive", "index", "--db", db, "--archive", "a.tar",
                      "--workers", "1", "--batch", "5"]) == 0
-    finally:
-        logging.getLogger("dbaudit").removeHandler(watch)
     monkeypatch.undo()
 
     assert handled.is_set()
@@ -265,6 +292,84 @@ def test_max_batches_commits_exactly_that_many_batches(tmp_path, monkeypatch):
     assert reads["n"] > 1
     assert row["requests"] == reads["n"]
     assert row["bytes_fetched"] == reads["bytes"]
+
+
+def test_a_stop_between_claim_and_scan_never_starts_the_scan(tmp_path, monkeypatch):
+    """The scan for a chain's first header is deliberately unbounded -- Task 1 measured
+    seeds that found nothing within 64 MiB -- so a worker that claimed a segment a moment
+    before the stop must hand it straight back rather than begin one.
+    """
+    source = local_archive(tmp_path)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    scans = {"n": 0}
+    real_scan = find_chain_start
+
+    def counting_scan(*args, **kwargs):
+        scans["n"] += 1
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr("dbaudit.cli.find_chain_start", counting_scan)
+    real_claim = ArchiveStore.claim_segment
+
+    with signal_handled() as handled:
+        def claim_segment(self, archive_id, owner):
+            segment = real_claim(self, archive_id, owner)
+            # Segment 0 starts at offset 0 and needs no scan. Stop the run exactly as a
+            # segment that *would* scan is handed to a worker.
+            if (segment is not None and segment["first_header"] is None
+                    and not handled.is_set()):
+                os.kill(os.getpid(), signal.SIGINT)
+                handled.wait(10.0)
+            return segment
+
+        monkeypatch.setattr(ArchiveStore, "claim_segment", claim_segment)
+        assert main(["archive", "index", "--db", db, "--archive", "a.tar",
+                     "--workers", "1"]) == 0
+
+    assert handled.is_set()
+    assert scans["n"] == 0
+
+
+def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypatch):
+    """One bad part must not kill the run -- but the reads it made before it died are
+    real, and every other exit path charges them."""
+    source = local_archive(tmp_path)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    reads = {"n": 0}
+    real_read = LocalRangeReader.read_range
+
+    def read_range(self, part_idx, offset, length):
+        reads["n"] += 1
+        if reads["n"] == 3:
+            raise RuntimeError("the part went away mid-read")
+        return real_read(self, part_idx, offset, length)
+
+    monkeypatch.setattr(LocalRangeReader, "read_range", read_range)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
+                 "--window-min", "1024", "--window-max", "4096"]) == 1
+
+    row = ArchiveStore(db).get("a.tar")
+    assert reads["n"] > 3                       # the dead chain was not the only one
+    assert row["requests"] == reads["n"] - 1    # every read but the one that raised
+
+
+def test_a_worker_that_blows_up_does_not_look_like_a_clean_stop(tmp_path, monkeypatch):
+    """On a nohup'd run the exit code is most of what anyone sees, so a chain dying of
+    something unexpected must not report the same 0 as Ctrl-C."""
+    source = local_archive(tmp_path)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    def boom(self, archive_id, owner):
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(ArchiveStore, "claim_segment", boom)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar",
+                 "--workers", "1"]) == 1
 
 
 def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path):
