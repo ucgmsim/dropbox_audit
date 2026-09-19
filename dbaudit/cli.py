@@ -35,6 +35,7 @@ from .api import HttpLister
 from .archive.parts import ArchiveSet, ArchiveSetError
 from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeReader,
                              LocalRangeReader, ReaderError)
+from .archive import report as archive_report
 from .archive.store import ArchiveStore
 from .archive.tarwalk import WalkResult, find_chain_start, walk
 from .auth import AuthError, TokenProvider
@@ -1095,6 +1096,98 @@ def cmd_archive_status(args) -> int:
     return 0
 
 
+def cmd_archive_report(args) -> int:
+    """Print the rollups `archive_report.summary` computes over one archive's
+    manifest, laid out the way `cmd_report` lays out the audit's own numbers.
+
+    Read-only, and offline (T9-10): everything comes out of the local database, so
+    there is no `--remote` here and nothing above this function touches Dropbox.
+    """
+    store = _open_archive_store(args.db)
+    if store is None:
+        print(f"error: {args.db} holds no registered archives; "
+              f"run `archive register` first", file=sys.stderr)
+        return 2
+    row = store.get(args.archive)
+    if row is None:
+        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
+        return 2
+
+    print(f"# {row['name']}  [{row['state']}]")
+    if row["state"] != "complete":
+        # T9-8: printed before a single figure, and unconditionally on any non-complete
+        # state -- Task 11 runs this against a walk in progress, and a manifest that is
+        # 12% walked must never read like a finished archive's.
+        print(f"\n  WARNING: {row['name']} is not fully indexed (state: {row['state']}).")
+        print("  Every figure below is a lower bound.")
+    if row["state"] == "stale":
+        print(f"  It is also stale ({row['detail'] or 'parts changed since indexing'}):")
+        print("  the parts changed underneath this index, so these rollups may describe")
+        print("  bytes that are no longer there.")
+
+    result = archive_report.summary(store, row["id"], top=args.top)
+    if result["n_members"] == 0:
+        # T9-9: say so plainly and stop here, rather than printing a page of empty
+        # sections or dividing by a member count of zero.
+        print("\n  not indexed: 0 members recorded. Run `archive index` first.")
+        return 0
+
+    print(f"\n{result['n_members']:,} members, {human_bytes(result['member_bytes'])}, "
+          f"{result['n_parts']} part(s)\n")
+
+    print("## By top-level directory")
+    for key, agg in result["by_top_dir"][:args.top]:
+        print(f"  {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {key}")
+
+    print("\n## By depth")
+    for depth in (1, 2, 3):
+        print(f"  depth {depth}:")
+        for key, agg in result["by_depth"][depth][:args.top]:
+            print(f"    {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {key}")
+
+    print("\n## By extension")
+    for key, agg in result["by_extension"][:args.top]:
+        label = "(no extension)" if key == "(none)" else f".{key}"
+        print(f"  {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {label}")
+
+    print(f"\n## Largest {len(result['largest'])} member(s)")
+    for member in result["largest"]:
+        path = f"{member['dir']}/{member['name']}" if member["dir"] else member["name"]
+        print(f"  {human_bytes(member['size']):>12}  {path}")
+
+    if result["mtime_span"] is not None:
+        earliest, latest = result["mtime_span"]
+        print(f"\n## mtime span\n  {earliest} .. {latest}")
+
+    print("\n## Owners")
+    for (uname, gname), agg in result["owners"]:
+        print(f"  {agg['count']:>10,} members  {uname or '(none)'}/{gname or '(none)'}")
+
+    print("\n## Types")
+    for type_code, agg in result["types"]:
+        print(f"  {agg['count']:>10,} members  type {type_code!r}")
+
+    return 0
+
+
+def cmd_archive_export(args) -> int:
+    """Write one archive's manifest and rollups as CSV, and print each path written --
+    the same convention `cmd_export` uses for the audit's own CSV export.
+    """
+    store = _open_archive_store(args.db)
+    if store is None:
+        print(f"error: {args.db} holds no registered archives; "
+              f"run `archive register` first", file=sys.stderr)
+        return 2
+    row = store.get(args.archive)
+    if row is None:
+        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
+        return 2
+    for path in archive_report.write_csv(store, row["id"], args.out):
+        print(f"wrote {path}")
+    return 0
+
+
 def _print_candidates(matches) -> None:
     """The offset/size/mtime of every member a path matched, so `--offset` can name
     one of them. Shared by the two `cat` outcomes that need it: ambiguous (no
@@ -1350,6 +1443,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_ast.add_argument("--db", required=True)
     p_ast.add_argument("--archive")
     p_ast.set_defaults(func=cmd_archive_status)
+
+    p_areport = asub.add_parser("report", help="rollups over one archive's manifest")
+    p_areport.add_argument("--db", required=True)
+    p_areport.add_argument("--archive", required=True)
+    p_areport.add_argument("--top", type=int, default=25)
+    p_areport.set_defaults(func=cmd_archive_report)
+
+    p_aexport = asub.add_parser(
+        "export", help="write one archive's manifest and rollups as CSV")
+    p_aexport.add_argument("--db", required=True)
+    p_aexport.add_argument("--archive", required=True)
+    p_aexport.add_argument("--out", required=True)
+    p_aexport.set_defaults(func=cmd_archive_export)
 
     p_cat = asub.add_parser(
         "cat", help="extract one member's bytes by path, in the fewest range reads")

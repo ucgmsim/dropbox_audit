@@ -71,6 +71,15 @@ class ArchiveStore:
     def init_schema(self) -> None:
         self.connect().executescript(SCHEMA_PATH.read_text())
 
+    def query(self, sql: str, params=()) -> list[sqlite3.Row]:
+        """Mirrors `Store.query` (dbaudit/store.py:166) -- the seam Task 9's report
+        module is built on, rather than reaching past this store into SQL the way
+        Task 7's review flagged `cmd_archive_status` for doing. Rows come back as
+        `sqlite3.Row` (this connection's own `row_factory`), so callers can index a
+        result by column name as well as by position.
+        """
+        return self.connect().execute(sql, params).fetchall()
+
     def log_event(self, archive_id, kind: str, detail: str = "") -> None:
         """One row per notable happening -- retries, outcomes, run starts -- so a
         post-mortem on a stalled walk has something to read besides state columns.
