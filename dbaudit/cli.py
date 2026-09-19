@@ -1096,6 +1096,33 @@ def cmd_archive_status(args) -> int:
     return 0
 
 
+def _print_index_completeness_warning(row) -> None:
+    """The "this index may not be the whole archive" warning, shared by `report` and
+    `export` rather than restated by each (T9-8; extended from `report` alone to
+    `export` too in Task 9's fix round 1).
+
+    `cat` (T8-4) refuses outright on a stale archive, because extracting one would
+    write *wrong bytes* -- content that may no longer be what is actually on Dropbox
+    -- into a file the operator goes on to trust. `report` and `export` never write
+    archive content at all: they describe the index we genuinely have, which may
+    simply be partial (a walk still in progress) or out of date (stale), and a
+    warning is the honest response to that, not a refusal -- a partial or stale index
+    is still real, useful information about what has been walked so far. `export`'s
+    entire product is files meant to be handed to someone else, so it needs this
+    caveat at least as much as a printed report does; printed before its "wrote ..."
+    lines, the same way `report` prints it before a single figure (T9-8).
+    """
+    if row["state"] != "complete":
+        # Task 11 runs `report`/`export` against a walk in progress, and a manifest
+        # that is 12% walked must never read like a finished archive's.
+        print(f"\n  WARNING: {row['name']} is not fully indexed (state: {row['state']}).")
+        print("  This index is a lower bound on the archive's real contents.")
+    if row["state"] == "stale":
+        print(f"  It is also stale ({row['detail'] or 'parts changed since indexing'}):")
+        print("  the parts changed underneath this index, so it may describe bytes")
+        print("  that are no longer there.")
+
+
 def cmd_archive_report(args) -> int:
     """Print the rollups `archive_report.summary` computes over one archive's
     manifest, laid out the way `cmd_report` lays out the audit's own numbers.
@@ -1114,16 +1141,7 @@ def cmd_archive_report(args) -> int:
         return 2
 
     print(f"# {row['name']}  [{row['state']}]")
-    if row["state"] != "complete":
-        # T9-8: printed before a single figure, and unconditionally on any non-complete
-        # state -- Task 11 runs this against a walk in progress, and a manifest that is
-        # 12% walked must never read like a finished archive's.
-        print(f"\n  WARNING: {row['name']} is not fully indexed (state: {row['state']}).")
-        print("  Every figure below is a lower bound.")
-    if row["state"] == "stale":
-        print(f"  It is also stale ({row['detail'] or 'parts changed since indexing'}):")
-        print("  the parts changed underneath this index, so these rollups may describe")
-        print("  bytes that are no longer there.")
+    _print_index_completeness_warning(row)
 
     result = archive_report.summary(store, row["id"], top=args.top)
     if result["n_members"] == 0:
@@ -1183,6 +1201,7 @@ def cmd_archive_export(args) -> int:
     if row is None:
         print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
         return 2
+    _print_index_completeness_warning(row)
     for path in archive_report.write_csv(store, row["id"], args.out):
         print(f"wrote {path}")
     return 0
