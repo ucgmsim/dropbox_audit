@@ -13,6 +13,7 @@ Task 7 reconciles where each chain actually starts and ends.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 import time
@@ -77,8 +78,51 @@ class ArchiveStore:
         Task 7's review flagged `cmd_archive_status` for doing. Rows come back as
         `sqlite3.Row` (this connection's own `row_factory`), so callers can index a
         result by column name as well as by position.
+
+        For a result set worth holding in a Python list -- one row, or a handful --
+        not for a scan over every member of a multi-TiB archive; see `stream` for that.
         """
         return self.connect().execute(sql, params).fetchall()
+
+    def stream(self, sql: str, params=()):
+        """Like `query`, but yields rows one at a time instead of calling `fetchall`.
+
+        Added for Task 9's fix round 1: `report.summary`/`write_csv` used to read
+        every member of an archive into one Python list before rolling it up, which a
+        review measured at 521 MB / 0.79 s for a 900,000-row manifest -- the whole
+        point of that pass is a handful of small aggregate dicts, not a second copy of
+        the table in memory. A generator can't grow a `.fetchall()` call back onto
+        this by accident the way returning the raw cursor could, so callers that need
+        genuine streaming get it by construction, not by convention.
+
+        Must be consumed inside the same connection's `read_transaction()` as any
+        other read it needs to agree with -- on its own, an autocommit statement here
+        is no more of a snapshot than a bare `query()` call is.
+        """
+        yield from self.connect().execute(sql, params)
+
+    @contextlib.contextmanager
+    def read_transaction(self):
+        """A read-only `BEGIN`/`COMMIT` around a caller's sequence of `query`/`stream`
+        calls, so they provably see one snapshot instead of however many happen to
+        line up from separate autocommit statements landing between a concurrent
+        walker's commits. This connection is WAL (`connect()`), so a reader here never
+        blocks -- or is blocked by -- `commit_batch` writing; it costs nothing beyond
+        an ordinary read when nothing else happens to be running at the same moment.
+
+        Keep this even where a single query would look sufficient on its own: that
+        sufficiency is what makes it tempting to delete as redundant, and deleting it
+        is exactly what would turn "one snapshot, guaranteed" back into "one snapshot,
+        by accident of how the code happens to be written today."
+        """
+        conn = self.connect()
+        conn.execute("BEGIN")
+        try:
+            yield
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def log_event(self, archive_id, kind: str, detail: str = "") -> None:
         """One row per notable happening -- retries, outcomes, run starts -- so a
