@@ -95,6 +95,16 @@ class ArchiveSet:
 
         keyed.sort(key=lambda item: _suffix_value(item[0]))
         first = _suffix_value(keyed[0][0])
+        # A gap *before* the lowest part is still a gap. Without this the second part
+        # becomes part 0, every offset shifts by a whole part, and `index` calls the
+        # archive corrupt at 0 -- blaming the data for a missing file. `split` counts
+        # letters from `aa`; numbers from `00`, or `01` in tools that count from one.
+        starts = (0, 1) if numeric else (0,)
+        if first not in starts:
+            named = " or ".join(repr(_suffix_text(v, width, numeric)) for v in starts)
+            raise ArchiveSetError(
+                f"{base_name!r} is missing its first part ({named}); the lowest part "
+                f"present is {keyed[0][0]!r}")
         for position, (suffix, _) in enumerate(keyed):
             expected = first + position
             if _suffix_value(suffix) != expected:
