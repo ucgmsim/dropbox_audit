@@ -675,6 +675,11 @@ class _Run:
         batches rather than N plus whatever was in flight. Holding the lock across the
         write is fine: SQLite serialises writers anyway.
 
+        Only a commit that carries members is refused. An empty one buys nothing, so
+        refusing it cannot help the budget, and it costs: a cursor goes unwritten, and
+        the walk's confirming second read of a final verdict ends as a stop instead of
+        the verdict it went to fetch.
+
         Only a batch that carries members counts against the budget. A part lying
         wholly inside one member has no header of its own, so its chain crosses the
         moment it starts and commits nothing but a cursor -- which it still must do,
@@ -684,7 +689,7 @@ class _Run:
         """
         with self.lock:
             limit = self.args.max_batches
-            if limit and self.batches >= limit:
+            if members and limit and self.batches >= limit:
                 raise _Stopped(f"--max-batches {limit} reached")
             self.store.commit_batch(self.archive_id, segment_id, members, next_offset,
                                     requests, bytes_fetched)
