@@ -128,8 +128,8 @@ class ConcatFile:
 
         A read that came back wrong is indistinguishable from one that came back right
         until something reads those bytes a second time -- and a second read served out
-        of this cache is the same read. The walker drops the cache before deciding that
-        an archive is corrupt, which is the one verdict worth a fresh request.
+        of this cache is the same read. The walker drops it before believing any verdict
+        that would end a walk -- `corrupt` or `complete` -- so that verdict is read twice.
         """
         self._cache = b""
         self._cache_start = -1
