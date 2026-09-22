@@ -27,12 +27,19 @@ from dbaudit.limiter import AdaptiveLimiter
 WINDOW = 64 << 10
 
 
-def windows(data_offset: int, size: int, n: int) -> list[int]:
-    """`n` sample points inside one member, first and last always included."""
+def windows(data_offset: int, size: int, n: int) -> list[tuple[int, int]]:
+    """Up to `n` (offset, length) samples inside one member, first and last included.
+
+    Every sample stays inside the member: a member no bigger than one window is read
+    whole, never a full window that runs on into whatever the archive holds next -- that
+    made two byte-identical small files look different.
+    """
     if size <= WINDOW:
-        return [data_offset]
+        return [(data_offset, size)]
+    if n <= 1:
+        return [(data_offset, WINDOW)]
     span = size - WINDOW
-    return [data_offset + (span * i // (n - 1) // 8) * 8 for i in range(n)]
+    return [(data_offset + (span * i // (n - 1) // 8) * 8, WINDOW) for i in range(n)]
 
 
 def main() -> int:
@@ -91,10 +98,10 @@ def main() -> int:
         return c
 
     def fetch(job):
-        _, at = job
+        at, length = job
         c = mine()
         c.seek(at)
-        return hashlib.sha256(c.read(WINDOW)).hexdigest()[:16]
+        return hashlib.sha256(c.read(length)).hexdigest()[:16]
 
     verdicts = collections.Counter()
     reclaimable = 0
@@ -104,9 +111,9 @@ def main() -> int:
             picked = members if args.members == 0 else members[:args.members]
             jobs, owner = [], []
             for m in picked:
-                for at in windows(m["data_offset"], size, args.samples):
+                for sample in windows(m["data_offset"], size, args.samples):
                     owner.append(m)
-                    jobs.append((len(jobs) % args.workers, at))
+                    jobs.append(sample)
             digests = list(pool.map(fetch, jobs))
             per = collections.defaultdict(list)
             for m, d in zip(owner, digests):
