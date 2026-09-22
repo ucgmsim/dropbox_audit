@@ -504,6 +504,13 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
+    def member_at(self, archive_id, hdr_offset):
+        """The member whose header sits at ``hdr_offset``, or None -- how `cat` knows
+        what must follow the member it extracts."""
+        return self.connect().execute(
+            "SELECT * FROM members WHERE archive_id=? AND hdr_offset=?",
+            (archive_id, hdr_offset)).fetchone()
+
     def find_members(self, archive_id, path) -> list[sqlite3.Row]:
         """Every member whose (dir, name) matches `path`, oldest header first.
 
