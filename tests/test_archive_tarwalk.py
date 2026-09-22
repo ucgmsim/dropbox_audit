@@ -2,7 +2,7 @@ import io
 import tarfile
 
 from dbaudit.archive.reader import ConcatFile, LocalRangeReader
-from dbaudit.archive.tarwalk import find_chain_start, walk
+from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start, walk
 from tests.archive_fakes import build_tar, write_parts
 
 MEMBERS = [(f"run/file{i:03d}.bin", bytes([i % 251]) * (1000 + i)) for i in range(50)]
@@ -300,26 +300,45 @@ def test_find_chain_start_returns_none_when_it_runs_out(tmp_path):
     assert find_chain_start(handle, 0, scan_read=4096) is None
 
 
+JUNK = bytes(range(256))
+
+
 class _LiesOnce(LocalRangeReader):
-    """Serves the first range that covers ``bad`` with junk there, and tells the truth
-    ever after -- which is what Dropbox did twice in 42,000 reads on 2026-09-21: a 206
-    whose body did not match its own Content-Range.
+    """Serves the first range that covers ``bad`` with something else there, and tells
+    the truth ever after -- which is what Dropbox did twice in 42,000 reads on
+    2026-09-21: a 206 whose body did not match its own Content-Range.
+
+    ``span=None`` corrupts the rest of that read, which is how a bad read of zeros can
+    reach `_classify_end`'s probe *and* its tail check out of one cached window.
     """
 
-    def __init__(self, directory, archive, bad):
+    once = True
+
+    def __init__(self, directory, archive, bad, fill=JUNK, span=1024):
         super().__init__(directory, archive)
-        self.bad = bad
-        self.lied = 0
+        self.bad, self.fill, self.span, self.lied = bad, fill, span, 0
 
     def read_range(self, part_idx, offset, length):
         data = super().read_range(part_idx, offset, length)
         start = self.archive.parts[part_idx].offset + offset
-        if not self.lied and start <= self.bad < start + length:
+        if (self.lied == 0 or not self.once) and start <= self.bad < start + length:
             self.lied += 1
             cut = self.bad - start
-            junk = (bytes(range(256)) * 4)[:min(1024, length - cut)]
-            return data[:cut] + junk + data[cut + len(junk):]
+            n = length - cut if self.span is None else min(self.span, length - cut)
+            fill = self.fill * (n // len(self.fill) + 1)
+            return data[:cut] + fill[:n] + data[cut + n:]
         return data
+
+
+class _AlwaysLies(_LiesOnce):
+    """Lies every time, with different bytes each time -- so the verdict's wording
+    changes but its substance does not."""
+
+    once = False
+
+    def read_range(self, part_idx, offset, length):
+        self.fill = bytes((b + self.lied) % 256 for b in JUNK)
+        return super().read_range(part_idx, offset, length)
 
 
 def _header_offsets(data):
@@ -378,3 +397,167 @@ def test_dropping_the_cache_makes_the_next_read_ask_again(tmp_path):
     handle.seek(0)
     handle.read(512)
     assert reader.requests == served_from_cache + 1
+
+
+#: Big enough that the bytes after a mid-archive injection exceed TRAILING_LIMIT,
+#: which is the branch `_classify_end` takes when a bad read looks like a terminator.
+BIG = [(f"run/big{i:03d}.bin", bytes([i % 251]) * 120_000) for i in range(40)]
+
+
+def test_a_bad_read_of_zeros_is_not_mistaken_for_the_end_of_the_archive(tmp_path):
+    """The 2026-09-21 bad reads carried float data, but nothing says the next one will.
+    Zeros where a header belongs look like a terminator, which is a *different* corrupt
+    verdict -- and one bad read must not reach it either.
+    """
+    data = build_tar(BIG)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, _header_offsets(data)[10], fill=b"\x00")
+    handle = ConcatFile(archive, reader)
+    seen = []
+
+    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+
+    assert reader.lied == 1, "the test did not actually inject a bad read"
+    assert result.state == "complete"
+    assert result.members == len(BIG)
+    assert len(seen) == len(BIG)
+
+
+def test_a_bad_read_of_zeros_cannot_end_the_walk_claiming_success(tmp_path):
+    """The worst outcome is not a false `corrupt` -- it is a false `complete`, because
+    members go missing silently and `archive index` then refuses to walk the archive
+    again. One read must not be able to say the archive ended here.
+    """
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    # span=None zeroes the rest of that read, so the probe and the tail check both
+    # come back clean out of the one bad window.
+    reader = _LiesOnce(tmp_path, archive, _header_offsets(data)[40], fill=b"\x00",
+                       span=None)
+    handle = ConcatFile(archive, reader)
+    seen = []
+
+    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+
+    assert reader.lied == 1
+    assert result.members == len(MEMBERS), "members were silently dropped"
+    assert result.state == "complete"
+    assert "resumed past" in result.detail
+
+
+def _long_name_archive():
+    """A tar whose second member carries a GNU long name, and where its real header is.
+
+    Built the same way as test_a_corrupt_header_after_a_long_name_is_corrupt_not_truncated
+    above, which is the damaged-for-real half of this pair.
+    """
+    long_name = "run/" + "d" * 150 + "/deep.bin"
+    data = bytearray(build_tar([("run/first.bin", b"a" * 100), (long_name, b"x" * 10)],
+                               format=tarfile.GNU_FORMAT))
+    first_span = 512 + (-(-100 // 512) * 512)
+    longname = tarfile.TarInfo.frombuf(bytes(data[first_span:first_span + 512]),
+                                       "utf-8", "surrogateescape")
+    return data, first_span + 512 + (-(-longname.size // 512) * 512)
+
+
+def test_a_damaged_long_name_member_is_diagnosed_once_and_not_called_transient(tmp_path):
+    """A checksum-valid header that tarfile still cannot chain through used to spin:
+    the block re-read fine every time, so the walk resumed on it over and over and
+    reported a rescue that never happened. A verdict is its state and its offset, so
+    reaching the same one twice settles it -- and the first pass's diagnosis is kept,
+    because `_classify_end` relabels the detail it is handed.
+    """
+    data, real_header = _long_name_archive()
+    data[real_header:real_header + 8] = b"\xff" * 8
+    archive = write_parts(tmp_path, bytes(data), part_size=len(data))
+    handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
+    calls = []
+
+    result = walk(handle, 0, lambda members, offset: calls.append((len(members), offset)))
+
+    assert result.state == "corrupt"
+    assert "resumed past" not in result.detail, "reported a rescue that did not happen"
+    assert "bad checksum" in result.detail, "kept the relabelled detail, not the real one"
+    assert len(calls) == 2, f"expected one pass plus one confirming pass, got {calls}"
+
+
+def test_bytes_that_are_wrong_differently_every_time_are_still_corrupt(tmp_path):
+    """A server that lies afresh on every read changes the verdict's wording but not
+    its substance, so retrying must stay bounded rather than run to REREAD_LIMIT."""
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _AlwaysLies(tmp_path, archive, _header_offsets(data)[30])
+    handle = ConcatFile(archive, reader)
+    calls = []
+
+    result = walk(handle, 0, lambda members, offset: calls.append(offset))
+
+    assert result.state == "corrupt"
+    assert reader.lied >= 2, "the test did not actually keep lying"
+    assert len(calls) == 2, f"expected one pass plus one confirming pass, got {calls}"
+    assert "resumed past" not in result.detail
+
+
+def test_a_bad_read_after_a_long_name_header_is_also_re_read(tmp_path):
+    """The block tarfile rejects is not always the one the walk stopped on: after a GNU
+    long-name header it is the real header that follows. Re-walking from the member's
+    own offset re-reads both, so a transient there is rescued like any other.
+    """
+    data, real_header = _long_name_archive()
+    archive = write_parts(tmp_path, bytes(data), part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, real_header, fill=b"\xff", span=8)
+    handle = ConcatFile(archive, reader)
+    seen = []
+
+    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+
+    assert reader.lied == 1, "the test did not actually inject a bad read"
+    assert result.state == "complete"
+    assert [m.name for m in seen] == ["first.bin", "deep.bin"]
+
+
+class _LiesAtEach(LocalRangeReader):
+    """Lies once at each of several offsets: a walk that meets one transient after
+    another, which is what a long run on a flaky account looks like."""
+
+    def __init__(self, directory, archive, offsets):
+        super().__init__(directory, archive)
+        self.pending = set(offsets)
+        self.lied = 0
+
+    def read_range(self, part_idx, offset, length):
+        data = super().read_range(part_idx, offset, length)
+        start = self.archive.parts[part_idx].offset + offset
+        for bad in sorted(self.pending):
+            if start <= bad < start + length:
+                self.pending.discard(bad)
+                self.lied += 1
+                cut = bad - start
+                n = min(1024, length - cut)
+                return data[:cut] + (JUNK * 4)[:n] + data[cut + n:]
+        return data
+
+
+def _walk_with_transients(tmp_path, count):
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    offsets = _header_offsets(data)[10:10 + count]
+    reader = _LiesAtEach(tmp_path, archive, offsets)
+    handle = ConcatFile(archive, reader)
+    seen = []
+    return walk(handle, 0, lambda members, offset: seen.extend(members)), seen, reader
+
+
+def test_a_walk_rescues_up_to_the_reread_limit(tmp_path):
+    result, seen, reader = _walk_with_transients(tmp_path, REREAD_LIMIT)
+    assert reader.lied == REREAD_LIMIT
+    assert result.state == "complete"
+    assert len(seen) == len(MEMBERS)
+
+
+def test_a_walk_stops_believing_the_server_past_the_reread_limit(tmp_path):
+    """One more transient than the cap allows, and the walk reports what it last saw
+    rather than retrying for ever. The run resumes from its committed cursor."""
+    result, _, reader = _walk_with_transients(tmp_path, REREAD_LIMIT + 1)
+    assert reader.lied == REREAD_LIMIT + 1
+    assert result.state == "corrupt"

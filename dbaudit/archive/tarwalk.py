@@ -27,9 +27,10 @@ TRAILING_LIMIT = 1 << 20
 #: pin both branches.
 _RAN_OUT = frozenset({"unexpected end of data", "empty header", "truncated header"})
 
-#: The one corrupt verdict worth a second read: the chain stopped on bytes that are
-#: neither a header nor a terminator. `walk` matches on this, so the two must agree.
-_NOT_A_HEADER = "not a header and not a terminator at"
+#: The verdicts that end a walk for good, and so are never believed on one read.
+#: `crossed` and `stopped` are not final -- something walks on from them either way --
+#: and `truncated` reports `end_offset = total`, so there is no block to read again.
+_FINAL = frozenset({"corrupt", "complete"})
 
 #: How many times one walk will accept "that read was wrong, try again" before it
 #: believes the bytes. A bad read is rare and independent; a bad archive is neither.
@@ -71,45 +72,22 @@ class WalkResult:
     detail: str = ""
 
 
-def _fresh_header_at(concat, offset: int) -> bool:
-    """Is there a checksum-valid header at ``offset``, on a read that shares nothing
-    with the one that just failed?
-
-    ``ConcatFile`` answers from a window it already fetched, so re-reading the block
-    that stopped a walk returns the same bytes -- including when those bytes arrived
-    wrong. Dropping the cache forces a new request. This is not hypothetical: on
-    2026-09-21 a 6-hour walk of v01p0_incomplete.tar declared a 5 TiB archive corrupt
-    on the strength of two reads out of 42,000 whose bodies did not match their own
-    ``Content-Range``, and both offsets re-read as perfectly good headers the next day.
-    """
-    if not hasattr(concat, "drop_cache"):        # a plain file object cannot lie twice
-        return False
-    concat.drop_cache()
-    concat.seek(offset)
-    block = concat.read(BLOCK)
-    if len(block) < BLOCK or block[257:262] != b"ustar":
-        return False
-    try:
-        tarfile.TarInfo.frombuf(block, "utf-8", "surrogateescape")
-    except tarfile.HeaderError:
-        return False
-    return True
-
-
 def walk(concat, start_offset: int, commit, batch_size: int = 2000,
          stop_at: int | None = None, should_stop=None) -> WalkResult:
     """Walk from ``start_offset``, calling ``commit(members, next_offset)`` per batch.
 
-    ``corrupt`` is the one verdict this refuses to reach on a single read. When the
-    chain stops on bytes that are neither a header nor a terminator, the block is read
-    again from the server; if it parses that time, the walk resumes there rather than
-    condemning the archive, and says so in the result's detail. Bytes that are really
-    corrupt read the same way twice, so a genuinely damaged archive is unaffected.
+    No verdict that ends the walk -- ``corrupt`` or ``complete`` -- is believed on one
+    read. Reaching one drops the reader's cache and walks again from where it landed,
+    so the deciding bytes come from a second request; a verdict that repeats stands,
+    and one that changes means the first read was wrong and the walk carries on, which
+    the result's detail records. A genuinely damaged archive reads the same way twice
+    and reaches the verdict it always did, one short pass later.
 
     ``commit`` is expected to write the members and the cursor in one transaction, so
     that an interrupted walk resumes from exactly the last committed offset. It is
-    called exactly once per batch and exactly once more at the end, on every return
-    path -- including when the archive cannot even be opened at ``start_offset``.
+    called exactly once per batch and exactly once more at the end of each pass -- so
+    more than once at the end when a verdict was read twice, the extra calls carrying
+    no members, and the last call always reflecting the offset finally reached.
 
     ``stop_at`` ends the walk once the next header lies at or past that offset, which
     is how one segment's chain confirms where its successor's chain must begin. A
@@ -130,23 +108,36 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
         commit([], start_offset)
         return WalkResult("crossed", start_offset, 0)
 
-    # REREAD_LIMIT is the whole bound on this loop: a rescued offset always advances,
-    # because the re-read leaves the good header in the cache for the next pass to parse.
-    position, seen, rescued = start_offset, 0, []
+    # No verdict that ends the walk is believed on one read. Reaching one drops the
+    # cache and walks again from where it landed, which re-reads the deciding bytes
+    # from the server: a verdict that repeats is the archive talking, and one that
+    # changes means the earlier read was wrong. Each of the three ways `_classify_end`
+    # says corrupt is covered, and so is `complete` -- a bad read of zeros would
+    # otherwise end a six-hour walk claiming success, with members silently missing
+    # and `index` refusing to walk it again.
+    # A verdict is a state and the offset it was reached at, not its wording:
+    # `_classify_end` relabels a detail it was handed, so the same bytes can be
+    # described two ways by two paths, and that is not the bytes changing.
+    position, seen, rescued, verdict, first = start_offset, 0, [], None, None
     while True:
         result, seen = _walk_chain(concat, position, commit, batch_size, stop_at,
                                    should_stop, seen)
-        if (result.state != "corrupt"
-                or not result.detail.startswith(_NOT_A_HEADER)
-                or len(rescued) >= REREAD_LIMIT):
+        again = (result.state, result.end_offset)
+        if verdict is not None and again != verdict:
+            rescued.append(position)        # reading `position` again changed the answer
+        if result.state not in _FINAL:
             break
-        if not _fresh_header_at(concat, result.end_offset):
-            break               # two independent reads agree: the archive really is bad
-        rescued.append(result.end_offset)
+        if again == verdict:
+            result = first                  # the retry agreed: keep the first diagnosis,
+            break                           # which says what actually stopped the walk
+        if result.end_offset == position or len(rescued) >= REREAD_LIMIT:
+            break
+        verdict, first = again, result
+        concat.drop_cache()
         position = result.end_offset
     if rescued:
         note = ("resumed past " + ", ".join(str(o) for o in rescued) +
-                ": read as not-a-header, re-read as a valid header")
+                ": those blocks read differently the second time")
         result = replace(result, detail=f"{result.detail}; {note}" if result.detail
                          else note)
     return result
@@ -208,7 +199,7 @@ def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
     probe = concat.read(TERMINATOR)
     if any(probe):
         return WalkResult("corrupt", end, seen,
-                          f"{_NOT_A_HEADER} {end}: {probe.hex()}")
+                          f"not a header and not a terminator at {end}: {probe.hex()}")
     if remainder > TRAILING_LIMIT:
         return WalkResult("corrupt", end, seen,
                           f"terminator at {end} with {remainder} bytes after it")
