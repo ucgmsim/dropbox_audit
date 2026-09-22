@@ -1126,7 +1126,11 @@ def _print_index_completeness_warning(row) -> None:
         # Task 11 runs `report`/`export` against a walk in progress, and a manifest
         # that is 12% walked must never read like a finished archive's.
         print(f"\n  WARNING: {row['name']} is not fully indexed (state: {row['state']}).")
-        print("  This index is a lower bound on the archive's real contents.")
+        # Not "a lower bound": rows from chains the join has not yet confirmed are
+        # counted too, and a cold scan can lock onto a tar stored inside the archive.
+        print("  It may be missing members, and until every chain is confirmed it may also")
+        print("  list members of a tar stored inside the archive: treat these figures as")
+        print("  provisional.")
     if row["state"] == "stale":
         print(f"  It is also stale ({row['detail'] or 'parts changed since indexing'}):")
         print("  the parts changed underneath this index, so it may describe bytes")

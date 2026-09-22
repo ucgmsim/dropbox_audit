@@ -578,10 +578,12 @@ def test_a_walk_that_cannot_get_two_reads_to_agree_gives_up_loudly(tmp_path):
 # ---- no single read decides a final verdict -----------------------------------------
 #
 # Each test lies exactly once, on the Nth fetch that covers the offset deciding the
-# verdict, for every N that has one. Which fetch is the dangerous one depends on window
-# sizes and pass structure, so the tests do not guess it: whichever read the lie lands
-# on, the verdict must come out the truth. N = 3 is the read that confirms the verdict,
-# and a lie there used to overturn a correct one.
+# verdict, for each N that such a fetch exists -- measured, and asserted, so a change to
+# the read pattern fails here rather than leaving a case that quietly tests nothing.
+# Which fetch is the dangerous one depends on window sizes and pass structure, so the
+# tests do not guess it: whichever read the lie lands on, the verdict must be the truth.
+# On a walk from 0, N = 3 is the read that confirms the verdict, and a lie there used to
+# overturn a correct one.
 
 def _terminator(data):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
@@ -598,17 +600,16 @@ def _walk_lying_once(tmp_path, data, bad, nth, fill=JUNK, start=0, span=1024):
     return result, seen, reader
 
 
-@pytest.mark.parametrize("nth", [1, 2, 3, 4])
+@pytest.mark.parametrize("nth", [1, 2, 3])
 def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path, nth):
     data = build_tar(MEMBERS)
     result, seen, reader = _walk_lying_once(tmp_path, data, _terminator(data), nth)
     assert result.state == "complete", f"a lie on covering read #{nth} decided the verdict"
     assert len(seen) == len(MEMBERS)
-    if nth <= 3:
-        assert reader.lied == 1, "the test did not actually inject a bad read"
+    assert reader.lied == 1, "the test did not actually inject a bad read"
 
 
-@pytest.mark.parametrize("nth", [1, 2, 3, 4])
+@pytest.mark.parametrize("nth", [1, 2, 3])
 def test_one_bad_read_cannot_pass_a_damaged_archive_as_complete(tmp_path, nth):
     """The false `complete` is the silent failure: members go missing and `index`
     refuses to walk the archive again. Here the archive really is damaged -- junk after
@@ -619,20 +620,18 @@ def test_one_bad_read_cannot_pass_a_damaged_archive_as_complete(tmp_path, nth):
     data[junk_at:junk_at + 8] = b"\xff" * 8
     result, _, reader = _walk_lying_once(tmp_path, bytes(data), junk_at, nth, fill=b"\x00")
     assert result.state == "corrupt", f"a lie on covering read #{nth} decided the verdict"
-    if nth <= 3:
-        assert reader.lied == 1, "the test did not actually inject a bad read"
+    assert reader.lied == 1, "the test did not actually inject a bad read"
 
 
-@pytest.mark.parametrize("nth", [1, 2, 3, 4])
-def test_a_bad_read_of_the_very_first_block_is_read_again(tmp_path, nth):
+def test_a_bad_read_of_the_very_first_block_is_read_again(tmp_path):
     """Segment 0 starts at 0 on a fresh reader, so nothing has validated its first block.
-    A verdict reached at a walk's own start offset used to be believed outright."""
+    A verdict reached at a walk's own start offset used to be believed outright. (Only
+    one read covers offset 0 in a walk that reads it right, so there is one case.)"""
     data = build_tar(MEMBERS)
-    result, seen, reader = _walk_lying_once(tmp_path, data, 0, nth)
-    assert result.state == "complete", f"a lie on covering read #{nth} decided the verdict"
+    result, seen, reader = _walk_lying_once(tmp_path, data, 0, 1)
+    assert reader.lied == 1
+    assert result.state == "complete"
     assert len(seen) == len(MEMBERS)
-    if nth == 1:
-        assert reader.lied == 1
 
 
 @pytest.mark.parametrize("nth", [1, 2, 3, 4])
@@ -646,8 +645,7 @@ def test_a_walk_resumed_at_the_terminator_confirms_complete(tmp_path, nth):
     t = _terminator(data)
     result, _, reader = _walk_lying_once(tmp_path, data, t, nth, start=t)
     assert result.state == "complete", f"a lie on covering read #{nth} decided the verdict"
-    if nth <= 2:
-        assert reader.lied == 1
+    assert reader.lied == 1
 
 
 @pytest.mark.parametrize("nth", [1, 2, 3, 4])
@@ -657,23 +655,22 @@ def test_a_walk_resumed_at_the_terminator_still_finds_real_damage(tmp_path, nth)
     data = bytearray(build_tar(MEMBERS))
     t = _terminator(bytes(data))
     data[t + 1536:t + 1544] = b"\xff" * 8
-    result, _, _ = _walk_lying_once(tmp_path, bytes(data), t + 1536, nth, fill=b"\x00",
-                                    start=t)
+    result, _, reader = _walk_lying_once(tmp_path, bytes(data), t + 1536, nth, fill=b"\x00",
+                                         start=t)
     assert result.state == "corrupt", f"a lie on covering read #{nth} decided the verdict"
+    assert reader.lied == 1
 
 
-@pytest.mark.parametrize("nth", [1, 2, 3])
-def test_a_walk_resumed_on_a_long_name_member_re_reads_its_real_header(tmp_path, nth):
+def test_a_walk_resumed_on_a_long_name_member_re_reads_its_real_header(tmp_path):
     """A cursor can land on a GNU long-name member. tarfile rejects the whole thing when
     the real header after the name reads badly, at the walk's own start offset."""
     data, real_header = _long_name_archive()
     first_span = 512 + (-(-100 // 512) * 512)                # where the long name starts
-    result, seen, reader = _walk_lying_once(tmp_path, bytes(data), real_header, nth,
+    result, seen, reader = _walk_lying_once(tmp_path, bytes(data), real_header, 1,
                                             fill=b"\xff", start=first_span, span=8)
-    assert result.state == "complete", f"a lie on covering read #{nth} decided the verdict"
+    assert reader.lied == 1
+    assert result.state == "complete"
     assert [m.name for m in seen] == ["deep.bin"]
-    if nth == 1:
-        assert reader.lied == 1
 
 
 def test_a_rescue_that_ends_in_a_crossing_keeps_its_note(tmp_path):
@@ -698,3 +695,20 @@ def test_the_note_names_each_re_read_offset_once(tmp_path):
     t = _terminator(data)
     result, _, _ = _walk_lying_once(tmp_path, data, t, 3)
     assert result.detail.count(str(t)) == 1, result.detail
+
+
+def test_a_walk_starting_on_a_damaged_long_name_member_says_what_is_wrong(tmp_path):
+    """tarfile rejects the member for its damaged *second* header and says so, but
+    `_classify_end` used to discard that and describe the first -- a real, checksum-valid
+    `././@LongLink` header -- as "not a header". An operator reads this detail to decide
+    whether to re-run six hours of walking; it should name the actual fault."""
+    data, real_header = _long_name_archive()
+    data[real_header:real_header + 8] = b"\xff" * 8
+    first_span = 512 + (-(-100 // 512) * 512)
+    archive = write_parts(tmp_path, bytes(data), part_size=len(data))
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), first_span,
+                  lambda members, offset: None)
+    assert result.state == "corrupt"
+    assert result.end_offset == first_span
+    assert "bad checksum" in result.detail
+    assert "not a header" not in result.detail

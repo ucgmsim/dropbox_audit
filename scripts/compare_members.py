@@ -130,7 +130,9 @@ def main() -> int:
             elif same:
                 reclaimable += size * (len(members) - 1)
             print(f"  {name:22} {size / 2**30:7.1f} GiB x {len(members):>3} in {scope}")
-            print(f"    {len(picked)} sampled at {args.samples} windows -> "
+            how = ("read whole" if size <= WINDOW
+                   else f"sampled at {len(windows(0, size, args.samples))} windows")
+            print(f"    {len(picked)} {how} -> "
                   f"{len(clusters)} distinct content signature(s)"
                   f"{'  [all the same]' if same else ''}")
             if len(clusters) < len(picked):

@@ -29,7 +29,7 @@ for _root in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.ge
 from dbaudit.archive.parts import ArchiveSet, Part
 from dbaudit.archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile,
                                     DropboxRangeReader, LocalRangeReader)
-from dbaudit.archive.tarwalk import BLOCK, find_chain_start, walk
+from dbaudit.archive.tarwalk import BLOCK, UnsettledRead, find_chain_start, walk
 from dbaudit.auth import TokenProvider
 from dbaudit.limiter import AdaptiveLimiter
 
@@ -298,7 +298,13 @@ def main() -> int:
                 fresh = ConcatFile(archive_set, fresh_reader, window_min=WINDOW_MIN,
                                    window_max=WINDOW_MAX)
                 readers.append(fresh_reader)
-                res = walk(fresh, at, lambda ms, nxt: members.extend(ms), stop_at=alive)
+                try:
+                    res = walk(fresh, at, lambda ms, nxt: members.extend(ms), stop_at=alive)
+                except UnsettledRead as exc:
+                    # The walker re-reads for itself now, and gives up only when reads
+                    # will not agree -- a finding about the server, worth reporting.
+                    print(f"    reads would not settle: {exc}", flush=True)
+                    break
                 print(f"    attempt {attempt + 1}: {res.state} at {res.end_offset:,} "
                       f"after {len(members):,} members  ({time.time() - t0:.0f}s)", flush=True)
                 if res.state != "corrupt":

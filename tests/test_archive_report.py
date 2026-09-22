@@ -119,8 +119,8 @@ def test_report_on_a_partially_walked_archive_warns_before_the_figures(tmp_path,
 
     assert main(["archive", "report", "--db", db, "--archive", "a.tar"]) == 0
     out = capsys.readouterr().out
-    assert "lower bound" in out
-    warn_at = out.index("lower bound")
+    assert "may be missing members" in out
+    warn_at = out.index("may be missing members")
     figures_at = out.index(str(n_members))
     assert warn_at < figures_at
 
@@ -132,7 +132,7 @@ def test_report_on_a_stale_archive_says_so(tmp_path, capsys):
 
     assert main(["archive", "report", "--db", db, "--archive", "a.tar"]) == 0
     out = capsys.readouterr().out
-    assert "lower bound" in out
+    assert "may be missing members" in out
     # Not just "assert 'stale' in out": the generic not-complete warning already
     # interpolates the raw state name ("state: stale"), so that alone would pass even
     # without a dedicated stale note. Pin the text that only the dedicated note has.
@@ -584,14 +584,14 @@ def test_export_warns_on_a_non_complete_archive_but_not_on_a_complete_one(
     out_complete = tmp_path / "out_complete"
     assert main(["archive", "export", "--db", db, "--archive", "a.tar",
                  "--out", str(out_complete)]) == 0
-    assert "lower bound" not in capsys.readouterr().out.lower()
+    assert "may be missing members" not in capsys.readouterr().out.lower()
 
     store.mark_stale(archive_id, "parts changed underneath the index")
     out_stale = tmp_path / "out_stale"
     assert main(["archive", "export", "--db", db, "--archive", "a.tar",
                  "--out", str(out_stale)]) == 0
     out = capsys.readouterr().out
-    assert "lower bound" in out
+    assert "may be missing members" in out
     assert "no longer there" in out.lower()
 
 
@@ -615,6 +615,6 @@ def test_export_warns_on_a_partially_walked_archive_before_the_wrote_lines(
     assert main(["archive", "export", "--db", db, "--archive", "a.tar",
                  "--out", str(out_dir)]) == 0
     out = capsys.readouterr().out
-    assert "lower bound" in out
+    assert "may be missing members" in out
     assert "wrote " in out
-    assert out.index("lower bound") < out.index("wrote ")
+    assert out.index("may be missing members") < out.index("wrote ")
