@@ -298,3 +298,83 @@ def test_find_chain_start_returns_none_when_it_runs_out(tmp_path):
     archive = write_parts(directory, b"\x00" * 20000, part_size=4096)
     handle = ConcatFile(archive, LocalRangeReader(directory, archive))
     assert find_chain_start(handle, 0, scan_read=4096) is None
+
+
+class _LiesOnce(LocalRangeReader):
+    """Serves the first range that covers ``bad`` with junk there, and tells the truth
+    ever after -- which is what Dropbox did twice in 42,000 reads on 2026-09-21: a 206
+    whose body did not match its own Content-Range.
+    """
+
+    def __init__(self, directory, archive, bad):
+        super().__init__(directory, archive)
+        self.bad = bad
+        self.lied = 0
+
+    def read_range(self, part_idx, offset, length):
+        data = super().read_range(part_idx, offset, length)
+        start = self.archive.parts[part_idx].offset + offset
+        if not self.lied and start <= self.bad < start + length:
+            self.lied += 1
+            cut = self.bad - start
+            junk = (bytes(range(256)) * 4)[:min(1024, length - cut)]
+            return data[:cut] + junk + data[cut + len(junk):]
+        return data
+
+
+def _header_offsets(data):
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as reference:
+        return [m.offset for m in reference]
+
+
+def test_one_bad_read_does_not_condemn_the_whole_archive(tmp_path):
+    """A read that came back wrong must not be able to end the walk.
+
+    The walk stops on junk, re-reads that block from the server, finds a good header
+    and carries on -- so the manifest is complete and the archive is not called corrupt
+    on the strength of a single read.
+    """
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, _header_offsets(data)[30])
+    handle = ConcatFile(archive, reader)
+    seen = []
+
+    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+
+    assert reader.lied == 1, "the test did not actually inject a bad read"
+    assert result.state == "complete"
+    assert result.members == len(MEMBERS)
+    assert [m.name for m in seen] == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
+    assert "resumed past" in result.detail
+
+
+def test_bytes_that_are_wrong_twice_are_still_corrupt(tmp_path):
+    """The guard above must not swallow real damage: junk that is really in the file
+    reads the same way every time, so the verdict stands."""
+    data = bytearray(build_tar(MEMBERS))
+    bad = _header_offsets(bytes(data))[30]
+    data[bad:bad + 1024] = (bytes(range(256)) * 4)
+    seen, _, result = collect(tmp_path, bytes(data), part_size=len(data))
+
+    assert result.state == "corrupt"
+    assert str(bad) in result.detail
+    assert "resumed past" not in result.detail
+    assert len(seen) == 30
+
+
+def test_dropping_the_cache_makes_the_next_read_ask_again(tmp_path):
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = LocalRangeReader(tmp_path, archive)
+    handle = ConcatFile(archive, reader)
+    handle.seek(0)
+    handle.read(512)
+    served_from_cache = reader.requests
+    handle.seek(0)
+    handle.read(512)
+    assert reader.requests == served_from_cache, "the second read should hit the cache"
+    handle.drop_cache()
+    handle.seek(0)
+    handle.read(512)
+    assert reader.requests == served_from_cache + 1

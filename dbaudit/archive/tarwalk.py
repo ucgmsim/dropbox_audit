@@ -14,7 +14,7 @@ here rather than inferred from iteration finishing.
 from __future__ import annotations
 
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 BLOCK = 512
 TERMINATOR = BLOCK * 2
@@ -26,6 +26,14 @@ TRAILING_LIMIT = 1 << 20
 #: finding something there that is not a header. Stable across CPython versions; the tests
 #: pin both branches.
 _RAN_OUT = frozenset({"unexpected end of data", "empty header", "truncated header"})
+
+#: The one corrupt verdict worth a second read: the chain stopped on bytes that are
+#: neither a header nor a terminator. `walk` matches on this, so the two must agree.
+_NOT_A_HEADER = "not a header and not a terminator at"
+
+#: How many times one walk will accept "that read was wrong, try again" before it
+#: believes the bytes. A bad read is rare and independent; a bad archive is neither.
+REREAD_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -63,9 +71,40 @@ class WalkResult:
     detail: str = ""
 
 
+def _fresh_header_at(concat, offset: int) -> bool:
+    """Is there a checksum-valid header at ``offset``, on a read that shares nothing
+    with the one that just failed?
+
+    ``ConcatFile`` answers from a window it already fetched, so re-reading the block
+    that stopped a walk returns the same bytes -- including when those bytes arrived
+    wrong. Dropping the cache forces a new request. This is not hypothetical: on
+    2026-09-21 a 6-hour walk of v01p0_incomplete.tar declared a 5 TiB archive corrupt
+    on the strength of two reads out of 42,000 whose bodies did not match their own
+    ``Content-Range``, and both offsets re-read as perfectly good headers the next day.
+    """
+    if not hasattr(concat, "drop_cache"):        # a plain file object cannot lie twice
+        return False
+    concat.drop_cache()
+    concat.seek(offset)
+    block = concat.read(BLOCK)
+    if len(block) < BLOCK or block[257:262] != b"ustar":
+        return False
+    try:
+        tarfile.TarInfo.frombuf(block, "utf-8", "surrogateescape")
+    except tarfile.HeaderError:
+        return False
+    return True
+
+
 def walk(concat, start_offset: int, commit, batch_size: int = 2000,
          stop_at: int | None = None, should_stop=None) -> WalkResult:
     """Walk from ``start_offset``, calling ``commit(members, next_offset)`` per batch.
+
+    ``corrupt`` is the one verdict this refuses to reach on a single read. When the
+    chain stops on bytes that are neither a header nor a terminator, the block is read
+    again from the server; if it parses that time, the walk resumes there rather than
+    condemning the archive, and says so in the result's detail. Bytes that are really
+    corrupt read the same way twice, so a genuinely damaged archive is unaffected.
 
     ``commit`` is expected to write the members and the cursor in one transaction, so
     that an interrupted walk resumes from exactly the last committed offset. It is
@@ -91,25 +130,49 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
         commit([], start_offset)
         return WalkResult("crossed", start_offset, 0)
 
+    # REREAD_LIMIT is the whole bound on this loop: a rescued offset always advances,
+    # because the re-read leaves the good header in the cache for the next pass to parse.
+    position, seen, rescued = start_offset, 0, []
+    while True:
+        result, seen = _walk_chain(concat, position, commit, batch_size, stop_at,
+                                   should_stop, seen)
+        if (result.state != "corrupt"
+                or not result.detail.startswith(_NOT_A_HEADER)
+                or len(rescued) >= REREAD_LIMIT):
+            break
+        if not _fresh_header_at(concat, result.end_offset):
+            break               # two independent reads agree: the archive really is bad
+        rescued.append(result.end_offset)
+        position = result.end_offset
+    if rescued:
+        note = ("resumed past " + ", ".join(str(o) for o in rescued) +
+                ": read as not-a-header, re-read as a valid header")
+        result = replace(result, detail=f"{result.detail}; {note}" if result.detail
+                         else note)
+    return result
+
+
+def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, should_stop,
+                seen: int):
+    """One pass of the chain from ``start_offset``. Returns (result, members so far)."""
     total = concat.archive.total_size
     concat.seek(start_offset)
     try:
         archive = tarfile.open(fileobj=concat, mode="r:")
     except tarfile.ReadError as exc:
         commit([], start_offset)
-        return _classify_end(concat, start_offset, 0, str(exc))
+        return _classify_end(concat, start_offset, seen, str(exc)), seen
 
     batch: list[Member] = []
-    seen = 0
     while True:
         try:
             info = archive.next()
         except tarfile.ReadError as exc:
             commit(batch, archive.offset)
             if str(exc) in _RAN_OUT:
-                return WalkResult("truncated", total, seen, str(exc))
+                return WalkResult("truncated", total, seen, str(exc)), seen
             return WalkResult("corrupt", archive.offset, seen,
-                              f"{exc} after the header at {archive.offset}")
+                              f"{exc} after the header at {archive.offset}"), seen
         if info is None:
             break
         batch.append(Member.from_tarinfo(info))
@@ -117,17 +180,17 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
         archive.members.clear()             # the walk is a stream; do not accumulate
         if stop_at is not None and archive.offset >= stop_at:
             commit(batch, archive.offset)
-            return WalkResult("crossed", archive.offset, seen)
+            return WalkResult("crossed", archive.offset, seen), seen
         if should_stop is not None and should_stop():
             commit(batch, archive.offset)
-            return WalkResult("stopped", archive.offset, seen)
+            return WalkResult("stopped", archive.offset, seen), seen
         if len(batch) >= batch_size:
             commit(batch, archive.offset)
             batch = []
 
     end = archive.offset
     commit(batch, end)
-    return _classify_end(concat, end, seen)
+    return _classify_end(concat, end, seen), seen
 
 
 def _first_non_zero(buf: bytes) -> int | None:
@@ -145,7 +208,7 @@ def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
     probe = concat.read(TERMINATOR)
     if any(probe):
         return WalkResult("corrupt", end, seen,
-                          f"not a header and not a terminator at {end}: {probe.hex()}")
+                          f"{_NOT_A_HEADER} {end}: {probe.hex()}")
     if remainder > TRAILING_LIMIT:
         return WalkResult("corrupt", end, seen,
                           f"terminator at {end} with {remainder} bytes after it")

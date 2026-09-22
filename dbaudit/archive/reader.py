@@ -123,6 +123,18 @@ class ConcatFile:
         self._pos += len(data)
         return data
 
+    def drop_cache(self) -> None:
+        """Forget the fetched window, so the next read asks the server again.
+
+        A read that came back wrong is indistinguishable from one that came back right
+        until something reads those bytes a second time -- and a second read served out
+        of this cache is the same read. The walker drops the cache before deciding that
+        an archive is corrupt, which is the one verdict worth a fresh request.
+        """
+        self._cache = b""
+        self._cache_start = -1
+        self._window = self._window_min
+
     def _fill(self, pos: int, need: int) -> None:
         cache_end = self._cache_start + len(self._cache)
         gap = pos - cache_end
