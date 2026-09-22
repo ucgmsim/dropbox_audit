@@ -29,7 +29,7 @@ crash. Three design choices follow directly from that:
   archive's would be exactly the kind of disagreement that makes a reader trust
   neither.
 * `cmd_archive_report`/`cmd_archive_export` (dbaudit/cli.py) are the two commands
-  built on this module; they share one "this index is a lower bound" warning
+  built on this module; they share one "this index is not the whole archive yet" warning
   (`_print_index_completeness_warning`) since that is about how the figures are
   presented, not what they are -- fix round 1 extended it from `report` alone to
   both, on the reasoning that `export`'s whole product is files meant to be

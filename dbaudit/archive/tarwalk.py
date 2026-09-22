@@ -221,8 +221,11 @@ def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
     concat.seek(end)
     probe = concat.read(TERMINATOR)
     if any(probe):
-        return WalkResult("corrupt", end, seen,
-                          f"not a header and not a terminator at {end}: {probe.hex()}")
+        # When tarfile has already said what is wrong -- a damaged header *after* a GNU
+        # long name, say -- that is the diagnosis; the block here may be a perfectly
+        # good header, and calling it "not a header" sends the reader the wrong way.
+        what = detail or "not a header and not a terminator"
+        return WalkResult("corrupt", end, seen, f"{what} at {end}: {probe.hex()}")
     if remainder > TRAILING_LIMIT:
         return WalkResult("corrupt", end, seen,
                           f"terminator at {end} with {remainder} bytes after it")
