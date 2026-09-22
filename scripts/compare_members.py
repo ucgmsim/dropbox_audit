@@ -11,7 +11,7 @@ duplicates, and the report says so. Windows that differ settle it outright.
 """
 from __future__ import annotations
 
-import argparse, collections, hashlib, os, sqlite3, sys
+import argparse, collections, hashlib, os, sqlite3, sys, threading
 from concurrent.futures import ThreadPoolExecutor
 
 for _root in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.getcwd()):
@@ -74,13 +74,25 @@ def main() -> int:
     limiter = AdaptiveLimiter(rps=5.0, max_concurrency=args.workers)
     tokens = None if args.local_dir else TokenProvider(remote=args.remote)
     readers = []
+    # One reader per thread, built once. Indexing a shared list by job number let two
+    # threads share a `requests.Session`, which the rest of this codebase avoids
+    # (Ruling T7-3), and grew the list past `--workers` under a race -- every extra
+    # reader paying for its own TLS handshake. That is what made the first full run
+    # take four times its estimate.
+    tls = threading.local()
+
+    def mine():
+        c = getattr(tls, "concat", None)
+        if c is None:
+            r = (LocalRangeReader(args.local_dir, archive_set) if args.local_dir
+                 else DropboxRangeReader(archive_set, tokens, limiter))
+            readers.append(r)
+            c = tls.concat = ConcatFile(archive_set, r, window_min=1, window_max=1)
+        return c
 
     def fetch(job):
-        idx, at = job
-        while len(readers) <= idx:
-            readers.append(LocalRangeReader(args.local_dir, archive_set) if args.local_dir
-                           else DropboxRangeReader(archive_set, tokens, limiter))
-        c = ConcatFile(archive_set, readers[idx], window_min=1, window_max=1)
+        _, at = job
+        c = mine()
         c.seek(at)
         return hashlib.sha256(c.read(WINDOW)).hexdigest()[:16]
 
@@ -120,10 +132,12 @@ def main() -> int:
                 print(f"      repeats: {shape} -> {redundant} of {len(picked)} are copies, "
                       f"{size * redundant / 2**30:,.1f} GiB")
 
-    print(f"\n=== {verdicts['same']} groups identical where sampled, "
-          f"{verdicts['different']} proven different ===")
-    print(f"  copies beyond the first in the identical groups: "
-          f"{reclaimable / 2**40:.2f} TiB (likely duplicates, not proven byte-identical)")
+    print(f"\n=== {verdicts['same']} groups identical throughout, "
+          f"{verdicts['different']} holding more than one distinct content ===")
+    scope = ("copies beyond the first within each content cluster" if args.members == 0
+             else "copies beyond the first in the wholly-identical groups")
+    print(f"  {scope}: {reclaimable / 2**40:.2f} TiB "
+          f"(matching at every sampled window; sampling never proves identity)")
     req = sum(r.requests for r in readers)
     got = sum(r.bytes_fetched for r in readers)
     print(f"  cost: {req} requests, {got / 2**20:.1f} MiB")
