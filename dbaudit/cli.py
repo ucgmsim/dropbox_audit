@@ -37,7 +37,7 @@ from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeRea
                              LocalRangeReader, ReaderError)
 from .archive import report as archive_report
 from .archive.store import ArchiveStore
-from .archive.tarwalk import WalkResult, find_chain_start, walk
+from .archive.tarwalk import BLOCK, REREAD_LIMIT, WalkResult, find_chain_start, walk
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
 from .limiter import AdaptiveLimiter
@@ -70,6 +70,11 @@ DROPBOX_HASH_BLOCK = 4 << 20
 # output file costs 2 requests, anything under 16 MiB costs 1, and a small file like
 # root_params.yaml is one small read rather than a padded minimum.
 CAT_CHUNK = 16 << 20
+# Consecutive `cat` reads overlap by this much and must agree on it. A 206 whose body
+# is some other range -- Dropbox returned two in ~42,000 reads on 2026-09-21 -- cannot
+# also reproduce the bytes its neighbouring read saw there. 4 KiB against a 16 MiB read
+# is 0.02%, and a member under 16 MiB still costs one request.
+CAT_OVERLAP = 4 << 10
 # The file types `cat` will extract, decoded the same way Member.from_tarinfo
 # (tarwalk.py) decodes them -- a single header byte through decode("ascii", "replace").
 # Mirrors tarfile.REGULAR_TYPES minus GNUTYPE_SPARSE: a sparse member's data region is
@@ -1222,10 +1227,94 @@ def _print_candidates(matches) -> None:
               f"mtime={match['mtime']}", file=sys.stderr)
 
 
+class _CatError(Exception):
+    """A member could not be read in a form its surroundings vouch for."""
+
+
+def _verified_member_bytes(concat, data_offset, size, total, next_is):
+    """Yield one member's bytes, each read checked against what surrounds it.
+
+    A tar keeps no checksum of member data, so no read can be proved right -- but a
+    body that is some other range entirely, which is how Dropbox got it wrong on
+    2026-09-21, is caught for almost nothing by reading a little either side:
+
+    - the first read starts one block early, on the member's own header, which must be
+      checksum-valid and state this member's size;
+    - the last read ends one block late, on whatever follows, which must be what the
+      index says is there (`next_is`: "header", "zeros" for the terminator, or "either"
+      when the index cannot say);
+    - consecutive reads overlap by CAT_OVERLAP and must agree on it, so every read's
+      head is checked before any of its bytes are yielded.
+
+    A read failing a check is read again, fresh, up to REREAD_LIMIT times. An overlap
+    that is all zeros agrees with any other zeros, so a read starting on one counts only
+    once two fresh reads of it match. Past the limit this raises _CatError, having
+    yielded nothing that failed. A read wrong only in its interior, right at both ends,
+    is not caught; that is not how this has been seen to fail.
+    """
+    if data_offset + size > total:
+        raise _CatError(f"the archive ends {data_offset + size - total:,} byte(s) "
+                        f"before this member does")
+    end = data_offset + -(-size // BLOCK) * BLOCK      # where the next header sits
+    stop = min(end + BLOCK, total)
+    has_trailer = stop >= end + BLOCK
+
+    def fetch(at, length):
+        concat.drop_cache()                            # a re-read must be a new request
+        concat.seek(at)
+        buf = concat.read(length)
+        if len(buf) != length:
+            raise _CatError(f"read {len(buf):,} of {length:,} byte(s) at {at:,}")
+        return buf
+
+    def is_header(block, want_size=None):
+        try:
+            info = tarfile.TarInfo.frombuf(block, "utf-8", "surrogateescape")
+        except tarfile.HeaderError:
+            return False
+        return want_size is None or info.size == want_size
+
+    def trailer_ok(block):
+        if next_is == "header":
+            return is_header(block)
+        if next_is == "zeros":
+            return not any(block)
+        return not any(block) or is_header(block)
+
+    at, written, seen_tail = data_offset - BLOCK, data_offset, None
+    while True:
+        length = min(CAT_CHUNK, stop - at)
+        last = at + length >= stop
+        for _ in range(REREAD_LIMIT + 1):
+            buf = fetch(at, length)
+            ok = (is_header(buf[:BLOCK], size) if seen_tail is None
+                  else buf[:len(seen_tail)] == seen_tail)
+            if ok and last and has_trailer:
+                ok = trailer_ok(buf[end - at:end - at + BLOCK])
+            if ok and seen_tail is not None and not any(seen_tail):
+                ok = fetch(at, length) == buf
+            if ok:
+                break
+        else:
+            raise _CatError(f"{REREAD_LIMIT + 1} reads at {at:,} never lined up with "
+                            f"what surrounds them")
+        lo, hi = max(written, at), min(data_offset + size, at + length)
+        if hi > lo:
+            yield buf[lo - at:hi - at]
+            written = hi
+        if last:
+            return
+        seen_tail = buf[-CAT_OVERLAP:]
+        at += length - CAT_OVERLAP
+
+
 def cmd_archive_cat(args) -> int:
     """Extract one member's bytes by path, addressed directly through the index
     rather than a search: a walk already recorded `data_offset` and `size` for every
-    member, so retrieving one is a direct read, not a scan.
+    member, so retrieving one is a direct read, not a scan. Each read is checked against
+    the member's own header, the block that follows it and the read beside it
+    (`_verified_member_bytes`), because Dropbox has returned 206 bodies that were some
+    other range -- and here there is no second walk to catch it.
 
     Task 11 uses this to pull a run's own management database out of a 5.08 TiB tar
     and ask it what "incomplete" means. Everything before this command indexes; this
@@ -1297,7 +1386,16 @@ def cmd_archive_cat(args) -> int:
     # Dropbox traffic that never reaches the output. window_min=window_max=1 makes
     # every fill read exactly what is asked, clamped only by the archive's own end.
     concat = ConcatFile(archive_set, reader, window_min=1, window_max=1)
-    concat.seek(chosen["data_offset"])
+    # What the block after the member must be, for the trailing anchor. The index knows
+    # when another member starts there, and when a complete walk put the terminator
+    # there; a partial index knows neither, and then either will do.
+    end = chosen["data_offset"] + -(-chosen["size"] // BLOCK) * BLOCK
+    if store.member_at(row["id"], end) is not None:
+        next_is = "header"
+    elif row["state"] == "complete" and row["end_offset"] == end:
+        next_is = "zeros"
+    else:
+        next_is = "either"
 
     # --out is written through a temp file in the same directory, promoted onto the
     # target only once every byte is confirmed written -- never opened (let alone
@@ -1321,20 +1419,21 @@ def cmd_archive_cat(args) -> int:
     else:
         sink_cm = contextlib.nullcontext(sys.stdout.buffer)
 
-    remaining = chosen["size"]
     written = 0
     try:
         with sink_cm as sink:
             try:
-                while remaining > 0:
-                    chunk = concat.read(min(remaining, CAT_CHUNK))
-                    if not chunk:
-                        print(f"error: {args.archive} ended before all of {args.member!r} "
-                              f"was read ({remaining} byte(s) short)", file=sys.stderr)
-                        return 1
-                    sink.write(chunk)
-                    written += len(chunk)
-                    remaining -= len(chunk)
+                for piece in _verified_member_bytes(concat, chosen["data_offset"],
+                                                    chosen["size"],
+                                                    archive_set.total_size, next_is):
+                    sink.write(piece)
+                    written += len(piece)
+            except _CatError as exc:
+                # Not one byte that failed a check was written -- but to stdout, what
+                # passed before the failure is already out.
+                print(f"error: could not read {args.member!r} from {args.archive} "
+                      f"reliably: {exc}", file=sys.stderr)
+                return 1
             except ReaderError as exc:
                 # A part is shorter than the index believes -- data lost or corrupted
                 # at the storage layer since this archive was indexed. Surfacing it as
