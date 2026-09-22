@@ -28,13 +28,24 @@ TRAILING_LIMIT = 1 << 20
 _RAN_OUT = frozenset({"unexpected end of data", "empty header", "truncated header"})
 
 #: The verdicts that end a walk for good, and so are never believed on one read.
-#: `crossed` and `stopped` are not final -- something walks on from them either way --
-#: and `truncated` reports `end_offset = total`, so there is no block to read again.
+#: `crossed` and `stopped` are not final -- something walks on from them either way.
+#: `truncated` means the chain itself ran off the end of the data, which takes a
+#: checksum-valid header claiming too much; a bad read cannot manufacture one.
 _FINAL = frozenset({"corrupt", "complete"})
 
-#: How many times one walk will accept "that read was wrong, try again" before it
-#: believes the bytes. A bad read is rare and independent; a bad archive is neither.
+#: How many times one walk will accept "that read was contradicted by the next" before
+#: it gives up and raises UnsettledRead. A bad read is rare and independent; a bad
+#: archive is neither, so a verdict that keeps changing is the server, not the archive.
 REREAD_LIMIT = 3
+
+
+class UnsettledRead(Exception):
+    """Reads of the same bytes kept disagreeing, past REREAD_LIMIT.
+
+    That is a fact about the server, not the archive, so it is raised rather than
+    returned as a verdict. The CLI records it as the segment's error, and the next run
+    reclaims the segment and resumes from its committed cursor.
+    """
 
 
 @dataclass(frozen=True)
@@ -111,13 +122,22 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     # No verdict that ends the walk is believed on one read. Reaching one drops the
     # cache and walks again from where it landed, which re-reads the deciding bytes
     # from the server: a verdict that repeats is the archive talking, and one that
-    # changes means the earlier read was wrong. Each of the three ways `_classify_end`
-    # says corrupt is covered, and so is `complete` -- a bad read of zeros would
-    # otherwise end a six-hour walk claiming success, with members silently missing
-    # and `index` refusing to walk it again.
-    # A verdict is a state and the offset it was reached at, not its wording:
-    # `_classify_end` relabels a detail it was handed, so the same bytes can be
-    # described two ways by two paths, and that is not the bytes changing.
+    # changes means a read was wrong -- so the walk carries on and asks again until two
+    # consecutive reads agree. That covers each of the three ways `_classify_end` says
+    # corrupt, and `complete` too, which is the silent failure: a bad read of zeros would
+    # otherwise end a six-hour walk claiming success, members missing, and `index` would
+    # then refuse to walk it again.
+    #
+    # A verdict is its state and the offset it was reached at, not its wording:
+    # `_classify_end` relabels a detail it was handed, so the same bytes can be described
+    # two ways by two code paths, and that is not the bytes changing. The state matters
+    # as much as the offset: a lie and the truth about a terminator land on the same one.
+    #
+    # Nothing here stops a retry for landing where it started. That is exactly where the
+    # confirming read of a genuine `complete` lands, and where a walk resumed on its own
+    # cursor meets its first read. The loop needs no such guard to end: after the first
+    # final pass, each one either agrees with the last and stops, or disagrees and counts
+    # against REREAD_LIMIT.
     position, seen, rescued, verdict, first = start_offset, 0, [], None, None
     while True:
         result, seen = _walk_chain(concat, position, commit, batch_size, stop_at,
@@ -128,16 +148,19 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
         if result.state not in _FINAL:
             break
         if again == verdict:
-            result = first                  # the retry agreed: keep the first diagnosis,
+            result = first                  # two reads agree: keep the first of them,
             break                           # which says what actually stopped the walk
-        if result.end_offset == position or len(rescued) >= REREAD_LIMIT:
-            break
+        if len(rescued) > REREAD_LIMIT:
+            where = ", ".join(str(o) for o in dict.fromkeys(rescued))
+            raise UnsettledRead(
+                f"reads kept contradicting each other at {where}; the last said "
+                f"{result.state} at {result.end_offset} and was never confirmed")
         verdict, first = again, result
         concat.drop_cache()
         position = result.end_offset
     if rescued:
-        note = ("resumed past " + ", ".join(str(o) for o in rescued) +
-                ": those blocks read differently the second time")
+        where = ", ".join(str(o) for o in dict.fromkeys(rescued))
+        note = f"re-read at {where}: a read there was contradicted by the next"
         result = replace(result, detail=f"{result.detail}; {note}" if result.detail
                          else note)
     return result

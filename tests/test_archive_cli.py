@@ -6,15 +6,19 @@ monkeypatched `build_lister`, and where such a test has to read bytes it substit
 """
 
 import contextlib
+import tarfile
+import io
 import logging
 import os
 import signal
 import threading
 
+import pytest
+
 from dbaudit.api import Page
 from dbaudit.archive.reader import LocalRangeReader
 from dbaudit.archive.store import ArchiveStore
-from dbaudit.archive.tarwalk import find_chain_start
+from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
 from dbaudit.cli import main
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import build_tar, write_parts
@@ -562,3 +566,116 @@ def test_usage_errors_exit_2_and_a_held_lock_exits_3(tmp_path, capsys):
     with InstanceLock(f"{db}.lock"):
         assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 3
     assert "held by" in capsys.readouterr().err
+
+
+# ---- a bad read through the real pool --------------------------------------------------
+
+class _SharedLies:
+    """One schedule of bad reads for every reader the pool builds, counted across all
+    readers and threads -- so a lie can land on whichever chain, and whichever pass,
+    happens to read there.
+
+    `plan` maps an offset to the covering fetch that lies about it. `sequence` instead
+    lies about each offset in turn, once, at most one per fetch: successive transients,
+    each met only after the walk has survived the one before. (With `plan`, one window
+    covering several offsets would carry every lie in a single fetch.)"""
+
+    def __init__(self, source, plan=None, sequence=None):
+        self.source, self.plan = source, dict(plan or {})
+        self.sequence = list(sequence or [])
+        self.covering = {bad: 0 for bad in self.plan}
+        self.lied = 0
+        self.lock = threading.Lock()
+
+    def reader_for(self, row, archive_set, tokens=None, limiter=None):
+        shared = self
+
+        class _Reader(LocalRangeReader):
+            def read_range(self, part_idx, offset, length):
+                data = super().read_range(part_idx, offset, length)
+                start = self.archive.parts[part_idx].offset + offset
+                with shared.lock:
+                    if shared.sequence and start <= shared.sequence[0] < start + length:
+                        bad = shared.sequence.pop(0)
+                        shared.lied += 1
+                        cut = bad - start
+                        n = min(1024, length - cut)
+                        return data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n:]
+                    for bad, nth in shared.plan.items():
+                        if start <= bad < start + length:
+                            shared.covering[bad] += 1
+                            if shared.covering[bad] == nth:
+                                shared.lied += 1
+                                cut = bad - start
+                                n = min(1024, length - cut)
+                                data = data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n:]
+                return data
+
+        return _Reader(self.source, archive_set)
+
+
+def _terminator_of(data):
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        last = t.getmembers()[-1]
+    return last.offset_data + (-(-last.size // 512)) * 512
+
+
+@pytest.mark.parametrize("nth", [1, 2, 3, 4])
+def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
+        tmp_path, monkeypatch, nth):
+    """End to end, through the 8-worker pool, the join and the store: one bad read at the
+    terminator -- on whichever fetch it lands, including the one that confirms `complete`
+    -- must leave a complete archive complete, every member in place, exit 0. A lie on
+    the confirming read used to turn the whole archive `corrupt`, and an honest re-run
+    then refused to walk it again.
+
+    One part, so one chain. With many, every other chain's cold scan reads to the end of
+    the archive and covers the terminator first, and the lie never reaches the read that
+    confirms the verdict -- which is how this test once passed against the broken code."""
+    data = build_tar(MEMBERS)
+    source = local_archive(tmp_path, data, part_size=len(data))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    liar = _SharedLies(source, {_terminator_of(data): nth})
+    monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] == "complete", f"a lie on covering read #{nth} decided the verdict"
+    assert store.stats(row["id"])["n_members"] == len(MEMBERS)
+    if nth <= 3:
+        assert liar.lied == 1, "the test did not actually inject a bad read"
+
+
+def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
+        tmp_path, monkeypatch):
+    """More contradicted reads in one walk than REREAD_LIMIT allows: the segment must land
+    in `error`, the archive must not be condemned, and an honest re-run must finish it.
+    Believing the last read instead left the archive `corrupt`, and a re-run refused."""
+    data = build_tar(MEMBERS)
+    source = local_archive(tmp_path, data, part_size=len(data))    # one segment
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        offsets = [m.offset for m in t]
+    liar = _SharedLies(source, sequence=offsets[10:10 + REREAD_LIMIT + 1])
+    monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert liar.lied == REREAD_LIMIT + 1, "the test did not inject every transient"
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] not in ("corrupt", "complete", "truncated")
+    [segment] = store.segments(row["id"])
+    assert segment["state"] == "error"
+    assert "UnsettledRead" in (segment["error"] or "")
+
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, archive_set, tokens=None, limiter=None:
+                            LocalRangeReader(source, archive_set))
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    row = store.get("a.tar")
+    assert row["state"] == "complete"
+    assert store.stats(row["id"])["n_members"] == len(MEMBERS)
