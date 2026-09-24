@@ -423,6 +423,20 @@ def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
     assert row["state"] == "registered" and row["detail"] is None
 
 
+def test_reregistering_lifts_unsupported(tmp_path):
+    """`unsupported` is terminal for `index`, but it must not be terminal for good: if it
+    was ever reached wrongly, registering the parts again is the way back. A real pax
+    archive loses nothing by it -- the next walk meets the pax header again."""
+    store = new_store(tmp_path)
+    archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    store.mark_unsupported(archive_id, "a pax extended header applies to the member at 0")
+
+    store.register("a.tar", "tar", "/d", "dropbox", parts())
+
+    row = store.get("a.tar")
+    assert row["state"] == "registered" and row["detail"] is None
+
+
 def test_replaying_a_batch_does_not_inflate_the_segment_member_count(tmp_path):
     """Task review Finding 2: `members=members+len(...)` double-counts a replay,
     even though the design guarantees replays ("a restart re-walks exactly that

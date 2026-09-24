@@ -761,16 +761,24 @@ def _walk_segment(run, segment) -> None:
         run.store.release_segment(segment["id"], requests, fetched)
         return
     except UnsupportedArchive as exc:
-        # Not a bad part: the archive's format, which every chain would meet. Stop the
-        # pool and let `_run_index` mark the archive for good.
         requests, fetched = delta()
-        with run.lock:
-            if run.unsupported is None:
-                run.unsupported = str(exc)
-        run.stop.set()
-        log.error("segment %d: %s", segment["idx"], exc)
-        run.store.fail_segment(segment["id"], f"UnsupportedArchive: {exc}",
-                               requests, fetched)
+        if segment["joined"]:
+            # A chain whose start is confirmed walks the archive's own headers, so
+            # this is the archive's format, which every chain would meet: stop the
+            # pool and let `_run_index` mark the archive for good.
+            with run.lock:
+                if run.unsupported is None:
+                    run.unsupported = str(exc)
+            run.stop.set()
+            log.error("segment %d: %s", segment["idx"], exc)
+        else:
+            # A chain found by a cold scan may be walking a tarball stored inside the
+            # archive -- run folders hold them, and Python writes pax by default. The
+            # join settles it: it resets this chain if it is not on the archive's own,
+            # and refuses the archive if it is.
+            log.warning("segment %d: %s -- not yet on the confirmed chain",
+                        segment["idx"], exc)
+        run.store.fail_segment(segment["id"], f"{_PAX_SIGHTING}{exc}", requests, fetched)
         return
     except Exception as exc:
         # One bad part must not kill the run: record why it died and what it cost, and
@@ -816,6 +824,8 @@ def _worker(run) -> None:
 
 
 _OUTCOME, _REPAIRED, _BLOCKED = "outcome", "repaired", "blocked"
+#: How a segment's error records a pax sighting, so the join can tell it from a failure.
+_PAX_SIGHTING = "UnsupportedArchive: "
 
 _ROW_FIELDS = ("hdr_offset", "data_offset", "size", "type", "mode", "mtime", "uname",
                "gname", "dir", "name", "linkname")
@@ -1043,6 +1053,12 @@ def _run_index(args, store, row) -> int:
             if run.unsupported:
                 break                     # no verdict to join towards: see below
             kind, payload = _join(store, archive_id)
+            if (kind == _BLOCKED and payload["state"] == "error"
+                    and (payload["error"] or "").startswith(_PAX_SIGHTING)):
+                # The join only stops at a segment on the confirmed chain, so this pax
+                # sighting is the archive's own.
+                run.unsupported = payload["error"][len(_PAX_SIGHTING):]
+                break
             if kind == _OUTCOME and payload.state == "complete":
                 try:
                     redo = _audit_repeated_paths(run)

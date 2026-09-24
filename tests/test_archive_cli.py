@@ -704,7 +704,7 @@ def test_index_refuses_a_pax_archive_loudly_and_for_good(tmp_path, capsys):
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     err = capsys.readouterr().err
-    assert "pax" in err
+    assert "is a pax-format archive" in err
     row = ArchiveStore(db).get("a.tar")
     assert row["state"] == "unsupported", "not `error` (retryable) or `corrupt` (a verdict)"
     assert "pax" in (row["detail"] or "")
@@ -722,7 +722,7 @@ def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr("dbaudit.cli._reader_for", landmine)
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    assert "pax" in capsys.readouterr().err
+    assert "is a pax-format archive" in capsys.readouterr().err
 
 
 def test_cat_refuses_an_unsupported_archive(tmp_path, capsys):
@@ -734,14 +734,16 @@ def test_cat_refuses_an_unsupported_archive(tmp_path, capsys):
     out = tmp_path / "out.bin"
     assert main(["archive", "cat", "--db", db, "--archive", "a.tar",
                  "--member", MEMBERS[0][0], "--out", str(out)]) == 1
-    assert "pax" in capsys.readouterr().err
+    assert "is a pax-format archive" in capsys.readouterr().err
     assert not out.exists()
 
 
-def test_a_pax_member_deep_in_a_split_archive_stops_every_chain(tmp_path, capsys):
+def test_a_pax_member_deep_in_a_split_archive_is_still_refused(tmp_path, capsys):
     """tarfile's pax writer adds an `x` header only where it needs one, so the pax member
-    can sit in any part, found by any chain. The whole run must stop and say so -- not
-    one segment in `error` while the others walk on and the archive is left `walking`."""
+    can sit in any part, found first by a chain whose start is not yet confirmed. That
+    sighting cannot condemn the archive by itself -- it may be a stored tarball -- but
+    once the confirmed chain reaches that segment, the archive is refused, and never
+    left `walking` with one segment in `error`."""
     long_name = "run/" + "d" * 150 + "/deep.bin"
     members = MEMBERS[:12] + [(long_name, b"y" * 700)] + MEMBERS[12:]
     buf = io.BytesIO()
@@ -756,8 +758,44 @@ def test_a_pax_member_deep_in_a_split_archive_stops_every_chain(tmp_path, capsys
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    assert "pax" in capsys.readouterr().err
+    assert "is a pax-format archive" in capsys.readouterr().err
     assert ArchiveStore(db).get("a.tar")["state"] == "unsupported"
+
+
+def _gnu_holding_a_pax_tarball():
+    """A GNU archive whose middle member is a tarball Python wrote: tarfile's default
+    format is pax, and a fractional mtime -- what `tf.add()` takes from os.stat -- puts
+    an `x` header before every member of it. Returns the archive and where that stored
+    tarball's bytes begin."""
+    inner = io.BytesIO()
+    with tarfile.open(fileobj=inner, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for i in range(40):
+            info = tarfile.TarInfo(f"inner/g{i:03d}.dat")
+            info.size, info.mtime = 2000, 1_700_000_000.5
+            tf.addfile(info, io.BytesIO(bytes([i]) * 2000))
+    outer = build_tar([("run/a.bin", b"a" * 30_000), ("run/results.tar", inner.getvalue()),
+                       ("run/z.bin", b"z" * 30_000)])
+    with tarfile.open(fileobj=io.BytesIO(outer), mode="r:") as t:
+        return outer, t.getmember("run/results.tar").offset_data
+
+
+def test_a_stored_pax_tarball_does_not_condemn_the_archive_holding_it(tmp_path, capsys):
+    """Archives of run folders hold tarballs. A part boundary inside one starts a chain
+    whose cold scan finds the tarball's own headers -- pax ones -- before anything has
+    confirmed that chain. It is a chain the join would have corrected, as it corrects
+    any chain that locks onto a stored tar; a pax sighting there proves nothing."""
+    outer, stored = _gnu_holding_a_pax_tarball()
+    source = tmp_path / "parts"
+    source.mkdir()
+    cut = stored + 10_000
+    (source / "a.tar.aa").write_bytes(outer[:cut])
+    (source / "a.tar.ab").write_bytes(outer[cut:])
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    assert ArchiveStore(db).get("a.tar")["state"] == "complete"
+    assert _names(db) == ["a.bin", "results.tar", "z.bin"]
 
 
 def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(tmp_path, capsys):
