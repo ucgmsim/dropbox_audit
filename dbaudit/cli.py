@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import io
 import logging
 import os
 import signal
@@ -28,6 +29,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -37,8 +39,8 @@ from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeRea
                              LocalRangeReader, ReaderError)
 from .archive import report as archive_report
 from .archive.store import ArchiveStore
-from .archive.tarwalk import (BLOCK, REREAD_LIMIT, UnsupportedArchive, WalkResult,
-                              find_chain_start, read_member, walk)
+from .archive.tarwalk import (BLOCK, REREAD_LIMIT, Member, UnsupportedArchive,
+                              WalkResult, find_chain_start, read_member, walk)
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
 from .limiter import AdaptiveLimiter
@@ -76,6 +78,13 @@ CAT_CHUNK = 16 << 20
 # also reproduce the bytes its neighbouring read saw there. 4 KiB against a 16 MiB read
 # is 0.02%, and a member under 16 MiB still costs one request.
 CAT_OVERLAP = 4 << 10
+# Two reads agreeing on bytes this regular says nothing about either: a wrong body of
+# zeros, 0xFF fill or a repeated pattern agrees with any other. Shared bytes vouch for a
+# read only if they compress less than this many times over (a tar header manages 5,
+# text about 3, float output about 1; zeros 100, a 256-byte cycle 13)...
+AMBIGUOUS_RATIO = 8
+# ...and are at least this many.
+AMBIGUOUS_BELOW = 512
 # The most rows under repeated paths one audit reads again. A bad read leaves a handful;
 # an archive grown by `tar -r` can repeat thousands of paths legitimately, and at one
 # request per scattered row an unbounded audit could cost hours.
@@ -1361,35 +1370,112 @@ class _CatError(Exception):
     """A member could not be read in a form its surroundings vouch for."""
 
 
-def _verified_member_bytes(concat, data_offset, size, total, next_is):
-    """Yield one member's bytes, each read checked against what surrounds it.
+def _ambiguous(shared: bytes) -> bool:
+    """Whether two reads agreeing on ``shared`` vouches for neither of them."""
+    return (len(shared) < AMBIGUOUS_BELOW
+            or len(zlib.compress(shared, 1)) * AMBIGUOUS_RATIO < len(shared))
 
-    A tar keeps no checksum of member data, so no read can be proved right -- but a
-    body that is some other range entirely, which is how Dropbox got it wrong on
-    2026-09-21, is caught for almost nothing by reading a little either side:
 
-    - the first read starts one block early, on the member's own header, which must be
-      checksum-valid and state this member's size;
-    - the last read ends one block late, on whatever follows, which must be what the
-      index says is there (`next_is`: "header", "zeros" for the terminator, or "either"
-      when the index cannot say);
-    - consecutive reads overlap by CAT_OVERLAP and must agree on it, so every read's
-      head is checked before any of its bytes are yielded.
+def _plan_reads(archive_set, hdr_offset, data_offset, end, stop):
+    """The reads that cover [hdr_offset, stop), as (offset, length) pairs.
 
-    A read failing a check is read again, fresh, up to REREAD_LIMIT times. An overlap
-    that is all zeros agrees with any other zeros, so a read starting on one counts only
-    once two fresh reads of it match. Past the limit this raises _CatError, having
-    yielded nothing that failed. A read wrong only in its interior, right at both ends,
-    is not caught; that is not how this has been seen to fail.
+    Each is at most CAT_CHUNK, and consecutive ones share bytes, so every read is checked
+    at both ends by another request. That holds only if no read crosses a part boundary:
+    a read that does is two requests, and the two ends that meet at the boundary share
+    nothing. So reads stop at each boundary, and a short read straddling it shares bytes
+    with the reads either side. The exceptions are the two anchors, which are checked by
+    what they say rather than by an overlap, and so are read whole wherever a boundary
+    falls -- parts need not be a multiple of 512 bytes (`split -b 1GB`): the member's own
+    header sequence [hdr_offset, data_offset), and the block after it [end, stop).
     """
+    def part_end(offset):
+        idx, _ = archive_set.locate(offset)
+        part = archive_set.parts[idx]
+        return part.offset + part.size
+
+    reads, at, first = [], hdr_offset, True
+    while True:
+        limit = part_end(max(data_offset - 1, at) if first else at)
+        if end < limit < stop:
+            limit = stop                # the boundary is inside the block after the member
+        end_of_read = min(at + CAT_CHUNK, stop, limit)
+        if first:
+            end_of_read, first = max(end_of_read, min(data_offset, stop)), False
+        reads.append((at, end_of_read - at))
+        if end_of_read >= stop:
+            return reads
+        if end_of_read == limit:
+            boundary = end_of_read
+            left = min(CAT_OVERLAP, boundary - at)
+            right = min(CAT_OVERLAP, part_end(boundary) - boundary, stop - boundary)
+            reads.append((boundary - left, left + right))
+            at = boundary
+        else:
+            at = end_of_read - CAT_OVERLAP
+
+
+def _headers_mismatch(block, member):
+    """Why ``block`` -- the bytes from a member's first header to its data -- is not the
+    member its index row describes, or None if it is. Every field the row holds is
+    compared: a read of another member's headers is caught even at the same size, and so
+    is a part rewritten under the index."""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(block), mode="r:") as sequence:
+            info = sequence.firstmember
+    except tarfile.ReadError as exc:
+        return f"no header there ({exc})"
+    if info is None:
+        return "no header there"
+    if info.pax_headers:
+        return "a pax extended header, which dbaudit does not extract"
+    if info.offset_data != len(block):
+        return f"its data begins {info.offset_data - len(block):+,} bytes from the index's"
+    found = Member.from_tarinfo(info)
+    for field in ("dir", "name", "size", "type", "mode", "mtime", "uname", "gname",
+                  "linkname"):
+        if getattr(found, field) != member[field]:
+            return f"{field} {getattr(found, field)!r}, not {member[field]!r}"
+    return None
+
+
+def _verified_member_bytes(concat, member, total, next_is):
+    """Yield one member's bytes, none of them before a second request vouches for them.
+
+    A tar keeps no checksum of member data, and Dropbox has answered range requests with
+    some other range's bytes (twice in ~42,000 reads on 2026-09-21). So a byte is written
+    only once two independent requests agree on it, or an anchor confirms it:
+
+    - the first read starts on the member's first header, and that whole header sequence
+      must parse to exactly the member its index row describes -- every field, and its
+      data where the row says it begins;
+    - the last read ends one block past the member, on what the index says follows: the
+      next member's header, the terminator's zeros, or either;
+    - consecutive reads share bytes and must agree on them, and no read crosses a part
+      boundary (`_plan_reads`), so every request is checked at both ends;
+    - a read is written only once the read after it agrees with its tail, so a read wrong
+      in its back half is read again rather than half-written;
+    - bytes too regular to tell one region from another -- zeros, fill, a short repeated
+      pattern (`_ambiguous`) -- or too few, vouch for nothing. A read vouched for at one
+      end only by such bytes, or last before the terminator's zeros or the archive's end,
+      is taken once a second fetch agrees with it byte for byte. So zero-heavy data costs
+      about twice the requests.
+
+    A failed check is met by reading again, fresh, up to REREAD_LIMIT times; past that
+    this raises _CatError, having written nothing it could not vouch for. What it cannot
+    catch: a read wrong only between two ends that were each right, or a wrong body the
+    server serves identically every time.
+    """
+    hdr, data_offset, size = member["hdr_offset"], member["data_offset"], member["size"]
     if data_offset + size > total:
         raise _CatError(f"the archive ends {data_offset + size - total:,} byte(s) "
                         f"before this member does")
     end = data_offset + -(-size // BLOCK) * BLOCK      # where the next header sits
     stop = min(end + BLOCK, total)
-    has_trailer = stop >= end + BLOCK
+    plan = _plan_reads(concat.archive, hdr, data_offset, end, stop)
+    last = len(plan) - 1
 
-    def fetch(at, length):
+    def fetch(i):
+        at, length = plan[i]
         concat.drop_cache()                            # a re-read must be a new request
         concat.seek(at)
         buf = concat.read(length)
@@ -1397,45 +1483,123 @@ def _verified_member_bytes(concat, data_offset, size, total, next_is):
             raise _CatError(f"read {len(buf):,} of {length:,} byte(s) at {at:,}")
         return buf
 
-    def is_header(block, want_size=None):
-        try:
-            info = tarfile.TarInfo.frombuf(block, "utf-8", "surrogateescape")
-        except tarfile.HeaderError:
-            return False
-        return want_size is None or info.size == want_size
+    def shared(i, buf, side):
+        """The bytes read i has in common with read i+1 ("tail") or read i-1 ("head")."""
+        j = i if side == "tail" else i - 1
+        lo, hi = plan[j + 1][0], plan[j][0] + plan[j][1]
+        return buf[lo - plan[i][0]:hi - plan[i][0]]
+
+    def head_ok(i, buf, head):
+        """Read i agrees with the read written before it -- or, the first read, with
+        the member's own headers."""
+        if i == 0:
+            return _headers_mismatch(buf[:data_offset - hdr], member) is None
+        return shared(i, buf, "head") == head
+
+    def trailer(buf):
+        """The block after the member, as the last read has it; None if the archive
+        ends first."""
+        return buf[end - plan[last][0]:end - plan[last][0] + BLOCK] if stop >= end + BLOCK \
+            else None
 
     def trailer_ok(block):
-        if next_is == "header":
-            return is_header(block)
+        if block is None:
+            return True
         if next_is == "zeros":
             return not any(block)
-        return not any(block) or is_header(block)
+        if next_is == "either" and not any(block):
+            return True
+        try:
+            tarfile.TarInfo.frombuf(block, "utf-8", "surrogateescape")
+        except tarfile.HeaderError:
+            return False
+        return True
 
-    at, written, seen_tail = data_offset - BLOCK, data_offset, None
-    while True:
-        length = min(CAT_CHUNK, stop - at)
-        last = at + length >= stop
-        for _ in range(REREAD_LIMIT + 1):
-            buf = fetch(at, length)
-            ok = (is_header(buf[:BLOCK], size) if seen_tail is None
-                  else buf[:len(seen_tail)] == seen_tail)
-            if ok and last and has_trailer:
-                ok = trailer_ok(buf[end - at:end - at + BLOCK])
-            if ok and seen_tail is not None and not any(seen_tail):
-                ok = fetch(at, length) == buf
-            if ok:
-                break
-        else:
-            raise _CatError(f"{REREAD_LIMIT + 1} reads at {at:,} never lined up with "
-                            f"what surrounds them")
-        lo, hi = max(written, at), min(data_offset + size, at + length)
-        if hi > lo:
-            yield buf[lo - at:hi - at]
-            written = hi
-        if last:
-            return
-        seen_tail = buf[-CAT_OVERLAP:]
-        at += length - CAT_OVERLAP
+    def settle(i, buf):
+        """Read i as two fetches agree on it: ``buf`` and a fresh one, or failing that
+        any two. Earlier fetches are compared by digest, so none is kept."""
+        seen = {hashlib.sha256(buf).digest()}
+        for _ in range(REREAD_LIMIT):
+            again = fetch(i)
+            digest = hashlib.sha256(again).digest()
+            if digest in seen:
+                return again
+            seen.add(digest)
+        raise _CatError(f"no two reads at {plan[i][0]:,} ever agreed")
+
+    written = data_offset
+
+    def release(i, buf):
+        nonlocal written
+        at = plan[i][0]
+        lo, hi = max(written, at), min(data_offset + size, at + plan[i][1])
+        if hi <= lo:
+            return b""
+        written = hi
+        return buf[lo - at:hi - at]
+
+    held = fetch(0)
+    for _ in range(REREAD_LIMIT):
+        if head_ok(0, held, None):
+            break
+        held = fetch(0)
+    why = _headers_mismatch(held[:data_offset - hdr], member)
+    if why is not None:
+        raise _CatError(f"the headers at {hdr:,} never read as the member's index row "
+                        f"says: {why}")
+    head, head_sure = None, True        # what the held read's head must equal; vouched?
+
+    for i in range(1, last + 1):
+        nxt, tries = fetch(i), 0
+        while shared(i - 1, held, "tail") != shared(i, nxt, "head"):
+            tries += 1
+            if tries > REREAD_LIMIT:
+                raise _CatError(f"the reads at {plan[i - 1][0]:,} and {plan[i][0]:,} "
+                                f"never agreed on the bytes they share")
+            again = fetch(i)
+            if again == nxt:
+                # Two reads of the new one agree, so the held one is the likelier wrong:
+                # read it again, held to its own head as before.
+                redo = fetch(i - 1)
+                if head_ok(i - 1, redo, head):
+                    held = redo
+            nxt = again
+        link_sure = not _ambiguous(shared(i - 1, held, "tail"))
+        if not (head_sure and link_sure):
+            sure = settle(i - 1, held)
+            if sure != held:
+                # The held read was the wrong one after all; what replaces it must still
+                # agree with both of its neighbours.
+                if (not head_ok(i - 1, sure, head)
+                        or shared(i - 1, sure, "tail") != shared(i, nxt, "head")):
+                    raise _CatError(f"the reads around {plan[i - 1][0]:,} never settled")
+                held = sure
+        piece = release(i - 1, held)
+        if piece:
+            yield piece
+        head, head_sure, held = shared(i - 1, held, "tail"), link_sure, nxt
+
+    tries = 0
+    while not trailer_ok(trailer(held)):
+        tries += 1
+        if tries > REREAD_LIMIT:
+            raise _CatError(f"the block after the member, at {end:,}, never read as the "
+                            f"index says it should")
+        redo = fetch(last)
+        if head_ok(last, redo, head):
+            held = redo
+    block = trailer(held)
+    if not (head_sure and block is not None and any(block)):
+        # The terminator's zeros vouch for no more than zeros anywhere, and an archive
+        # that ends at the member offers nothing at all.
+        sure = settle(last, held)
+        if sure != held:
+            if not head_ok(last, sure, head) or not trailer_ok(trailer(sure)):
+                raise _CatError(f"the last read, at {plan[last][0]:,}, never settled")
+            held = sure
+    piece = release(last, held)
+    if piece:
+        yield piece
 
 
 def cmd_archive_cat(args) -> int:
@@ -1560,8 +1724,7 @@ def cmd_archive_cat(args) -> int:
     try:
         with sink_cm as sink:
             try:
-                for piece in _verified_member_bytes(concat, chosen["data_offset"],
-                                                    chosen["size"],
+                for piece in _verified_member_bytes(concat, chosen,
                                                     archive_set.total_size, next_is):
                     sink.write(piece)
                     written += len(piece)
