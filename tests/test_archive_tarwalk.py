@@ -87,6 +87,50 @@ def test_a_missing_final_part_reports_truncated(tmp_path):
     assert result.state == "truncated"
 
 
+def test_a_truncated_verdict_is_read_twice_before_it_stands(tmp_path):
+    """A chain runs off the end because the last header's size claims more than is
+    left. That size is one read's word, so it is read again before `truncated` stands:
+    one pass, then a confirming pass that records that last member a second time."""
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data[:len(data) - 4096], part_size=4096)
+    handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
+    calls = []
+
+    result = walk(handle, 0, lambda members, offset: calls.append(len(members)),
+                  batch_size=1000)
+
+    assert result.state == "truncated"
+    assert "re-read at" not in result.detail
+    assert len(calls) == 2, f"one pass and one confirming pass, got {calls}"
+    assert calls[1] == 1, "the confirming pass re-reads the header that ran out"
+
+
+def test_a_well_formed_bad_read_cannot_fake_a_truncated_archive(tmp_path):
+    """A bad read that is valid tar from elsewhere -- here, an early 40 KB member's
+    header served where a late member's belongs -- passes its checksum and claims more
+    bytes than the archive has left. Believed on one read, a complete archive would be
+    reported truncated; read again, the true header is there and the walk carries on."""
+    members = [("run/big.bin", b"b" * 40000)] + MEMBERS
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    late = offsets[-3]                    # fewer than 40,000 bytes follow this header
+    assert len(data) - late < 40000
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, late, fill=data[0:512], span=512)
+    rows = {}
+
+    def commit(batch, offset):
+        rows.update((m.hdr_offset, m.name) for m in batch)      # INSERT OR REPLACE
+
+    result = walk(ConcatFile(archive, reader), 0, commit)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert [rows[o] for o in offsets] == [n.rsplit("/", 1)[-1] for n, _ in members]
+    assert result.members == len(members), "the member read twice was counted twice"
+    assert f"re-read at {late}" in result.detail
+
+
 def test_a_missing_middle_part_is_detected(tmp_path):
     """Dropping a part shifts every later offset, so the chain lands in member data.
 
@@ -479,6 +523,229 @@ def _long_name_archive():
     longname = tarfile.TarInfo.frombuf(bytes(data[first_span:first_span + 512]),
                                        "utf-8", "surrogateescape")
     return data, first_span + 512 + (-(-longname.size // 512) * 512)
+
+
+# ---- GNU long names and link targets are checked against the header after them ---------
+#
+# Their blocks carry no checksum, but GNU tar (99 bytes in oldgnu, 100 in gnu) and Python
+# copy the start of each into the checksummed header that follows. In
+# `_long_name_archive` the `L` header is at 1024, its name block at 1536, and the
+# member's real header at 2048.
+
+def _with_field(data, header, start, length, value):
+    """`data` with one field of the header at `header` rewritten and its checksum redone
+    -- how another tar writer might have filled that field in."""
+    block = bytearray(data[header:header + 512])
+    block[start:start + length] = value.ljust(length, b"\0")
+    block[148:156] = b" " * 8
+    block[148:156] = b"%06o\0 " % sum(block)
+    return bytes(data[:header]) + bytes(block) + bytes(data[header + 512:])
+
+
+def _long_link_archive():
+    """Like `_long_name_archive`, but the second member is a symlink whose target needs
+    a GNU `K` block: `K` header at 1024, target block at 1536, real header at 2048."""
+    target = "../" + "t" * 150 + "/target.bin"
+    return build_tar([("run/first.bin", b"a" * 100),
+                      ("run/link", b"", {"type": tarfile.SYMTYPE, "linkname": target})],
+                     format=tarfile.GNU_FORMAT), target
+
+
+def _rows(tmp_path, reader_class=LocalRangeReader, data=None, **reader_kw):
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = reader_class(tmp_path, archive, **reader_kw)
+    rows = {}
+
+    def commit(batch, offset):
+        rows.update((m.hdr_offset, m) for m in batch)            # INSERT OR REPLACE
+
+    result = walk(ConcatFile(archive, reader), 0, commit)
+    return rows, result, reader
+
+
+def test_a_bad_read_of_only_a_long_name_block_is_read_again(tmp_path):
+    """The one bad read no header checksum sees: the name block garbled, the headers
+    around it intact. Unchecked, the member is recorded under a garbled path."""
+    data, _ = _long_name_archive()
+    long_name = "run/" + "d" * 150 + "/deep.bin"
+    rows, result, reader = _rows(tmp_path, _LiesOnce, bytes(data), bad=1536,
+                                 fill=b"garbled/", span=512)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert f"{rows[1024].dir}/{rows[1024].name}" == long_name
+    assert "re-read at 1024" in result.detail
+
+
+def test_a_bad_read_of_only_a_long_link_target_block_is_read_again(tmp_path):
+    data, target = _long_link_archive()
+    rows, result, reader = _rows(tmp_path, _LiesOnce, data, bad=1536,
+                                 fill=b"garbled/", span=512)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert rows[1024].linkname == target
+    assert "re-read at 1024" in result.detail
+
+
+@pytest.mark.parametrize("form", ["gnu name (100 bytes)", "oldgnu name (99 bytes)",
+                                  "gnu link target (100 bytes)"])
+def test_the_check_costs_nothing_when_the_writer_follows_gnu(tmp_path, form):
+    """The header after the long blocks is still in the window that just served it, so
+    checking against it takes no request: one fetch for the whole small archive, and two
+    for the pass confirming the terminator (tarfile opens there, then seeks back a byte
+    to check the data before it) -- three, as before the check existed."""
+    if form.startswith("oldgnu"):
+        data, _ = _long_name_archive()
+        long_name = "run/" + "d" * 150 + "/deep.bin"
+        data = _with_field(bytes(data), 2048, 0, 100, long_name.encode()[:99])
+    elif "link" in form:
+        data, _ = _long_link_archive()
+    else:
+        data = bytes(_long_name_archive()[0])
+    rows, result, reader = _rows(tmp_path, data=data)
+
+    assert result.state == "complete"
+    assert reader.requests == 3
+    assert "re-read" not in result.detail
+
+
+def test_a_writer_that_does_not_copy_the_name_costs_one_read_not_a_refusal(tmp_path):
+    """A writer is free to put anything in the field the long name overrides. The two
+    disagree, so the member is read again; the second read agrees with the first, which
+    makes it the archive, not a bad read -- recorded as read, one request dearer than
+    the three a conforming archive costs."""
+    data, _ = _long_name_archive()
+    data = _with_field(bytes(data), 2048, 0, 100, b"placeholder")
+    rows, result, reader = _rows(tmp_path, data=data)
+
+    assert result.state == "complete"
+    assert rows[1024].name == "deep.bin" and rows[1024].dir == "run/" + "d" * 150
+    assert reader.requests == 4
+    assert "re-read" not in result.detail
+
+
+def test_a_long_name_that_reads_differently_every_time_gives_up(tmp_path):
+    """A server that never tells the same story twice is not an archive fact. The walk
+    gives up -- keeping what it walked before, with the cursor on the member it could
+    not settle, so the retry that `UnsettledRead` invites starts exactly there."""
+    data, _ = _long_name_archive()
+    archive = write_parts(tmp_path, bytes(data), part_size=len(data))
+    reader = _AlwaysLies(tmp_path, archive, 1536, span=512)
+    calls = []
+
+    with pytest.raises(UnsettledRead, match="1024"):
+        walk(ConcatFile(archive, reader), 0,
+             lambda members, offset: calls.append(([m.name for m in members], offset)))
+    assert calls[-1] == (["first.bin"], 1024)
+
+
+def test_a_wrong_header_after_true_long_blocks_is_replaced_and_the_chain_follows_it(
+        tmp_path):
+    """A well-formed bad read can put another member's valid header where this one's
+    belongs, with a different size. The fresh read's member is recorded -- and the walk
+    must go on from where *its* size says, not the wrong header's."""
+    long_name = "run/" + "d" * 150 + "/deep.bin"
+    members = [("run/first.bin", b"a" * 100), (long_name, b"x" * 10),
+               ("run/big.bin", b"b" * 5000), ("run/last.bin", b"z" * 10)]
+    data = build_tar(members, format=tarfile.GNU_FORMAT)
+    offsets = _header_offsets(data)
+    assert offsets == [0, 1024, 3072, 8704]
+    rows, result, reader = _rows(tmp_path, _LiesOnce, data, bad=2048,
+                                 fill=data[3072:3584], span=512)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert sorted(rows) == offsets
+    assert rows[1024].size == 10
+    assert [rows[o].name for o in offsets] == ["first.bin", "deep.bin", "big.bin",
+                                                "last.bin"]
+
+
+def _gnu_sparse_archive():
+    """A GNU sparse member whose map runs on past its header into an extension block,
+    as GNU tar writes for a file with more than four holes -- built by hand, because
+    tarfile cannot write one. Header at 0, map block at 512, 512 stored bytes at 1024,
+    terminator at 1536; the file it describes is 4096 bytes."""
+    def octal(value, width):
+        return b"%0*o" % (width - 1, value)
+
+    header = bytearray(512)
+    header[0:14] = b"run/sparse.bin"
+    header[100:107], header[108:115], header[116:123] = b"0000644", b"0001750", b"0001750"
+    header[124:135], header[136:147] = octal(512, 12), octal(1_700_000_000, 12)
+    header[156:157] = tarfile.GNUTYPE_SPARSE
+    header[257:265] = tarfile.GNU_MAGIC
+    header[386:397], header[398:409] = octal(0, 12), octal(256, 12)
+    header[482] = 1                                             # the map continues
+    header[483:494] = octal(4096, 12)
+    header[148:156] = b" " * 8
+    header[148:156] = b"%06o\0 " % sum(header)
+    extension = bytearray(512)
+    extension[0:11], extension[12:23] = octal(3840, 12), octal(256, 12)
+    return bytes(header) + bytes(extension) + b"s" * 512 + b"\0" * 1024
+
+
+def test_a_gnu_sparse_member_is_not_mistaken_for_a_long_name(tmp_path):
+    """A sparse member's header sequence is long too, but what follows its header is
+    more of the sparse map -- not a header whose name field could vouch for anything.
+    Read as one, it would never match, and every sparse member would cost a re-read."""
+    rows, result, reader = _rows(tmp_path, data=_gnu_sparse_archive())
+
+    assert result.state == "complete"
+    assert (rows[0].name, rows[0].type, rows[0].size, rows[0].data_offset) == (
+        "sparse.bin", "S", 4096, 1024)
+    assert reader.requests == 3
+
+
+class _Scripted(LocalRangeReader):
+    """Garbles the fetches named in ``script`` -- {fetch number: (offset, span)} -- so
+    each bad read lands exactly where a test needs it."""
+
+    def __init__(self, directory, archive, script):
+        super().__init__(directory, archive)
+        self.script, self.fetches = dict(script), 0
+
+    def read_range(self, part_idx, offset, length):
+        data = super().read_range(part_idx, offset, length)
+        self.fetches += 1
+        if self.fetches not in self.script:
+            return data
+        bad, span = self.script[self.fetches]
+        cut = bad - (self.archive.parts[part_idx].offset + offset)
+        assert 0 <= cut < length, "the scripted fetch does not cover its offset"
+        return data[:cut] + (b"garbled/" * 128)[:span] + data[cut + span:]
+
+
+def test_a_fresh_read_that_also_comes_back_wrong_is_simply_read_again(tmp_path):
+    """Fetch 1 garbles the name block; fetch 2, the first fresh read, garbles the long
+    name's own header so no member starts there at all. That is one more bad read, not
+    a verdict: fetch 3 is read, agrees with its header, and is kept."""
+    data, _ = _long_name_archive()
+    rows, result, reader = _rows(tmp_path, _Scripted, bytes(data),
+                                 script={1: (1536, 512), 2: (1024, 512)})
+
+    assert result.state == "complete"
+    assert rows[1024].name == "deep.bin" and rows[1024].dir == "run/" + "d" * 150
+    assert "re-read at 1024" in result.detail
+
+
+def test_a_directory_named_in_exactly_100_bytes_costs_nothing(tmp_path):
+    """GNU tar writes a long-name block for any name of 100 bytes or more, so it gives
+    a directory named in exactly 100 one too -- and a header whose name field holds all
+    100, trailing slash included, which tarfile strips from the member it returns."""
+    name = "d" * 99 + "/"
+    longlink = tarfile.TarInfo("././@LongLink")
+    longlink.type, longlink.size = tarfile.GNUTYPE_LONGNAME, len(name) + 1
+    directory = tarfile.TarInfo(name)
+    directory.type = tarfile.DIRTYPE
+    data = (longlink.tobuf(tarfile.GNU_FORMAT) + (name.encode() + b"\0").ljust(512, b"\0")
+            + directory.tobuf(tarfile.GNU_FORMAT) + b"\0" * 1024)
+    rows, result, reader = _rows(tmp_path, data=data)
+
+    assert result.state == "complete"
+    assert rows[0].name == "d" * 99 and rows[0].type == "5"
+    assert reader.requests == 3
 
 
 def test_a_damaged_long_name_member_is_diagnosed_once_and_not_called_transient(tmp_path):
