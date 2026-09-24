@@ -38,7 +38,7 @@ from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeRea
 from .archive import report as archive_report
 from .archive.store import ArchiveStore
 from .archive.tarwalk import (BLOCK, REREAD_LIMIT, UnsupportedArchive, WalkResult,
-                              find_chain_start, walk)
+                              find_chain_start, read_member, walk)
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
 from .limiter import AdaptiveLimiter
@@ -76,6 +76,10 @@ CAT_CHUNK = 16 << 20
 # also reproduce the bytes its neighbouring read saw there. 4 KiB against a 16 MiB read
 # is 0.02%, and a member under 16 MiB still costs one request.
 CAT_OVERLAP = 4 << 10
+# The most rows under repeated paths one audit reads again. A bad read leaves a handful;
+# an archive grown by `tar -r` can repeat thousands of paths legitimately, and at one
+# request per scattered row an unbounded audit could cost hours.
+AUDIT_LIMIT = 1000
 # The file types `cat` will extract, decoded the same way Member.from_tarinfo
 # (tarwalk.py) decodes them -- a single header byte through decode("ascii", "replace").
 # Mirrors tarfile.REGULAR_TYPES minus GNUTYPE_SPARSE: a sparse member's data region is
@@ -813,6 +817,61 @@ def _worker(run) -> None:
 
 _OUTCOME, _REPAIRED, _BLOCKED = "outcome", "repaired", "blocked"
 
+_ROW_FIELDS = ("hdr_offset", "data_offset", "size", "type", "mode", "mtime", "uname",
+               "gname", "dir", "name", "linkname")
+
+
+def _row_of(item):
+    """A stored row or a freshly read Member, as one comparable tuple."""
+    if item is None:
+        return None
+    if isinstance(item, sqlite3.Row):
+        return tuple(item[field] for field in _ROW_FIELDS)
+    return tuple(getattr(item, field) for field in _ROW_FIELDS)
+
+
+def _audit_repeated_paths(run) -> list[int]:
+    """Read again every row whose path the index holds more than once, and walk again
+    each segment holding a row that disagrees. Returns those segments' indexes.
+
+    A path can repeat legitimately (`tar -r`), but a bad read that is valid tar from
+    elsewhere in the archive always makes one: it records another member's header a
+    second time, at an offset that was never that member's. When the member it replaced
+    pads to the same size, the chain rejoins straight after, and nothing else notices --
+    the walk ends `complete` with one member twice and one never. A fresh read of each
+    such row says which is which. An archive with no repeated path pays nothing.
+    """
+    store, archive_id = run.store, run.archive_id
+    rows = store.repeated_paths(archive_id, AUDIT_LIMIT + 1)
+    if not rows:
+        return []
+    if len(rows) > AUDIT_LIMIT:
+        rows = rows[:AUDIT_LIMIT]
+        detail = f"read again only the first {AUDIT_LIMIT} rows under repeated paths"
+        log.warning("audit: %s", detail)
+        store.log_event(archive_id, "audit_partial", detail)
+    # Its own reader and window: every byte compared comes from a request of its own.
+    reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
+    concat = ConcatFile(run.archive_set, reader, window_min=run.args.window_min,
+                        window_max=run.args.window_max)
+    try:
+        wrong = [row["hdr_offset"] for row in rows
+                 if _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)]
+    finally:
+        store.charge(archive_id, reader.requests, reader.bytes_fetched)
+    store.log_event(archive_id, "audit", f"read {len(rows)} rows under repeated paths "
+                    f"again; {len(wrong)} disagreed with the index")
+    redo = []
+    for segment in store.segments(archive_id):
+        end = segment["stop_at"]
+        if any(segment["scan_from"] <= o and (end is None or o < end) for o in wrong):
+            store.reset_segment(segment["id"], segment["first_header"])
+            store.log_event(archive_id, "audit_repair",
+                            f"segment {segment['idx']} walked again: a row in it "
+                            f"disagreed with a fresh read of its header")
+            redo.append(segment["idx"])
+    return redo
+
 
 def _join(store, archive_id):
     """Confirm each chain's start against its predecessor's exit; repair what disagrees.
@@ -967,7 +1026,7 @@ def _run_index(args, store, row) -> int:
     previous = {}
     run = _Run(args, store, row, archive_set, tokens, limiter, stop)
     started = time.time()
-    outcome = blocked = None
+    outcome = blocked = audit_failed = None
     exhausted = False
     log.info("walking %s (%d parts, %s) with %d chains",
              row["name"], row["n_parts"], human_bytes(row["total_size"]), workers)
@@ -984,6 +1043,19 @@ def _run_index(args, store, row) -> int:
             if run.unsupported:
                 break                     # no verdict to join towards: see below
             kind, payload = _join(store, archive_id)
+            if kind == _OUTCOME and payload.state == "complete":
+                try:
+                    redo = _audit_repeated_paths(run)
+                except Exception as exc:
+                    audit_failed = (f"could not read again the rows under repeated paths: "
+                                    f"{type(exc).__name__}: {exc}")
+                    break
+                if redo:
+                    # No stop check needed: a stopping pool claims nothing, so the next
+                    # join finds them pending and the run ends there, resumable.
+                    log.warning("segment(s) %s held a row that disagreed with a fresh "
+                                "read; walking them again", ", ".join(map(str, redo)))
+                    continue
             if kind == _OUTCOME:
                 outcome = payload
                 break
@@ -1019,6 +1091,9 @@ def _run_index(args, store, row) -> int:
 
     if run.unsupported:
         store.mark_unsupported(archive_id, run.unsupported)
+    elif audit_failed is not None:
+        # Every chain is walked, so the retry this invites goes straight to the audit.
+        store.fail(archive_id, audit_failed)
     elif outcome is not None:
         store.finish(archive_id, outcome)
         store.build_indexes(archive_id)        # only once a walk is over, never during
@@ -1046,6 +1121,10 @@ def _run_index(args, store, row) -> int:
     if run.unsupported:
         print(f"error: {row['name']} is a pax-format archive, which dbaudit does not index. "
               f"{run.unsupported}", file=sys.stderr)
+        return 1
+    if audit_failed is not None:
+        print(f"error: the walk finished, but the audit {audit_failed}; run `index` again "
+              f"to retry it", file=sys.stderr)
         return 1
     if run.failed:
         print(f"error: a chain stopped on an unexpected failure; see the log and "

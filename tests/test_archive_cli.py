@@ -16,7 +16,7 @@ import threading
 import pytest
 
 from dbaudit.api import Page
-from dbaudit.archive.reader import LocalRangeReader
+from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
 from dbaudit.cli import main
@@ -775,3 +775,150 @@ def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(tmp_path, c
     states = [s["state"] for s in store.segments(store.get("a.tar")["id"])]
     assert len(states) > 2
     assert states[0] == "error" and set(states[1:]) == {"pending"}, states
+
+
+# ---- a header read from the wrong place, caught after a complete walk -------------------
+
+def _header_offsets(data):
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        return [m.offset for m in t]
+
+
+def _names(db):
+    store = ArchiveStore(db)
+    return [r["name"] for r in store.connect().execute(
+        "SELECT name FROM members WHERE archive_id=? ORDER BY hdr_offset",
+        (store.get("a.tar")["id"],))]
+
+
+class _CopiesAHeader:
+    """One well-formed bad read for every reader the pool builds: the ``nth`` fetch
+    covering ``at`` carries, there, the 512-byte header from ``source`` -- valid tar from
+    the wrong place, which passes every checksum. The members in MEMBERS all pad to the
+    same size, so the walk rejoins its chain straight after it and ends `complete`."""
+
+    def __init__(self, directory, data, at, source, nth=1):
+        self.directory, self.at, self.nth = directory, at, nth
+        self.header = data[source:source + 512]
+        self.covering = self.lied = 0
+        self.lock = threading.Lock()
+
+    def reader_for(self, row, archive_set, tokens=None, limiter=None):
+        shared = self
+
+        class _Reader(LocalRangeReader):
+            def read_range(self, part_idx, offset, length):
+                data = super().read_range(part_idx, offset, length)
+                start = self.archive.parts[part_idx].offset + offset
+                if not start <= shared.at < start + length:
+                    return data
+                with shared.lock:
+                    shared.covering += 1
+                    if shared.covering != shared.nth:
+                        return data
+                    shared.lied += 1
+                cut = shared.at - start
+                return data[:cut] + shared.header[:length - cut] + data[cut + 512:]
+
+        return _Reader(self.directory, archive_set)
+
+
+def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
+        tmp_path, monkeypatch, capsys):
+    """The silent case: member 5's header served where member 20's belongs. Same padded
+    size, so the chain rejoins and the walk ends `complete` -- member 5 recorded twice,
+    member 20 never. Any such copy leaves a path recorded twice, so after a complete walk
+    those rows are read again, and the segment holding the one that disagrees is walked
+    again."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    source = local_archive(tmp_path, data, part_size=len(data))
+    fake = _CopiesAHeader(source, data, at=offsets[20], source=offsets[5])
+    monkeypatch.setattr("dbaudit.cli._reader_for", fake.reader_for)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert fake.lied == 1, "the test did not actually inject the bad read"
+    assert ArchiveStore(db).get("a.tar")["state"] == "complete"
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
+    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "audit_repair") == 1
+
+
+def _index_with_appended(tmp_path, appended, *extra):
+    """MEMBERS plus one more member named ``appended``, indexed to the end."""
+    data = build_tar(MEMBERS + [(appended, b"y" * 705)])
+    label = appended.replace("/", "_")
+    source = local_archive(tmp_path, data, part_size=len(data), name=label)
+    db = str(tmp_path / f"{label}.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    code = main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
+                 *extra])
+    return code, db
+
+
+def _requests(db):
+    store = ArchiveStore(db)
+    return store.stats(store.get("a.tar")["id"])["requests"]
+
+
+def test_a_path_truly_in_the_archive_twice_survives_the_audit_for_one_request(
+        tmp_path, capsys):
+    """`tar -r` appends a newer copy under the same path. The audit reads both rows
+    again, they agree, and both stay -- for the one fetch that covers both in an archive
+    this small, which the same archive with no repeated path does not pay."""
+    code, twice = _index_with_appended(tmp_path, "run/file05.bin")
+    assert code == 0
+    code, once = _index_with_appended(tmp_path, "run/file99.bin")
+    assert code == 0
+
+    store = ArchiveStore(twice)
+    assert store.get("a.tar")["state"] == "complete"
+    assert len(store.find_members(store.get("a.tar")["id"], "run/file05.bin")) == 2
+    assert _requests(twice) - _requests(once) == 1
+
+
+def test_the_audit_reads_at_most_its_limit(tmp_path, monkeypatch, capsys):
+    """An archive of many repeated paths must not buy hours of reads: the audit stops
+    at its limit and says so. One-block windows make every row its own request."""
+    monkeypatch.setattr("dbaudit.cli.AUDIT_LIMIT", 1)
+    small = ["--window-min", "512", "--window-max", "512"]
+    code, twice = _index_with_appended(tmp_path, "run/file05.bin", *small)
+    assert code == 0
+    code, once = _index_with_appended(tmp_path, "run/file99.bin", *small)
+    assert code == 0
+
+    assert _requests(twice) - _requests(once) == 1
+    assert event_count(twice, ArchiveStore(twice).get("a.tar")["id"], "audit_partial") == 1
+
+
+def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
+        tmp_path, monkeypatch, capsys):
+    """A complete walk whose audit could not run is not complete: the archive is left in
+    `error`, which the next `index` retries -- straight to the audit, since every chain
+    is already walked."""
+    data = build_tar(MEMBERS + [("run/file05.bin", b"y" * 705)])
+    source = local_archive(tmp_path, data, part_size=len(data))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    made = []
+
+    def reader_for(row, archive_set, tokens=None, limiter=None):
+        reader = LocalRangeReader(row["folder"], archive_set)
+        made.append(reader)
+        if len(made) == 2:                  # the first reader walks, the second audits
+
+            def fail(*args, **kwargs):
+                raise ReaderError("simulated: Dropbox kept failing")
+
+            reader.read_range = fail
+        return reader
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 1
+    assert "audit" in capsys.readouterr().err
+    assert ArchiveStore(db).get("a.tar")["state"] == "error"
+
+    monkeypatch.undo()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert ArchiveStore(db).get("a.tar")["state"] == "complete"

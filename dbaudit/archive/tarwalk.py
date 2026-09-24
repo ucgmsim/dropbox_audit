@@ -33,9 +33,9 @@ _RAN_OUT = frozenset({"unexpected end of data", "empty header", "truncated heade
 
 #: The verdicts that end a walk for good, and so are never believed on one read.
 #: `crossed` and `stopped` are not final -- something walks on from them either way.
-#: `truncated` means the chain itself ran off the end of the data, which takes a
-#: checksum-valid header claiming too much; a bad read cannot manufacture one.
-_FINAL = frozenset({"corrupt", "complete"})
+#: `truncated` is: it takes a checksum-valid header claiming more than is left, and a
+#: bad read that is valid tar from elsewhere in the archive is exactly that.
+_FINAL = frozenset({"corrupt", "complete", "truncated"})
 
 #: How many times one walk will accept "that read was contradicted by the next" before
 #: it gives up and raises UnsettledRead. A bad read is rare and independent; a bad
@@ -102,18 +102,21 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
          stop_at: int | None = None, should_stop=None) -> WalkResult:
     """Walk from ``start_offset``, calling ``commit(members, next_offset)`` per batch.
 
-    No verdict that ends the walk -- ``corrupt`` or ``complete`` -- is believed on one
-    read. Reaching one drops the reader's cache and walks again from where it landed,
-    so the deciding bytes come from a second request; a verdict that repeats stands,
+    No verdict that ends the walk -- ``corrupt``, ``complete`` or ``truncated`` -- is
+    believed on one read. Reaching one drops the reader's cache and reads the deciding
+    bytes again from a second request: where the walk landed, or for ``truncated`` the
+    last header, whose size ran the chain off the end. A verdict that repeats stands,
     and one that changes means the first read was wrong and the walk carries on, which
     the result's detail records. A genuinely damaged archive reads the same way twice
     and reaches the verdict it always did, one short pass later.
 
     ``commit`` is expected to write the members and the cursor in one transaction, so
-    that an interrupted walk resumes from exactly the last committed offset. It is
-    called exactly once per batch and exactly once more at the end of each pass -- so
-    more than once at the end when a verdict was read twice, the extra calls carrying
-    no members, and the last call always reflecting the offset finally reached.
+    that an interrupted walk resumes from exactly the last committed offset -- and to
+    replace a member already written at the same header offset, because a confirming
+    pass over ``truncated`` records the last member again. It is called exactly once per
+    batch and exactly once more at the end of each pass -- so more than once at the end
+    when a verdict was read twice, and the last call always reflecting the offset
+    finally reached.
 
     ``stop_at`` ends the walk once the next header lies at or past that offset, which
     is how one segment's chain confirms where its successor's chain must begin. A
@@ -141,7 +144,8 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     # consecutive reads agree. That covers each of the three ways `_classify_end` says
     # corrupt, and `complete` too, which is the silent failure: a bad read of zeros would
     # otherwise end a six-hour walk claiming success, members missing, and `index` would
-    # then refuse to walk it again.
+    # then refuse to walk it again. And `truncated`: a bad read that is valid tar from
+    # elsewhere passes its checksum and can claim more bytes than are left.
     #
     # A verdict is its state and the offset it was reached at, not its wording: a pass
     # that walks into damage and one that opens on it describe the same bytes two ways
@@ -157,8 +161,8 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     # against REREAD_LIMIT.
     position, seen, rescued, verdict, first = start_offset, 0, [], None, None
     while True:
-        result, seen = _walk_chain(concat, position, commit, batch_size, stop_at,
-                                   should_stop, seen)
+        result, seen, last = _walk_chain(concat, position, commit, batch_size, stop_at,
+                                         should_stop, seen, rescued)
         again = (result.state, result.end_offset)
         if verdict is not None and again != verdict:
             rescued.append(position)        # reading `position` again changed the answer
@@ -175,6 +179,11 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
         verdict, first = again, result
         concat.drop_cache()
         position = result.end_offset
+        if result.state == "truncated" and last is not None:
+            # What decided this one is the size in the last header read, not the end
+            # of the data, so that header is what gets read again. Its member is
+            # recorded a second time -- replacing the first -- so not counted twice.
+            position, seen = last, seen - 1
     if rescued:
         where = ", ".join(str(o) for o in dict.fromkeys(rescued))
         note = f"re-read at {where}: a read there was contradicted by the next"
@@ -184,28 +193,39 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
 
 
 def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, should_stop,
-                seen: int):
-    """One pass of the chain from ``start_offset``. Returns (result, members so far)."""
+                seen: int, rescued: list):
+    """One pass of the chain from ``start_offset``.
+
+    Returns (result, members so far, header offset of the last member this pass
+    recorded -- None if it recorded none). A member re-read because its first read was
+    contradicted is added to ``rescued``.
+    """
     total = concat.archive.total_size
     concat.seek(start_offset)
     try:
         archive = tarfile.open(fileobj=concat, mode="r:")
     except tarfile.ReadError as exc:
         commit([], start_offset)
-        return _classify_end(concat, start_offset, seen, str(exc)), seen
+        return _classify_end(concat, start_offset, seen, str(exc)), seen, None
 
     batch: list[Member] = []
+    last = None
     while True:
         try:
             info = archive.next()
         except tarfile.ReadError as exc:
             commit(batch, archive.offset)
             if str(exc) in _RAN_OUT:
-                return WalkResult("truncated", total, seen, str(exc)), seen
+                return WalkResult("truncated", total, seen, str(exc)), seen, last
             return WalkResult("corrupt", archive.offset, seen,
-                              f"{exc} after the header at {archive.offset}"), seen
+                              f"{exc} after the header at {archive.offset}"), seen, last
         if info is None:
             break
+        try:
+            info = _settled(concat, archive, info, rescued)
+        except UnsettledRead:
+            commit(batch, info.offset)      # a resume retries exactly this member
+            raise
         if info.pax_headers:
             # tarfile has already applied an `x` or `g` extended header to this member.
             # Keep what was walked before it; the cursor stops short of it, not past.
@@ -215,21 +235,106 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
                 f"({info.name!r}): this is a pax-format archive, which dbaudit does not "
                 f"index -- its names and sizes can sit outside the checksummed header")
         batch.append(Member.from_tarinfo(info))
+        last = info.offset
         seen += 1
         archive.members.clear()             # the walk is a stream; do not accumulate
         if stop_at is not None and archive.offset >= stop_at:
             commit(batch, archive.offset)
-            return WalkResult("crossed", archive.offset, seen), seen
+            return WalkResult("crossed", archive.offset, seen), seen, last
         if should_stop is not None and should_stop():
             commit(batch, archive.offset)
-            return WalkResult("stopped", archive.offset, seen), seen
+            return WalkResult("stopped", archive.offset, seen), seen, last
         if len(batch) >= batch_size:
             commit(batch, archive.offset)
             batch = []
 
     end = archive.offset
     commit(batch, end)
-    return _classify_end(concat, end, seen), seen
+    return _classify_end(concat, end, seen), seen, last
+
+
+def _settled(concat, archive, info, rescued):
+    """The member to record, once its GNU long name and link target are believed.
+
+    Those live in blocks no checksum covers, so a bad read that garbles only them gets
+    past every other check here. But GNU tar (99 bytes in oldgnu, 100 in gnu) and
+    Python copy their start into the name and linkname fields of the header after
+    them, which the checksum does cover. When the two disagree the member is read
+    afresh: a read that agrees with its own header replaces the first, and two reads in
+    a row that agree with each other are the archive as written -- a writer that fills
+    those fields some other way costs one request, not a refusal. A read that is valid
+    tar from elsewhere can bring a header with another size, so the walk goes on from
+    where the member it keeps says.
+    """
+    encoding, errors = archive.encoding, archive.errors
+    if info.pax_headers or _long_fields_agree(concat, info, encoding, errors):
+        return info
+    previous = _identity(info)
+    for _ in range(REREAD_LIMIT):
+        concat.drop_cache()
+        fresh = _read_one(concat, info.offset, encoding, errors)
+        if fresh is None:
+            previous = None
+            continue
+        member, after = fresh
+        if (_long_fields_agree(concat, member, encoding, errors)
+                or _identity(member) == previous):
+            if _identity(member) != _identity(info):
+                rescued.append(info.offset)
+            archive.offset = after
+            return member
+        previous = _identity(member)
+    raise UnsettledRead(
+        f"the GNU long name or link target of the member at {info.offset} read "
+        f"differently every time, and never began as the header after it says")
+
+
+def _long_fields_agree(concat, info, encoding, errors) -> bool:
+    """Whether a member's long name and link target begin as the checksummed header
+    after their blocks says. True for a member with no such blocks. The header was
+    read a moment ago, so it is still in the window: checking costs no request."""
+    if info.offset_data - info.offset <= BLOCK or info.issparse():
+        return True                 # one header; or sparse maps, not names, before it
+    here = concat.tell()
+    concat.seek(info.offset_data - BLOCK)
+    header = concat.read(BLOCK)
+    concat.seek(here)
+    name_field = header[0:100].split(b"\0", 1)[0].rstrip(b"/")
+    link_field = header[157:257].split(b"\0", 1)[0]
+    return (info.name.encode(encoding, errors).startswith(name_field)
+            and info.linkname.encode(encoding, errors).startswith(link_field))
+
+
+def _identity(info):
+    return (info.name, info.linkname, info.size, info.type, info.mode, info.mtime,
+            info.uname, info.gname, info.offset_data)
+
+
+def _read_one(concat, offset, encoding=tarfile.ENCODING, errors="surrogateescape"):
+    """The member whose header sequence begins at ``offset``, parsed from what the
+    reader returns, and where the next header lies -- or None if none begins there."""
+    concat.seek(offset)
+    try:
+        one = tarfile.open(fileobj=concat, mode="r:", encoding=encoding, errors=errors)
+    except tarfile.ReadError:
+        return None
+    try:
+        # Not next(): with no member at `offset` that seeks back a byte and quietly
+        # reads the same place again -- a second request, and a retry nobody counted.
+        info = one.firstmember
+        return None if info is None else (info, one.offset)
+    finally:
+        one.close()                 # the ConcatFile is the caller's; this leaves it open
+
+
+def read_member(concat, offset) -> Member | None:
+    """The member whose header sequence begins at ``offset``, as the reader has it now
+    -- how a recorded row is checked against a fresh read. None if none begins there.
+
+    Reads through ``concat``'s window: a fresh ConcatFile gives a fresh read.
+    """
+    fresh = _read_one(concat, offset)
+    return None if fresh is None else Member.from_tarinfo(fresh[0])
 
 
 def _first_non_zero(buf: bytes) -> int | None:

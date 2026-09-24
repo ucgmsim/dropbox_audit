@@ -536,6 +536,29 @@ class ArchiveStore:
             "SELECT * FROM members WHERE archive_id=? AND hdr_offset=?",
             (archive_id, hdr_offset)).fetchone()
 
+    def repeated_paths(self, archive_id, limit: int) -> list[sqlite3.Row]:
+        """Every row whose path is recorded more than once, in header order, at most
+        ``limit`` of them.
+
+        A tar can hold a path twice (`tar -r` appends a newer copy), but a bad read that
+        is valid tar from elsewhere in the archive always makes one: it records that
+        other member's header, path and all, a second time.
+        """
+        return self.connect().execute(
+            """SELECT m.* FROM members AS m
+               JOIN (SELECT dir, name FROM members WHERE archive_id=?
+                     GROUP BY dir, name HAVING COUNT(*) > 1) AS r
+                 ON m.dir = r.dir AND m.name = r.name
+               WHERE m.archive_id=?
+               ORDER BY m.hdr_offset LIMIT ?""",
+            (archive_id, archive_id, limit)).fetchall()
+
+    def charge(self, archive_id, requests: int, bytes_fetched: int) -> None:
+        """Add reads made outside any segment -- an audit's -- to the archive's cost."""
+        self.connect().execute(
+            "UPDATE archives SET requests=requests+?, bytes_fetched=bytes_fetched+? "
+            "WHERE id=?", (requests, bytes_fetched, archive_id))
+
     def find_members(self, archive_id, path) -> list[sqlite3.Row]:
         """Every member whose (dir, name) matches `path`, oldest header first.
 
