@@ -4,7 +4,8 @@ import tarfile
 import pytest
 
 from dbaudit.archive.reader import ConcatFile, LocalRangeReader
-from dbaudit.archive.tarwalk import REREAD_LIMIT, UnsettledRead, find_chain_start, walk
+from dbaudit.archive.tarwalk import (REREAD_LIMIT, UnsettledRead, UnsupportedArchive,
+                                     find_chain_start, walk)
 from tests.archive_fakes import build_tar, write_parts
 
 MEMBERS = [(f"run/file{i:03d}.bin", bytes([i % 251]) * (1000 + i)) for i in range(50)]
@@ -47,15 +48,23 @@ def test_the_manifest_does_not_depend_on_where_the_parts_divide(tmp_path):
         assert manifest == baseline
 
 
-def test_long_names_and_pax_headers_survive(tmp_path):
+def test_gnu_long_names_survive_but_pax_is_refused(tmp_path):
+    """The plan asked for both formats to walk. arr65 ruled on 2026-09-23 that pax is out
+    of scope and should fail loudly instead: in pax, names and sizes can live outside the
+    checksummed header, and a size misread there moves every later header while a retry
+    re-reads only the wrong place. GNU long names keep the size in the header, so a
+    misread can garble a name but never move the chain."""
     long_name = "run/" + "d" * 150 + "/deep.bin"
-    for fmt in (tarfile.GNU_FORMAT, tarfile.PAX_FORMAT):
-        data = build_tar([(long_name, b"x" * 10)], format=fmt)
-        directory = tmp_path / f"f{fmt}"
-        directory.mkdir()
-        seen, _, result = collect(directory, data)
-        assert result.state == "complete"
-        assert f"{seen[0].dir}/{seen[0].name}" == long_name
+    gnu = tmp_path / "gnu"
+    gnu.mkdir()
+    seen, _, result = collect(gnu, build_tar([(long_name, b"x" * 10)], format=tarfile.GNU_FORMAT))
+    assert result.state == "complete"
+    assert f"{seen[0].dir}/{seen[0].name}" == long_name
+
+    pax = tmp_path / "pax"
+    pax.mkdir()
+    with pytest.raises(UnsupportedArchive, match="pax"):
+        collect(pax, build_tar([(long_name, b"x" * 10)], format=tarfile.PAX_FORMAT))
 
 
 def test_directories_symlinks_and_empty_files(tmp_path):
@@ -476,8 +485,9 @@ def test_a_damaged_long_name_member_is_diagnosed_once_and_not_called_transient(t
     """A checksum-valid header that tarfile still cannot chain through used to spin:
     the block re-read fine every time, so the walk resumed on it over and over and
     reported a rescue that never happened. A verdict is its state and its offset, so
-    reaching the same one twice settles it -- and the first pass's diagnosis is kept,
-    because `_classify_end` relabels the detail it is handed.
+    reaching the same one twice settles it -- and the first pass's diagnosis is kept.
+    The confirming pass opens a fresh tarfile *on* the long-name header, so it blames
+    that header; only the first pass saw that the damage is in the one after it.
     """
     data, real_header = _long_name_archive()
     data[real_header:real_header + 8] = b"\xff" * 8
@@ -489,7 +499,9 @@ def test_a_damaged_long_name_member_is_diagnosed_once_and_not_called_transient(t
 
     assert result.state == "corrupt"
     assert "re-read at" not in result.detail, "reported a rescue that did not happen"
-    assert "bad checksum" in result.detail, "kept the relabelled detail, not the real one"
+    long_name_header = 1024                 # after run/first.bin's header and data block
+    assert f"bad checksum after the header at {long_name_header}" in result.detail, (
+        f"reported the confirming pass, which blames the long-name header: {result.detail}")
     assert len(calls) == 2, f"expected one pass plus one confirming pass, got {calls}"
 
 
@@ -712,3 +724,81 @@ def test_a_walk_starting_on_a_damaged_long_name_member_says_what_is_wrong(tmp_pa
     assert result.end_offset == first_span
     assert "bad checksum" in result.detail
     assert "not a header" not in result.detail
+
+
+# ---- pax is refused, loudly ----------------------------------------------------------
+#
+# In a pax archive a member's name, link target, size and times can live in an extended
+# header's data blocks, which carry no checksum -- the guarantees this walker rests on do
+# not hold there. dbaudit indexes GNU and ustar tars only, and says so rather than
+# producing a verdict it cannot stand behind.
+
+def _pax_tar(members, pax_global=None):
+    buf = io.BytesIO()
+    kw = {"format": tarfile.PAX_FORMAT}
+    if pax_global:
+        kw["pax_headers"] = pax_global
+    with tarfile.open(fileobj=buf, mode="w", **kw) as tf:
+        for name, payload, extra in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            if extra:
+                info.pax_headers = extra
+            tf.addfile(info, io.BytesIO(payload))
+    return buf.getvalue()
+
+
+def _walk_all(tmp_path, data):
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    calls = []
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0,
+                  lambda members, offset: calls.append(([m.name for m in members], offset)))
+    return result, calls
+
+
+def test_an_archive_with_pax_headers_on_every_member_is_refused_at_once(tmp_path):
+    """What GNU tar --format=posix writes: an `x` header before every entry."""
+    data = _pax_tar([(f"f{i}.bin", b"x" * 100, {"mtime": "1700000000.5"}) for i in range(5)])
+    with pytest.raises(UnsupportedArchive, match="pax"):
+        _walk_all(tmp_path, data)
+
+
+def test_a_pax_header_deep_in_the_archive_stops_the_walk_where_it_is(tmp_path):
+    """tarfile's own pax writer adds an `x` header only where it needs one -- here, for
+    a long name -- so detection can come deep into an archive. What was walked before it
+    is committed, and the cursor stops before the pax member, never past it."""
+    long_name = "run/" + "d" * 150 + "/deep.bin"
+    data = _pax_tar([("a.bin", b"a" * 700, None), ("b.bin", b"b" * 700, None),
+                     (long_name, b"y" * 700, None), ("z.bin", b"z" * 700, None)])
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as reference:
+        pax_member = [m for m in reference if m.pax_headers][0]
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    calls = []
+    with pytest.raises(UnsupportedArchive, match=str(pax_member.offset)):
+        walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0,
+             lambda members, offset: calls.append(([m.name for m in members], offset)))
+    assert calls[-1] == (["a.bin", "b.bin"], pax_member.offset)
+
+
+def test_a_global_pax_header_is_refused_too(tmp_path):
+    data = _pax_tar([("a.bin", b"a" * 100, None), ("b.bin", b"b" * 100, None)],
+                    pax_global={"comment": "archived by some other tool"})
+    with pytest.raises(UnsupportedArchive, match="pax"):
+        _walk_all(tmp_path, data)
+
+
+@pytest.mark.parametrize("fmt", [tarfile.GNU_FORMAT, tarfile.USTAR_FORMAT])
+def test_gnu_and_ustar_archives_are_not_mistaken_for_pax(tmp_path, fmt):
+    """GNU long names and link targets also live outside the header, but they are GNU
+    format, and ustar's 155-byte name prefix is inside the checksummed header -- neither
+    may trip the pax check."""
+    buf = io.BytesIO()
+    long_path = "sub/" + "p" * 120 + "/b.bin"   # GNU: an `L` header; ustar: a prefix
+    with tarfile.open(fileobj=buf, mode="w", format=fmt) as tf:
+        for name in ("a.bin", long_path):
+            info = tarfile.TarInfo(name)
+            info.size = 10
+            tf.addfile(info, io.BytesIO(b"q" * 10))
+    result, calls = _walk_all(tmp_path, buf.getvalue())
+    assert result.state == "complete"
+    assert [name for names, _ in calls for name in names] == ["a.bin", "b.bin"]

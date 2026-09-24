@@ -37,7 +37,8 @@ from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeRea
                              LocalRangeReader, ReaderError)
 from .archive import report as archive_report
 from .archive.store import ArchiveStore
-from .archive.tarwalk import BLOCK, REREAD_LIMIT, WalkResult, find_chain_start, walk
+from .archive.tarwalk import (BLOCK, REREAD_LIMIT, UnsupportedArchive, WalkResult,
+                              find_chain_start, walk)
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
 from .limiter import AdaptiveLimiter
@@ -672,6 +673,9 @@ class _Run:
         #: of what anyone sees, and "stopped cleanly" and "a chain blew up" are not the
         #: same answer.
         self.failed = False
+        #: Set by the first chain to meet a pax header. The format is the archive's, not
+        #: one part's, so every other chain would meet it too: the run stops.
+        self.unsupported = None
 
     def commit(self, segment_id, members, next_offset, requests, bytes_fetched) -> None:
         """Write one batch, or refuse to once `--max-batches` has been reached.
@@ -751,6 +755,18 @@ def _walk_segment(run, segment) -> None:
         # The refused batch was read before it was refused.
         requests, fetched = delta()
         run.store.release_segment(segment["id"], requests, fetched)
+        return
+    except UnsupportedArchive as exc:
+        # Not a bad part: the archive's format, which every chain would meet. Stop the
+        # pool and let `_run_index` mark the archive for good.
+        requests, fetched = delta()
+        with run.lock:
+            if run.unsupported is None:
+                run.unsupported = str(exc)
+        run.stop.set()
+        log.error("segment %d: %s", segment["idx"], exc)
+        run.store.fail_segment(segment["id"], f"UnsupportedArchive: {exc}",
+                               requests, fetched)
         return
     except Exception as exc:
         # One bad part must not kill the run: record why it died and what it cost, and
@@ -873,6 +889,10 @@ def cmd_archive_index(args) -> int:
         print(f"error: {row['name']} is stale ({row['detail'] or ''}); re-register it "
               f"to index the parts as they are now", file=sys.stderr)
         return 1
+    if row["state"] == "unsupported":
+        print(f"error: {row['name']} is a pax-format archive, which dbaudit does not "
+              f"index: {row['detail'] or ''}", file=sys.stderr)
+        return 1
 
     try:
         lock = InstanceLock(args.lock or f"{args.db}.lock")
@@ -961,6 +981,8 @@ def _run_index(args, store, row) -> int:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 for future in [pool.submit(_worker, run) for _ in range(workers)]:
                     future.result()
+            if run.unsupported:
+                break                     # no verdict to join towards: see below
             kind, payload = _join(store, archive_id)
             if kind == _OUTCOME:
                 outcome = payload
@@ -995,7 +1017,9 @@ def _run_index(args, store, row) -> int:
                 # reason, so the walk's own bookkeeping cannot erase it.
                 store.mark_stale(archive_id, stale)
 
-    if outcome is not None:
+    if run.unsupported:
+        store.mark_unsupported(archive_id, run.unsupported)
+    elif outcome is not None:
         store.finish(archive_id, outcome)
         store.build_indexes(archive_id)        # only once a walk is over, never during
     elif blocked is not None and blocked["state"] == "error":
@@ -1018,6 +1042,10 @@ def _run_index(args, store, row) -> int:
     if stale is not None:
         print(f"error: {stale}; the members found are kept, but re-register before "
               f"trusting them", file=sys.stderr)
+        return 1
+    if run.unsupported:
+        print(f"error: {row['name']} is a pax-format archive, which dbaudit does not index. "
+              f"{run.unsupported}", file=sys.stderr)
         return 1
     if run.failed:
         print(f"error: a chain stopped on an unexpected failure; see the log and "
@@ -1131,6 +1159,9 @@ def _print_index_completeness_warning(row) -> None:
         print("  It may be missing members, and until every chain is confirmed it may also")
         print("  list members of a tar stored inside the archive: treat these figures as")
         print("  provisional.")
+    if row["state"] == "unsupported":
+        print("  It is a pax-format archive, which dbaudit does not index: the walk")
+        print("  stopped at the first pax member.")
     if row["state"] == "stale":
         print(f"  It is also stale ({row['detail'] or 'parts changed since indexing'}):")
         print("  the parts changed underneath this index, so it may describe bytes")
@@ -1343,6 +1374,13 @@ def cmd_archive_cat(args) -> int:
         print(f"error: {row['name']} is stale ({row['detail'] or ''}); its offsets may "
               f"no longer match the parts -- re-register it before trusting them",
               file=sys.stderr)
+        return 1
+
+    if row["state"] == "unsupported":
+        # Its index stops at the first pax member, and pax is where a member's name and
+        # size can sit outside the checksummed header the read checks below rely on.
+        print(f"error: {row['name']} is a pax-format archive, which dbaudit does not "
+              f"index or extract: {row['detail'] or ''}", file=sys.stderr)
         return 1
 
     matches = store.find_members(row["id"], args.member)

@@ -679,3 +679,99 @@ def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
     row = store.get("a.tar")
     assert row["state"] == "complete"
     assert store.stats(row["id"])["n_members"] == len(MEMBERS)
+
+
+# ---- pax archives are refused, loudly --------------------------------------------------
+
+def _pax_archive(tmp_path, members, part_size=4096):
+    """A pax-format tar split into parts: an `x` header before every member, as GNU tar
+    --format=posix writes one."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for name, payload in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.pax_headers = {"mtime": "1700000000.25"}
+            tf.addfile(info, io.BytesIO(payload))
+    return local_archive(tmp_path, buf.getvalue(), part_size=part_size)
+
+
+def test_index_refuses_a_pax_archive_loudly_and_for_good(tmp_path, capsys):
+    source = _pax_archive(tmp_path, MEMBERS)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    err = capsys.readouterr().err
+    assert "pax" in err
+    row = ArchiveStore(db).get("a.tar")
+    assert row["state"] == "unsupported", "not `error` (retryable) or `corrupt` (a verdict)"
+    assert "pax" in (row["detail"] or "")
+
+
+def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):
+    source = _pax_archive(tmp_path, MEMBERS)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+    capsys.readouterr()
+
+    def landmine(*args, **kwargs):
+        raise AssertionError("an unsupported archive must not be read again")
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", landmine)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert "pax" in capsys.readouterr().err
+
+
+def test_cat_refuses_an_unsupported_archive(tmp_path, capsys):
+    source = _pax_archive(tmp_path, MEMBERS)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+    capsys.readouterr()
+    out = tmp_path / "out.bin"
+    assert main(["archive", "cat", "--db", db, "--archive", "a.tar",
+                 "--member", MEMBERS[0][0], "--out", str(out)]) == 1
+    assert "pax" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_a_pax_member_deep_in_a_split_archive_stops_every_chain(tmp_path, capsys):
+    """tarfile's pax writer adds an `x` header only where it needs one, so the pax member
+    can sit in any part, found by any chain. The whole run must stop and say so -- not
+    one segment in `error` while the others walk on and the archive is left `walking`."""
+    long_name = "run/" + "d" * 150 + "/deep.bin"
+    members = MEMBERS[:12] + [(long_name, b"y" * 700)] + MEMBERS[12:]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for name, payload in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            tf.addfile(info, io.BytesIO(payload))
+    source = local_archive(tmp_path, buf.getvalue(), part_size=4096)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert "pax" in capsys.readouterr().err
+    assert ArchiveStore(db).get("a.tar")["state"] == "unsupported"
+
+
+def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(tmp_path, capsys):
+    """Every chain would meet the format, and each would pay a cold scan first -- on a
+    300 GiB part that scan is unbounded. So the first chain to meet pax stops the
+    pool: with one worker, no segment after it is ever claimed."""
+    source = _pax_archive(tmp_path, MEMBERS)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar",
+                 "--workers", "1"]) == 1
+    store = ArchiveStore(db)
+    states = [s["state"] for s in store.segments(store.get("a.tar")["id"])]
+    assert len(states) > 2
+    assert states[0] == "error" and set(states[1:]) == {"pending"}, states

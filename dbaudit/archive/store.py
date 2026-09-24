@@ -320,6 +320,31 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
+    def mark_unsupported(self, archive_id, detail: str) -> None:
+        """The archive is in a format the walker does not index (pax), for good.
+
+        Terminal, unlike `error`, which the next `index` retries: re-walking cannot
+        change an archive's format, so `index` and `cat` refuse this state outright. A
+        `stale` archive keeps its flag and its reason, as `finish` keeps them -- the
+        parts changed, which says more, and re-registering walks it again anyway. The
+        refusal still survives in the event below and on the segment that met it.
+        """
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """UPDATE archives SET
+                       state=CASE WHEN state='stale' THEN 'stale' ELSE 'unsupported' END,
+                       detail=CASE WHEN state='stale' THEN detail ELSE ? END,
+                       finished_at=?
+                   WHERE id=?""",
+                (detail, time.time(), archive_id))
+            self.log_event(archive_id, "unsupported", detail)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
     def fail(self, archive_id, error: str) -> None:
         """Record a walk-level failure, as opposed to `fail_segment`'s one chain.
 
