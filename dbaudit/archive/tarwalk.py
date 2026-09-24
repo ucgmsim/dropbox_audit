@@ -210,6 +210,9 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
 
     batch: list[Member] = []
     last = None
+    # Where the next member's header sequence begins. Not always its own offset: tarfile
+    # reports a member after a `g` header at the member's header, past the `g`.
+    before = start_offset
     while True:
         try:
             info = archive.next()
@@ -222,20 +225,22 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
         if info is None:
             break
         try:
-            info = _settled(concat, archive, info, rescued)
+            info = _settled(concat, archive, info, before, rescued)
         except UnsettledRead:
-            commit(batch, info.offset)      # a resume retries exactly this member
+            commit(batch, before)           # a resume retries exactly this member
             raise
         if info.pax_headers:
-            # tarfile has already applied an `x` or `g` extended header to this member.
-            # Keep what was walked before it; the cursor stops short of it, not past.
-            commit(batch, info.offset)
+            # Two reads agree an `x` or `g` extended header applies to this member. Keep
+            # what was walked before it, with the cursor where its headers begin: a
+            # resume from past a `g` would walk on with no global header in force.
+            commit(batch, before)
             raise UnsupportedArchive(
-                f"a pax extended header applies to the member at {info.offset} "
+                f"a pax extended header applies to the member at {before} "
                 f"({info.name!r}): this is a pax-format archive, which dbaudit does not "
                 f"index -- its names and sizes can sit outside the checksummed header")
         batch.append(Member.from_tarinfo(info))
         last = info.offset
+        before = archive.offset
         seen += 1
         archive.members.clear()             # the walk is a stream; do not accumulate
         if stop_at is not None and archive.offset >= stop_at:
@@ -253,40 +258,49 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
     return _classify_end(concat, end, seen), seen, last
 
 
-def _settled(concat, archive, info, rescued):
-    """The member to record, once its GNU long name and link target are believed.
+def _settled(concat, archive, info, before, rescued):
+    """The member to record, once nothing about it rests on one read alone.
 
-    Those live in blocks no checksum covers, so a bad read that garbles only them gets
-    past every other check here. But GNU tar (99 bytes in oldgnu, 100 in gnu) and
-    Python copy their start into the name and linkname fields of the header after
-    them, which the checksum does cover. When the two disagree the member is read
-    afresh: a read that agrees with its own header replaces the first, and two reads in
-    a row that agree with each other are the archive as written -- a writer that fills
-    those fields some other way costs one request, not a refusal. A read that is valid
-    tar from elsewhere can bring a header with another size, so the walk goes on from
-    where the member it keeps says.
+    Two things are taken on trust from blocks no checksum covers, and each is read
+    again before it is believed. A GNU long name or link target: GNU tar (99 bytes in
+    oldgnu, 100 in gnu) and Python copy its start into the checksummed header after it,
+    so the two must agree. And a pax extended header: it makes the archive
+    `unsupported` for good, and a bad read can be valid pax from elsewhere -- a stored
+    tarball -- sitting where a GNU header belongs.
+
+    A suspect member is read afresh from ``before``, where its header sequence begins
+    (for a member after a `g` header, that is the `g`). A read with nothing suspect
+    about it replaces the first; two reads in a row that agree are the archive as
+    written -- a writer that fills those fields some other way costs one request, not a
+    refusal, and pax confirmed twice is pax. The walk goes on from where the member it
+    keeps says, since a bad read can bring a header of another size.
     """
     encoding, errors = archive.encoding, archive.errors
-    if info.pax_headers or _long_fields_agree(concat, info, encoding, errors):
+    if not info.pax_headers and _long_fields_agree(concat, info, encoding, errors):
         return info
     previous = _identity(info)
     for _ in range(REREAD_LIMIT):
         concat.drop_cache()
-        fresh = _read_one(concat, info.offset, encoding, errors)
+        fresh = _read_one(concat, before, encoding, errors)
         if fresh is None:
             previous = None
             continue
         member, after = fresh
-        if (_long_fields_agree(concat, member, encoding, errors)
-                or _identity(member) == previous):
+        believable = (not member.pax_headers
+                      and _long_fields_agree(concat, member, encoding, errors))
+        if believable or _identity(member) == previous:
             if _identity(member) != _identity(info):
-                rescued.append(info.offset)
+                rescued.append(before)
+            if not member.pax_headers:
+                # A `g` header seen only by the bad read would go on applying to every
+                # member after it: the walk's own TarFile keeps it.
+                archive.pax_headers.clear()
             archive.offset = after
             return member
         previous = _identity(member)
     raise UnsettledRead(
-        f"the GNU long name or link target of the member at {info.offset} read "
-        f"differently every time, and never began as the header after it says")
+        f"the member at {before} read differently every time, and never without a long "
+        f"name, link target or pax header that no second read confirmed")
 
 
 def _long_fields_agree(concat, info, encoding, errors) -> bool:

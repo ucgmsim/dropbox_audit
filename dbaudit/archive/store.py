@@ -160,6 +160,10 @@ class ArchiveStore:
         `stale`, so a merely-in-progress or already-`complete` archive being
         re-registered (a routine re-listing of its parts) is not reset to
         `registered` -- only a `stale` one is.
+
+        `unsupported` is lifted the same way. It is terminal for `index` and `cat`,
+        and re-registering is the one way back should it ever be reached wrongly; a
+        real pax archive loses nothing, since the next walk meets its header again.
         """
         parts = list(parts)
         set_hash = ArchiveSet(parts).set_hash()
@@ -172,8 +176,10 @@ class ArchiveStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(set_hash) DO UPDATE SET
                        name=excluded.name, folder=excluded.folder, source=excluded.source,
-                       state=CASE WHEN state='stale' THEN 'registered' ELSE state END,
-                       detail=CASE WHEN state='stale' THEN NULL ELSE detail END""",
+                       state=CASE WHEN state IN ('stale', 'unsupported') THEN 'registered'
+                                  ELSE state END,
+                       detail=CASE WHEN state IN ('stale', 'unsupported') THEN NULL
+                                   ELSE detail END""",
                 (name, kind, source, folder, sum(p.size for p in parts), len(parts),
                  set_hash, time.time()))
             archive_id = conn.execute(

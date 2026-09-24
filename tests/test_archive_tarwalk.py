@@ -699,8 +699,9 @@ def test_a_gnu_sparse_member_is_not_mistaken_for_a_long_name(tmp_path):
 
 
 class _Scripted(LocalRangeReader):
-    """Garbles the fetches named in ``script`` -- {fetch number: (offset, span)} -- so
-    each bad read lands exactly where a test needs it."""
+    """Spoils the fetches named in ``script`` -- {fetch number: (offset, what)} -- so each
+    bad read lands exactly where a test needs it. ``what`` is a byte count to garble
+    there, or the exact bytes to put there instead."""
 
     def __init__(self, directory, archive, script):
         super().__init__(directory, archive)
@@ -711,10 +712,11 @@ class _Scripted(LocalRangeReader):
         self.fetches += 1
         if self.fetches not in self.script:
             return data
-        bad, span = self.script[self.fetches]
+        bad, what = self.script[self.fetches]
         cut = bad - (self.archive.parts[part_idx].offset + offset)
         assert 0 <= cut < length, "the scripted fetch does not cover its offset"
-        return data[:cut] + (b"garbled/" * 128)[:span] + data[cut + span:]
+        fill = what if isinstance(what, bytes) else (b"garbled/" * 128)[:what]
+        return data[:cut] + fill + data[cut + len(fill):]
 
 
 def test_a_fresh_read_that_also_comes_back_wrong_is_simply_read_again(tmp_path):
@@ -728,6 +730,21 @@ def test_a_fresh_read_that_also_comes_back_wrong_is_simply_read_again(tmp_path):
     assert result.state == "complete"
     assert rows[1024].name == "deep.bin" and rows[1024].dir == "run/" + "d" * 150
     assert "re-read at 1024" in result.detail
+
+
+def test_a_fresh_read_carrying_pax_is_not_believed_on_its_own_either(tmp_path):
+    """The read that settles a garbled long name is a read like any other, and can be
+    wrong too -- here valid pax from elsewhere, which would make the archive
+    `unsupported` for good. It is not believed alone: a third read agrees with the long
+    name's own header, and the walk carries on."""
+    data, _ = _long_name_archive()
+    pax = _pax_tar([("x/" + "p" * 120 + ".bin", b"q" * 700, None)])
+    assert pax[156:157] == b"x"
+    rows, result, reader = _rows(tmp_path, _Scripted, bytes(data),
+                                 script={1: (1536, 512), 2: (1024, pax[:1536])})
+
+    assert result.state == "complete"
+    assert rows[1024].name == "deep.bin" and rows[1024].dir == "run/" + "d" * 150
 
 
 def test_a_directory_named_in_exactly_100_bytes_costs_nothing(tmp_path):
@@ -1047,11 +1064,72 @@ def test_a_pax_header_deep_in_the_archive_stops_the_walk_where_it_is(tmp_path):
     assert calls[-1] == (["a.bin", "b.bin"], pax_member.offset)
 
 
-def test_a_global_pax_header_is_refused_too(tmp_path):
+def test_a_global_pax_header_is_refused_with_the_cursor_before_it(tmp_path):
+    """A `g` header applies to every member after it, and tarfile reports those members
+    at their own offsets, past it. A cursor saved there resumes with no global header in
+    force -- and a later `index` walks the rest as plain ustar, to `complete`. The cursor
+    goes where the header sequence began: 0, not 1024."""
     data = _pax_tar([("a.bin", b"a" * 100, None), ("b.bin", b"b" * 100, None)],
                     pax_global={"comment": "archived by some other tool"})
-    with pytest.raises(UnsupportedArchive, match="pax"):
-        _walk_all(tmp_path, data)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    calls = []
+    with pytest.raises(UnsupportedArchive, match="is a pax-format archive"):
+        walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0,
+             lambda members, offset: calls.append((len(members), offset)))
+    assert calls[-1] == (0, 0)
+
+
+def test_one_bad_read_carrying_a_pax_header_is_read_again_not_believed(tmp_path):
+    """`unsupported` is for good, so it is not decided on one read. A bad read can be
+    valid pax from elsewhere -- a stored tarball, say -- sitting where a GNU member's
+    header belongs. Read again, the GNU header is there, and the walk carries on."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    at = offsets[20]
+    pax = _pax_tar([("x/" + "p" * 120 + ".bin", b"q" * 700, None)])
+    assert pax[156:157] == b"x"
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=pax[:1536], span=1536)
+    rows = {}
+
+    def commit(batch, offset):
+        rows.update((m.hdr_offset, m.name) for m in batch)
+
+    result = walk(ConcatFile(archive, reader), 0, commit)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert [rows[o] for o in offsets] == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
+    assert f"re-read at {at}" in result.detail
+
+
+def test_one_bad_read_carrying_a_global_pax_header_leaves_nothing_behind(tmp_path):
+    """A `g` header changes the walk's own state: tarfile applies it to every member
+    after it. Read again and found not to be there, it must stop applying -- otherwise
+    every later member would look like pax and be read again, one by one."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    at = offsets[20]
+    glob = _pax_tar([("a.bin", b"a", None)], pax_global={"comment": "elsewhere"})
+    assert glob[156:157] == b"g"
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=glob[:1024] + data[at:at + 512],
+                       span=1536)
+    rows = {}
+
+    def commit(batch, offset):
+        rows.update((m.hdr_offset, m.name) for m in batch)
+
+    result = walk(ConcatFile(archive, reader), 0, commit)
+    clean = LocalRangeReader(tmp_path, archive)
+    walk(ConcatFile(archive, clean), 0, lambda members, offset: None)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert [rows[o] for o in offsets] == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
+    assert f"re-read at {at}: " in result.detail
+    # One read again, and the window that refills after it -- not one per later member.
+    assert reader.requests <= clean.requests + 2, (reader.requests, clean.requests)
 
 
 @pytest.mark.parametrize("fmt", [tarfile.GNU_FORMAT, tarfile.USTAR_FORMAT])
