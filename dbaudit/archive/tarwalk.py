@@ -2,9 +2,13 @@
 
 Every header states its member's size, so the next header sits at
 ``offset + 512 + roundup(size, 512)``. Python's ``tarfile`` does that arithmetic and
-the header parsing -- GNU long names, pax headers, base-256 sizes above 8 GiB -- and
-because it seeks over member data rather than reading it, a walk over a seekable
-file touches only headers.
+the header parsing -- GNU long names, base-256 sizes above 8 GiB -- and because it
+seeks over member data rather than reading it, a walk over a seekable file touches
+only headers.
+
+GNU and ustar archives only. A pax archive can keep a member's name and size outside
+the checksummed header, where a misread moves every header after it; the walk raises
+UnsupportedArchive rather than index one without the guarantees it relies on.
 
 One ``tarfile`` behaviour has to be corrected for: mid-archive it treats an *invalid*
 header exactly like the end of the archive, stopping silently. So the end is verified
@@ -45,6 +49,17 @@ class UnsettledRead(Exception):
     That is a fact about the server, not the archive, so it is raised rather than
     returned as a verdict. The CLI records it as the segment's error, and the next run
     reclaims the segment and resumes from its committed cursor.
+    """
+
+
+class UnsupportedArchive(Exception):
+    """The archive is in a tar format this walker does not index: pax.
+
+    Everything here rests on a member's name, size and type sitting in its 512-byte
+    header, where a checksum vouches for them. In a pax archive any of those can live
+    instead in an extended header's data blocks, which carry no checksum, and a size
+    read wrongly there moves every header after it. Rather than index that with
+    guarantees it does not have, the walk stops and says so.
     """
 
 
@@ -128,10 +143,12 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     # otherwise end a six-hour walk claiming success, members missing, and `index` would
     # then refuse to walk it again.
     #
-    # A verdict is its state and the offset it was reached at, not its wording:
-    # `_classify_end` relabels a detail it was handed, so the same bytes can be described
-    # two ways by two code paths, and that is not the bytes changing. The state matters
-    # as much as the offset: a lie and the truth about a terminator land on the same one.
+    # A verdict is its state and the offset it was reached at, not its wording: a pass
+    # that walks into damage and one that opens on it describe the same bytes two ways
+    # -- "bad checksum after the header at H" against "bad checksum at H" -- and that is
+    # not the bytes changing. The first is the truer, which is why an agreeing retry
+    # reports the first pass. The state matters as much as the offset: a lie and the
+    # truth about a terminator land on the same one.
     #
     # Nothing here stops a retry for landing where it started. That is exactly where the
     # confirming read of a genuine `complete` lands, and where a walk resumed on its own
@@ -189,6 +206,14 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
                               f"{exc} after the header at {archive.offset}"), seen
         if info is None:
             break
+        if info.pax_headers:
+            # tarfile has already applied an `x` or `g` extended header to this member.
+            # Keep what was walked before it; the cursor stops short of it, not past.
+            commit(batch, info.offset)
+            raise UnsupportedArchive(
+                f"a pax extended header applies to the member at {info.offset} "
+                f"({info.name!r}): this is a pax-format archive, which dbaudit does not "
+                f"index -- its names and sizes can sit outside the checksummed header")
         batch.append(Member.from_tarinfo(info))
         seen += 1
         archive.members.clear()             # the walk is a stream; do not accumulate

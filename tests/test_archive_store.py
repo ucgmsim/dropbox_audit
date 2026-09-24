@@ -388,6 +388,25 @@ def test_a_stale_archive_stays_stale_across_fail(tmp_path):
     assert row["error"] == "Dropbox request failed: 503"
 
 
+def test_a_stale_archive_found_to_be_pax_keeps_its_stale_flag_and_reason(tmp_path):
+    """Both can land in one run: `_run_index` re-fingerprints the parts after the walk
+    and marks the archive stale before it records the pax refusal. The stale flag and
+    its reason are guarded here as `finish` guards them. The refusal is not lost: it
+    is logged as an event, and it is the segment's own error."""
+    store, archive_id, _ = registered(tmp_path)
+    store.mark_stale(archive_id, "fingerprint mismatch")
+
+    store.mark_unsupported(archive_id, "a pax extended header applies to the member at 0")
+
+    row = store.get("a.tar")
+    assert row["state"] == "stale"
+    assert row["detail"] == "fingerprint mismatch"
+    logged = store.connect().execute(
+        "SELECT detail FROM events WHERE archive_id=? AND kind='unsupported'",
+        (archive_id,)).fetchall()
+    assert [r[0] for r in logged] == ["a pax extended header applies to the member at 0"]
+
+
 def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
     """The other half of Finding 1: register's ON CONFLICT branch never touched
     state, so an archive marked stale stayed stale forever even once the live parts
