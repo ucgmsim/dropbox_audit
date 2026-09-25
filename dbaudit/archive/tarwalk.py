@@ -32,24 +32,20 @@ TRAILING_LIMIT = 1 << 20
 #: pin both branches.
 _RAN_OUT = frozenset({"unexpected end of data", "empty header", "truncated header"})
 
-#: The outcomes that are read a second time before they are believed: all but `stopped`.
-#: `corrupt`, `complete` and `truncated` end the walk for good, and `pax` makes the archive
-#: `unsupported` for good. `crossed` does not end anything, but it is where the next
-#: segment's chain is judged to begin, and a wrong one resets that segment onto bytes that
-#: are not a header.
-_CONFIRMED = frozenset({"corrupt", "complete", "truncated", "pax", "crossed"})
+#: How many of the walk's latest fetches that served a header are held back and read again
+#: before a verdict stands. One bad fetch serves every header in it, so the header that
+#: sent a walk astray is the first one the bad fetch served -- not necessarily the last
+#: member recorded -- and where it lands can be a real header too, inside a stored tarball,
+#: whose own fetches serve more members before the verdict comes. Only the walk's own
+#: fetches count: those that re-read one place to settle it are not the walk moving on.
+#: A bad read that sends the walk over real headers for longer than this -- a large
+#: stored tarball of small members -- still reaches a false verdict, loudly; `archive
+#: index --recheck` walks the chain there again.
+CONFIRM_FILLS = 3
 
-#: How many of the latest fetches that served a header a verdict is read again from. One
-#: bad fetch serves every header in it, so the header that sent a walk astray is the first
-#: one the bad fetch served -- not necessarily the last member recorded -- and where it
-#: lands can be a real header too, inside a stored tarball, whose own fetch serves more
-#: members before the verdict comes. Two fetches cover both.
-CONFIRM_FILLS = 2
-
-#: How many times a walk will accept "that read was contradicted by the next" while
-#: confirming its verdict, before it gives up and raises UnsettledRead. A bad read is rare
-#: and independent; a bad archive is neither, so a verdict that keeps changing is the
-#: server, not the archive.
+#: How many times a walk will accept a second reading of its verdict that disagrees with the
+#: first before it gives up and raises UnsettledRead. A bad read is rare and independent; a
+#: bad archive is neither, so a verdict that keeps changing is the server, not the archive.
 REREAD_LIMIT = 3
 
 #: What a pass that crossed its boundary, or was stopped, read where it ended: nothing.
@@ -106,36 +102,38 @@ class Member:
 @dataclass(frozen=True)
 class WalkResult:
     state: str              # complete | truncated | corrupt | crossed | stopped
-                            # (and pax, which walk() raises as UnsupportedArchive)
+                            # (and, inside walk(), pax -- raised as UnsupportedArchive --
+                            # and rescued, which is not an outcome)
     end_offset: int
     members: int
     detail: str = ""
 
 
-def walk(concat, start_offset: int, commit, *, rewind, batch_size: int = 2000,
+def walk(concat, start_offset: int, commit, batch_size: int = 2000,
          stop_at: int | None = None, should_stop=None) -> WalkResult:
     """Walk from ``start_offset``, calling ``commit(members, next_offset)`` per batch.
 
-    No outcome is believed on one read, except a stop. Reaching a verdict -- ``corrupt``,
-    ``complete``, ``truncated``, a pax header, or a crossing of ``stop_at`` -- drops the
-    reader's cache and walks again over the last CONFIRM_FILLS fetches that served a
-    header, comparing every header sequence with the first reading of it. Two readings
-    that agree, verdict included, stand. Where they part, the place is read again until
-    two reads agree on it (`_tie_break`); a reading that loses there was a bad read, and
-    the walk goes where the winner says. A genuinely damaged archive
-    reads the same way twice and reaches the verdict it always did, a few fetches later.
-    A verdict that keeps changing, past REREAD_LIMIT contradicted reads, raises
-    UnsettledRead; a confirmed pax header raises UnsupportedArchive.
+    No outcome is believed on one read, except a stop. The members served by the walk's
+    last CONFIRM_FILLS fetches are *held back* -- never committed on one reading. Reaching
+    a verdict -- ``corrupt``, ``complete``, ``truncated``, a pax header, or a crossing of
+    ``stop_at`` -- drops the reader's cache and walks again from the first held-back
+    header, comparing every header sequence with the first reading of it. Where the two
+    read different members at one place, it is read again until two reads agree
+    (`_tie_break`), and the walk goes where the winner says; where one finds no member at
+    all, that pass ends there, and passes go on until two in a row agree. The verdict
+    stands, and the held-back members are committed, once two readings in a row reach it
+    at the same place. A genuinely damaged archive reads the same way twice and reaches
+    the verdict it always did, CONFIRM_FILLS fetches later. One that keeps changing, more
+    than REREAD_LIMIT times, raises UnsettledRead; a confirmed pax header raises
+    UnsupportedArchive. A first reading that `_settled` catches wrong mid-walk proves its
+    fetch bad, and the headers that fetch served before it are read again the same way.
 
     ``commit`` is expected to write the members and the cursor in one transaction, so
-    that an interrupted walk resumes from exactly the last committed offset. It is called
-    exactly once per batch and exactly once more at the end of each pass, the last call
-    reflecting the offset finally reached. A second reading that agrees with the first
-    records nothing again.
-
-    ``rewind(offset)`` must drop every member the caller holds for this chain at or past
-    ``offset`` and put its cursor there, in one transaction. It is called when a second
-    reading shows the first one recorded members past a header it read wrongly.
+    that an interrupted walk resumes from exactly the last committed offset. The cursor is
+    always where the held-back members begin, so a walk interrupted anywhere -- a failed
+    read, a stop, a kill -- resumes by reading the unconfirmed fetches again, and nothing
+    committed is ever contradicted later. It is called once per ``batch_size`` members
+    that have left the held-back window, and at the end of every pass.
 
     ``stop_at`` ends the walk once the next header lies at or past that offset, which
     is how one segment's chain confirms where its successor's chain must begin. A
@@ -144,10 +142,9 @@ def walk(concat, start_offset: int, commit, *, rewind, batch_size: int = 2000,
     immediately.
 
     ``should_stop``, given a zero-argument predicate, is checked after every member is
-    recorded -- not only at a batch boundary -- so a caller reacting to something like
+    read -- not only at a batch boundary -- so a caller reacting to something like
     SIGINT never waits longer than one header hop before the walk commits what it has
-    and returns with state ``stopped``. The one exception is a second reading while it
-    still agrees with the first: that is a few fetches long, and runs to its verdict.
+    and returns with state ``stopped``, its end_offset where the next walk must resume.
     """
     # A chain whose start already lies at or past its boundary has nothing of its own to
     # record: that start IS the crossing, and the member beginning there belongs to the
@@ -157,41 +154,40 @@ def walk(concat, start_offset: int, commit, *, rewind, batch_size: int = 2000,
         commit([], start_offset)
         return WalkResult("crossed", start_offset, 0)
 
-    # A verdict read once is not believed. Reading again only where the walk landed is
-    # not enough: a bad read that is valid tar from elsewhere passes its checksum and moves
-    # the chain by its own size, and the landing, read truly, repeats the verdict every
-    # time -- `corrupt` in member data, `unsupported` on a stored tarball's pax header, or
-    # a crossing at the wrong header. What decided the verdict is the fetch that served the
-    # wrong header, so the second reading starts where the last fetches that served a
-    # header began, and follows the chain to the verdict again.
+    # Reading again only where the walk landed is not enough. A bad read that is valid tar
+    # from elsewhere passes its checksum and moves the chain by its own size, and the
+    # landing, read truly, repeats the verdict every time -- `corrupt` in member data,
+    # `unsupported` on a stored tarball's pax header, a crossing at the wrong header. What
+    # decided the verdict is the fetch that served the wrong header, and that is among the
+    # held-back ones.
     #
-    # A verdict is its state and the offset it was reached at, not its wording, and the
-    # first of two agreeing readings is the one reported. The state matters as much as the
-    # offset: a lie and the truth about a terminator land on the same one.
-    position, seen, rescued, prior, budget = start_offset, 0, [], None, None
+    # A verdict is its state, the offset it names and where the walk stopped reading
+    # headers -- not its wording -- and the first of two agreeing readings is reported.
+    position, seen, rescued, prior, disagreements = start_offset, 0, [], None, 0
     while True:
-        this = _walk_chain(concat, position, commit, rewind, batch_size, stop_at,
-                           should_stop, seen, rescued, prior)
+        this = _walk_chain(concat, position, commit, batch_size, stop_at, should_stop,
+                           seen, rescued, prior)
         seen, result = this.seen, this.result
-        if result.state not in _CONFIRMED:
-            break                           # stopped: the next run reads it all again
-        if prior is not None:
-            if (result.state, result.end_offset) == (prior.result.state,
-                                                     prior.result.end_offset):
+        if result.state == "stopped":
+            break
+        if prior is not None and "rescued" not in (prior.result.state, result.state):
+            if this.reached() == prior.reached():
+                if this.window:             # else it read no member: it ended where it began
+                    commit([member for _, _, member in this.window], this.vpos)
                 result = replace(prior.result, members=seen)
                 break
+            disagreements += 1
             if not this.diverged:
                 rescued.append(this.vpos)   # the two readings parted here
-        if budget is None:
-            budget = len(rescued) + REREAD_LIMIT
-        if len(rescued) > budget:
-            where = ", ".join(str(o) for o in dict.fromkeys(rescued))
-            raise UnsettledRead(
-                f"reads kept contradicting each other at {where}; the last said "
-                f"{result.state} at {result.end_offset} and was never confirmed")
+            if disagreements > REREAD_LIMIT:
+                where = ", ".join(str(o) for o in dict.fromkeys(rescued))
+                raise UnsettledRead(
+                    f"reads kept contradicting each other at {where}; the last said "
+                    f"{result.state} at {result.end_offset} and was never confirmed")
+        seen -= len(this.window)            # read again, and counted, by the next pass
         prior = this
-        concat.drop_cache()
-        position = this.rewind_to()
+        concat.drop_cache(keep_window=True)
+        position = this.held_from
     if rescued:
         where = ", ".join(str(o) for o in dict.fromkeys(rescued))
         note = f"re-read at {where}: a read there was contradicted by the next"
@@ -206,19 +202,18 @@ def walk(concat, start_offset: int, commit, *, rewind, batch_size: int = 2000,
 class _Pass:
     """One pass along the chain, as the pass that reads it again needs it."""
     result: WalkResult
-    start: int
-    window: list            # (before, key) of the members its last CONFIRM_FILLS fetches
-                            # served: where each header sequence begins, and what was there
+    held_from: int          # where its held-back members begin: the next pass starts there
+    window: list            # (before, key, member) of each held-back member, in order
     vpos: int               # where the header sequence it did not record begins
     version: object         # what it read at vpos: a key, None for no member, or _NOT_READ
     seen: int
-    diverged: bool          # a third read took it off the path of the pass before it
+    diverged: bool          # a tie-break took it off the path of the pass before it
 
-    def rewind_to(self) -> int:
-        return self.window[0][0] if self.window else self.start
+    def reached(self):
+        return self.result.state, self.result.end_offset, self.vpos
 
     def versions(self) -> dict:
-        read = dict(self.window)
+        read = {before: key for before, key, _ in self.window}
         if self.version is not _NOT_READ:
             read[self.vpos] = self.version
         return read
@@ -226,54 +221,44 @@ class _Pass:
 
 def _key(info, after):
     """A member as two readings of it are compared: everything recorded, and where the
-    next header sequence begins."""
+    next header sequence begins -- which for a GNU sparse member is not among the
+    recorded fields, since it records the file's expanded size."""
     return _identity(info), after
 
 
-def _walk_chain(concat, start_offset: int, commit, rewind, batch_size: int, stop_at,
-                should_stop, seen: int, rescued: list, prior):
+def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, should_stop,
+                seen: int, rescued: list, prior):
     """One pass of the chain from ``start_offset``; returns its `_Pass`.
 
-    ``prior`` is None for a first pass. Otherwise it is the pass being read again: this
-    one begins where that one's window does and compares each header sequence it reads
-    with that pass's reading of the same offset. While they agree the pass is *matching*:
-    the store already holds those rows, up to ``prior.vpos`` (the *floor*), so it records
-    and counts nothing, and every commit carries no members and the floor as its cursor
-    -- a cursor short of it would resume over rows already written. Where the readings
-    differ, `_tie_break` reads the place again: if the earlier reading wins, the pass
-    follows it and goes on matching; if this one wins, the earlier one's rows from there
-    on were a wrong reading, `rewind` drops them, and this pass records from there as a
-    first pass would. A pass that ends while matching, short of the floor, disagrees with
-    the earlier reading about what lies there, and the rows past it go the same way.
+    Each member is held back until CONFIRM_FILLS more of the walk's own fetches have
+    served headers after it, then batched for commit; a pass's end commits the batch with
+    the cursor where the held-back members begin, and leaves them to `walk`. ``prior`` is
+    None for a first pass. Otherwise it is the pass being read again: this one begins
+    where that one's held-back members do, and compares each header sequence it reads
+    with that pass's reading of the same offset, settling any difference with
+    `_tie_break`. Past what ``prior`` read, it walks on as a first pass would.
 
-    A member settled by a third read is added to ``rescued``.
+    A first reading that `_settled` catches wrong ends the pass as ``rescued``: the fetch
+    that served it was bad, and the headers it served before were read once, from it.
+    `walk` reads them again, as it would to confirm a verdict, and walks on. (Where a
+    prior reading exists, the comparison has already checked them.)
     """
     total = concat.archive.total_size
-    window = deque()                # (before, the fetch that finished its header, key)
-    matching = prior is not None
-    floor = prior.vpos if matching else None
-    versions = prior.versions() if matching else {}
+    versions = prior.versions() if prior is not None else {}
+    window = deque()                # (before, fetch stamp, key, member), held back
+    batch: list[Member] = []        # members that have left the window, not yet committed
     diverged = False
-    batch: list[Member] = []
+    rereads = 0                     # fetches that only re-read one place: not the walk's
 
-    def cursor(offset):
-        return max(offset, floor) if matching else offset
-
-    def leave(at):
-        nonlocal matching, seen
-        if matching:
-            if at < floor:
-                rewind(at)
-                seen -= sum(1 for before, _ in prior.window if before >= at)
-            matching = False
+    def held_from(default):
+        return window[0][0] if window else default
 
     def finish(vpos, version, verdict):
         """End the pass at ``vpos``, having read ``version`` there; ``verdict(seen)``
         says what that means, and is asked only once the batch is committed."""
-        if matching and vpos < floor:
-            leave(vpos)
-        commit(batch, cursor(vpos))
-        return _Pass(verdict(seen), start_offset, [(b, k) for b, _, k in window], vpos,
+        start = held_from(start_offset)
+        commit(batch, start)
+        return _Pass(verdict(seen), start, [(b, k, m) for b, _, k, m in window], vpos,
                      version, seen, diverged)
 
     def found_nothing(before, how):
@@ -303,21 +288,26 @@ def _walk_chain(concat, start_offset: int, commit, rewind, batch_size: int, stop
             return finish(before, None, found_nothing(before, str(exc)))
         if info is None:
             break
+        stamp = concat.fills - rereads      # the walk's own fetches, as this was read
+        fetched, settled = concat.fills, len(rescued)
         try:
             info = _settled(concat, archive, info, before, rescued)
         except UnsettledRead:
-            commit(batch, cursor(before))   # a resume retries exactly this member
+            commit(batch, held_from(before))    # a resume reads the held-back ones again
             raise
+        rereads += concat.fills - fetched
         if isinstance(info, _NoMember):
             return finish(before, None, found_nothing(before, info.how))
         key = _key(info, archive.offset)
         theirs = versions.get(before, _NOT_READ)
         if theirs is not _NOT_READ and theirs != key and not info.pax_headers:
+            fetched = concat.fills
             try:
                 fresh = _tie_break(concat, archive, before, key, theirs, rescued)
             except UnsettledRead:
-                commit(batch, cursor(before))
+                commit(batch, held_from(before))
                 raise
+            rereads += concat.fills - fetched
             if not isinstance(fresh, tuple):
                 # Two reads say no member begins here, whatever this pass read.
                 return finish(before, None, found_nothing(before, fresh))
@@ -326,9 +316,9 @@ def _walk_chain(concat, start_offset: int, commit, rewind, batch_size: int, stop
             info, after = fresh
             key = _key(info, after)
             archive.offset = after
-            if key != theirs:
-                diverged = True
-                leave(before)
+            diverged = diverged or key != theirs
+        elif theirs is _NOT_READ and len(rescued) > settled:
+            return finish(before, key, lambda n: WalkResult("rescued", before, n))
         if info.pax_headers:
             # Two reads agree an `x` or `g` extended header applies to this member. Keep
             # what was walked before it, with the cursor where its headers begin: a
@@ -338,25 +328,22 @@ def _walk_chain(concat, start_offset: int, commit, rewind, batch_size: int, stop
                        f"not index -- its names and sizes can sit outside the checksummed "
                        f"header")
             return finish(before, key, lambda n: WalkResult("pax", before, n, message))
-        window.append((before, concat.fills, key))
-        while window[0][1] <= concat.fills - CONFIRM_FILLS:
-            window.popleft()
-        if not matching:
-            batch.append(Member.from_tarinfo(info))
-            seen += 1
+        window.append((before, stamp, key, Member.from_tarinfo(info)))
+        while window[0][1] <= stamp - CONFIRM_FILLS:
+            batch.append(window.popleft()[3])
+        seen += 1
         before = archive.offset
         archive.members.clear()             # the walk is a stream; do not accumulate
         if stop_at is not None and before >= stop_at:
             return finish(before, _NOT_READ, lambda n: WalkResult("crossed", before, n))
-        # Not while matching: a reading that agrees is a few fetches long, and cut short
-        # it would end the run with its verdict unconfirmed -- or, under --max-batches,
-        # never reach the verdict at all.
-        if not matching and should_stop is not None and should_stop():
-            commit(batch, before)
-            return _Pass(WalkResult("stopped", before, seen), start_offset, [], before,
-                         _NOT_READ, seen, diverged)
+        if should_stop is not None and should_stop():
+            resume = held_from(before)
+            commit(batch, resume)
+            kept = seen - len(window)
+            return _Pass(WalkResult("stopped", resume, kept), resume, [], before,
+                         _NOT_READ, kept, diverged)
         if len(batch) >= batch_size:
-            commit(batch, before)
+            commit(batch, held_from(before))
             batch = []
 
     return finish(before, None, found_nothing(before, None))

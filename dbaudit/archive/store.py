@@ -535,42 +535,6 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def rewind_segment(self, segment_id, offset) -> None:
-        """Drop this segment's rows at or past ``offset`` and put its cursor there, in
-        one transaction.
-
-        The walker calls this when a second reading of the chain shows the first one
-        recorded members past a header it read wrongly. Split across two statements, a
-        crash in between would resume from a cursor with the wrong rows still past it.
-        Only the segment's own span is touched: a successor's rows begin at its
-        ``stop_at``.
-        """
-        conn = self.connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT archive_id, scan_from, stop_at, idx FROM segments WHERE id=?",
-                (segment_id,)).fetchone()
-            self.drop_members_between(row["archive_id"], max(offset, row["scan_from"]),
-                                      row["stop_at"])
-            conn.execute("UPDATE segments SET cursor_offset=? WHERE id=?",
-                         (offset, segment_id))
-            conn.execute(
-                """UPDATE segments SET members = (
-                       SELECT COUNT(*) FROM members
-                       WHERE members.archive_id = segments.archive_id
-                         AND members.hdr_offset >= segments.scan_from
-                         AND (segments.stop_at IS NULL OR members.hdr_offset < segments.stop_at)
-                   ) WHERE id=?""",
-                (segment_id,))
-            self.log_event(row["archive_id"], "rewind",
-                           f"segment {row['idx']}: rows from {offset} dropped, read "
-                           f"again: a second reading of the chain disagreed")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-
     def member_at(self, archive_id, hdr_offset):
         """The member whose header sits at ``hdr_offset``, or None -- how `cat` knows
         what must follow the member it extracts."""
@@ -754,23 +718,29 @@ class ArchiveStore:
             raise
 
     def recheck(self, archive_id):
-        """Walk again the segment where the walk ended, from its confirmed start, and
-        every segment after it. Returns that segment's row as it was, or None for a
-        `stale` archive, which only `register` may lift.
+        """Walk again, from a confirmed start, the segment before the one where the walk
+        ended, and from there the rest of the chain. Returns (the segment walked again,
+        the segment where the walk had ended), or None for a `stale` archive, which only
+        `register` may lift.
 
         The way back from a verdict reached wrongly. The walker reads a verdict again
         from the last fetches that led to it, but a bad read can send a chain onto real
         headers -- a tarball stored inside the archive -- for longer than that, and there
-        the verdict repeats however often it is read. Walking the whole segment again
-        from a start the chain before it confirmed reads the header that went wrong a
-        second time. A genuinely damaged archive reaches its verdict again.
+        the verdict repeats however often it is read. Walking the chain again from a
+        start confirmed before the bad read reads the header that went wrong a second
+        time -- if the bad read was in that segment or the next; one further back needs
+        --recheck again. A genuinely damaged archive reaches its verdict again.
 
         The segment where the walk ended is the first one, in order, that the chain did
-        not cross: every segment before it crossed into its successor. Its rows go, and
-        it is re-armed from its first header -- confirmed by the chain before it, or if
-        not yet (`joined` 0), still to be checked against that chain's exit by the join.
-        Every segment after it goes back to how `seed_segments` left it: the join may
-        have retired them `beyond` a verdict that no longer stands.
+        not cross. Its start was handed to it by the crossing out of the segment before --
+        and a derailed chain can cross at a real header of a stored tarball, where
+        re-reading the crossing agrees -- so that segment is walked again too, from its
+        own start. (Segment 0's start, offset 0, needs no one to confirm it.) Rows go from
+        there on. The segment where the walk ended goes back to how `seed_segments` left
+        it, to be scanned and walked alongside and joined to the chain as any other.
+        Every segment after it is left `beyond`, so the pool does not walk them: a
+        genuine verdict would only retire them again, and if the chain now crosses where
+        the walk had ended, `_join` puts them all back to be walked.
         One transaction, like `reset_segment`: a crash half-way would leave rows from
         chains nobody will walk again.
         """
@@ -788,39 +758,49 @@ class ArchiveStore:
                 (archive_id,)).fetchall()
             # The last segment has no stop_at, so it never crosses: there is always one.
             ending = next(s for s in segments if s["state"] != "crossed")
+            again = segments[max(ending["idx"] - 1, 0)]
             for segment in segments:
-                if segment["idx"] >= ending["idx"]:
+                if segment["idx"] >= again["idx"]:
                     self.drop_members_between(archive_id, segment["scan_from"],
                                               segment["stop_at"])
             conn.execute(
                 """UPDATE segments SET cursor_offset=NULL, exit_offset=NULL, detail=NULL,
                        error=NULL, owner=NULL, members=0, state='pending'
                    WHERE id=?""",
-                (ending["id"],))
+                (again["id"],))
             conn.execute(
                 """UPDATE segments SET first_header=NULL, cursor_offset=NULL,
                        exit_offset=NULL, detail=NULL, error=NULL, owner=NULL, members=0,
-                       state='pending', joined=0
+                       state=CASE WHEN idx=? THEN 'pending' ELSE 'beyond' END, joined=0
                    WHERE archive_id=? AND idx>?""",
-                (archive_id, ending["idx"]))
-            confirmed = max((s["first_header"] for s in segments
-                             if s["idx"] <= ending["idx"] and s["joined"]
-                             and s["first_header"] is not None), default=0)
+                (ending["idx"], archive_id, again["idx"]))
             conn.execute(
                 """UPDATE archives SET state='registered', detail=NULL, error=NULL,
                        end_offset=NULL, finished_at=NULL, cursor_offset=?
                    WHERE id=?""",
-                (confirmed, archive_id))
+                (again["first_header"] or 0, archive_id))
             self.log_event(
                 archive_id, "recheck",
-                f"segment {ending['idx']} walked again from {ending['first_header']}, and "
-                f"every segment after it: the walk had ended {archive['state']}: "
+                f"segment {again['idx']} walked again from {again['first_header']}, then "
+                f"on: the walk had ended {archive['state']} in segment {ending['idx']}: "
                 f"{archive['detail'] or archive['error'] or ''}")
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        return ending
+        return again, ending
+
+    def rearm_beyond(self, archive_id, from_idx) -> None:
+        """Put every `beyond` segment from ``from_idx`` on back to be scanned and walked.
+
+        `beyond` means past where the chain ended; once the chain crosses into such a
+        segment, that ending no longer stands, and neither does anything retired after it.
+        """
+        self.connect().execute(
+            """UPDATE segments SET first_header=NULL, cursor_offset=NULL, exit_offset=NULL,
+                   detail=NULL, error=NULL, owner=NULL, members=0, state='pending', joined=0
+               WHERE archive_id=? AND idx>=? AND state='beyond'""",
+            (archive_id, from_idx))
 
     def retire_segment(self, segment_id) -> None:
         """A segment lying entirely past where the archive's chain ended.

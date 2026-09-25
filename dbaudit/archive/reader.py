@@ -85,9 +85,9 @@ class ConcatFile:
         self._cache = b""
         self._cache_start = -1          # nothing cached: the first fetch uses window_min
         self._pos = 0
-        #: Fetches made so far. The walker notes it around each header it reads, to know
-        #: which fetch served which header -- and so what to read again when a verdict
-        #: needs confirming.
+        #: Fetches made so far. The walker stamps each header it reads with it, to know
+        #: which headers the latest fetches served -- what to read again to confirm a
+        #: verdict.
         self.fills = 0
 
     def tell(self) -> int:
@@ -127,25 +127,31 @@ class ConcatFile:
         self._pos += len(data)
         return data
 
-    def drop_cache(self) -> None:
+    def drop_cache(self, keep_window: bool = False) -> None:
         """Forget the fetched window, so the next read asks the server again.
 
         A read that came back wrong is indistinguishable from one that came back right
         until something reads those bytes a second time -- and a second read served out
         of this cache is the same read. The walker drops it before reading again the
         fetches behind any verdict it reaches, so that verdict is read twice.
+
+        ``keep_window`` keeps the size the window had grown to, for re-reading the same
+        stretch of archive: in a dense run of small members the window is at 16 MiB, and
+        starting again from the floor would cost several fetches to grow back.
         """
         self._cache = b""
         self._cache_start = -1
-        self._window = self._window_min
+        if not keep_window:
+            self._window = self._window_min
 
     def _fill(self, pos: int, need: int) -> None:
         cache_end = self._cache_start + len(self._cache)
         gap = pos - cache_end
         if self._cache_start >= 0 and 0 <= gap <= self._window:
             self._window = min(self._window * 2, self._window_max)
-        else:
+        elif self._cache_start >= 0:
             self._window = self._window_min
+        # With nothing cached the window is what drop_cache left: the floor, or kept.
         length = min(max(need, self._window), self.archive.total_size - pos)
         chunks = [self.reader.read_range(idx, offset, count)
                   for idx, offset, count in self.archive.slices(pos, length)]

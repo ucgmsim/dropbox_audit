@@ -228,8 +228,11 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
             return result
 
         monkeypatch.setattr(ArchiveStore, "commit_batch", commit_batch)
+        # One-block windows, so members leave the held-back window -- and batches are
+        # committed -- while the walk is still going.
         assert main(["archive", "index", "--db", db, "--archive", "a.tar",
-                     "--workers", "1", "--batch", "5"]) == 0
+                     "--workers", "1", "--batch", "5", "--window-min", "1024",
+                     "--window-max", "1024"]) == 0
     monkeypatch.undo()
 
     assert handled.is_set()
@@ -1104,7 +1107,7 @@ def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
     assert "--recheck" in capsys.readouterr().err, "a verdict should say how to ask again"
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
-    assert "walking segment 0 again from offset 0" in capsys.readouterr().out
+    assert "walking the chain again from offset 0" in capsys.readouterr().out
     store = ArchiveStore(db)
     row = store.get("a.tar")
     assert row["state"] == "complete"
@@ -1122,11 +1125,17 @@ def test_recheck_walks_again_the_segments_the_verdict_retired(tmp_path, monkeypa
     states = [s["state"] for s in store.segments(archive_id)]
     ending = states.index("corrupt")
     assert "beyond" in states[ending + 1:], states
+    repairs = event_count(db, archive_id, "repair")
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
     assert store.get("a.tar")["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
     assert "corrupt" not in [s["state"] for s in store.segments(archive_id)]
+    # Two: the segment the chain crossed into, which the old verdict had retired, and the
+    # trailing part, which holds no header of its own in any walk. Every other segment
+    # after the old ending was put back at once, scanned, and joined -- not walked one
+    # after another, each waiting for the chain to reach it.
+    assert event_count(db, archive_id, "repair") - repairs == 2
 
 
 def test_recheck_finds_real_damage_again(tmp_path, capsys):
@@ -1180,9 +1189,9 @@ def test_recheck_reads_nothing_of_a_complete_archive(tmp_path, monkeypatch, caps
 def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatch):
     """One bad fetch holds a stretch of the archive from elsewhere: two wrong headers in a
     row, then member data. The walk reads the verdict again from the fetches that led to
-    it, finds the first wrong header, and the store must lose every row the wrong reading
-    left -- the second one sits at an offset the true chain never visits, so no row the
-    walk writes afterwards replaces it."""
+    it and finds the first wrong header -- and the store must never have held a row the
+    wrong reading made: the second sits at an offset the true chain never visits, so no
+    row written afterwards would replace it."""
     members = [("run/a.bin", b"a" * 100), ("run/b.bin", b"b" * 3000),
                ("run/c.bin", b"c" * 100), ("run/d.bin", b"d" * 20000),
                ("run/e.bin", b"e" * 100)]
@@ -1211,7 +1220,6 @@ def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatc
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert state["lied"], "the test did not actually inject the bad read"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
-    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "rewind") == 1
 
 
 def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
@@ -1242,3 +1250,135 @@ def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
     assert row["state"] == "stale"
     assert store.stats(row["id"])["n_members"] == kept
     assert event_count(db, row["id"], "recheck") == 0
+
+
+def _header_claiming(data, header, size):
+    """The header at ``header`` with its size field set to ``size``, checksum redone: a
+    valid header that sends the chain wherever a test needs it."""
+    block = bytearray(data[header:header + 512])
+    block[124:136] = b"%011o\0" % size
+    block[148:156] = b" " * 8
+    block[148:156] = b"%06o\0 " % sum(block)
+    return bytes(block)
+
+
+def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
+        tmp_path, monkeypatch, capsys):
+    """Review 6's #2. One bad read in segment 0 sends its chain into a tarball stored in
+    the archive, whose real headers it walks for longer than the fetches read again --
+    and on across the part boundary: segment 0 crosses at one of the stored tarball's
+    headers, and re-reading the crossing agrees. Segment 1, handed that start, walks the
+    stored tarball's chain to its end and is `corrupt`. Walking segment 1 again from the
+    same start ends there again; --recheck walks the chain again from segment 0's."""
+    inner = build_tar([(f"ginner/g{i:03d}.dat", bytes([i]) * 600) for i in range(40)])
+    members = ([(f"run/f{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
+               + [("run/results.tar", inner)]
+               + [(f"run/z{i:02d}.bin", bytes([i]) * 700) for i in range(6)])
+    data = build_tar(members)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        stored = t.getmember("run/results.tar").offset_data
+    inner_headers = [stored + o for o in _header_offsets(inner)]
+    at = _header_offsets(data)[2]
+    wrong = _header_claiming(data, at, inner_headers[5] - at - 512)
+    source = tmp_path / "parts"
+    source.mkdir()
+    cut = inner_headers[30] + 700                   # the part boundary: in the stored tar
+    (source / "a.tar.aa").write_bytes(data[:cut])
+    (source / "a.tar.ab").write_bytes(data[cut:])
+    state = {"lie": True, "lied": 0}
+
+    class OneLie(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            true = super().read_range(part_idx, offset, length)
+            start = self.archive.parts[part_idx].offset + offset
+            if state["lie"] and not state["lied"] and start <= at and at + 512 <= start + length:
+                state["lied"] = 1
+                return true[:at - start] + wrong + true[at - start + 512:]
+            return true
+
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: OneLie(row["folder"], s))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    small = ["--workers", "1", "--window-min", "1024", "--window-max", "1024"]
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", *small]) == 1
+    store = ArchiveStore(db)
+    assert state["lied"], "the test did not actually inject the bad read"
+    assert store.get("a.tar")["state"] == "corrupt"
+    exit_ = store.segments(store.get("a.tar")["id"])[0]["exit_offset"]
+    assert exit_ in inner_headers, "segment 0 did not cross at a stored tarball's header"
+    state["lie"] = False
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck",
+                 *small]) == 0
+    assert store.get("a.tar")["state"] == "complete"
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
+
+
+def test_recheck_is_refused_for_a_walk_that_only_stopped(tmp_path, capsys):
+    """Review 6's #3. --recheck asks a verdict again; a walk that merely stopped reached
+    none, and `index` alone resumes it. Accepted, it would throw away everything walked
+    since -- hours, on a 5 TiB archive."""
+    source = local_archive(tmp_path, part_size=4096)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
+          "--batch", "5", "--max-batches", "2", "--window-min", "1024",
+          "--window-max", "1024"])
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] == "walking"
+    kept = store.stats(row["id"])["n_members"]
+    assert kept > 0
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert "`index` alone resumes" in capsys.readouterr().err
+    assert store.stats(row["id"])["n_members"] == kept
+    assert event_count(db, row["id"], "recheck") == 0
+
+
+def test_recheck_of_real_damage_walks_only_what_it_must(tmp_path, capsys):
+    """Review 6's #3. Asked again about damage in a middle segment, --recheck walks the
+    segment before it and the damaged one, and nothing after: the verdict would only
+    retire those segments again, and on v01p0 each is 300 GiB."""
+    data = bytearray(build_tar(MEMBERS))
+    offsets = _header_offsets(bytes(data))
+    data[offsets[20]:offsets[20] + 1024] = bytes(range(256)) * 4
+    source = local_archive(tmp_path, bytes(data), part_size=4096)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    store = ArchiveStore(db)
+    segments = store.segments(store.get("a.tar")["id"])
+    ending = next(s for s in segments if s["state"] != "crossed")
+    assert 0 < ending["idx"] < len(segments) - 2
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    row = store.get("a.tar")
+    assert (row["state"], row["end_offset"]) == ("corrupt", offsets[20])
+    after = store.segments(row["id"])[ending["idx"] + 1:]
+    assert all(s["state"] == "beyond" and s["first_header"] is None for s in after), (
+        "a segment after the damage was scanned or walked")
+
+
+def test_the_chain_crossing_into_a_retired_segment_re_arms_it(tmp_path):
+    """A segment retired `beyond` keeps the first header its scan once found. If the chain
+    later crosses into it -- after `--recheck` -- at that very offset, it is still not a
+    walked segment to join: it is re-armed from the exit and walked."""
+    from dbaudit.archive.tarwalk import WalkResult
+    from dbaudit.cli import _join
+    from tests.test_archive_store import registered
+
+    store, archive_id, _ = registered(tmp_path, count=2)
+    segments = store.segments(archive_id)
+    store.finish_segment(segments[0]["id"], WalkResult("crossed", 700, 0))
+    store.set_segment_start(segments[1]["id"], 700)
+    store.retire_segment(segments[1]["id"])
+
+    kind, payload = _join(store, archive_id)
+
+    assert (kind, payload) == ("repaired", 1)
+    row = store.segments(archive_id)[1]
+    assert (row["state"], row["first_header"], row["joined"]) == ("pending", 700, 1)

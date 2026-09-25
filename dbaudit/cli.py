@@ -745,9 +745,6 @@ def _walk_segment(run, segment) -> None:
         run.commit(segment["id"], members, next_offset, requests, fetched)
         charged()          # only once the write went through
 
-    def rewind(offset):
-        run.store.rewind_segment(segment["id"], offset)
-
     # Every exit below charges what the reader spent, so the try covers the scan too:
     # this is the last place that still knows what it cost.
     try:
@@ -766,7 +763,7 @@ def _walk_segment(run, segment) -> None:
         cursor = segment["cursor_offset"]
         if cursor is None:
             cursor = start
-        result = walk(concat, cursor, commit, rewind=rewind, batch_size=args.batch,
+        result = walk(concat, cursor, commit, batch_size=args.batch,
                       stop_at=segment["stop_at"], should_stop=run.stop.is_set)
     except _Stopped:
         # The refused batch was read before it was refused.
@@ -933,13 +930,18 @@ def _join(store, archive_id):
             # A chain only crosses at its own stop_at, and the last segment has none,
             # so a crossed segment always has a successor.
             following = segments[index + 1]
-            if following["first_header"] == segment["exit_offset"]:
+            if (following["state"] != "beyond"
+                    and following["first_header"] == segment["exit_offset"]):
                 if not following["joined"]:
                     store.mark_joined(following["id"])
                 index += 1
                 continue
-            # Disagreement, or a chain that found no header at all. reset_segment drops
-            # that segment's rows and re-arms it from the offset handed down, atomically.
+            # Disagreement, or a chain that found no header at all -- or the chain has
+            # crossed into a segment retired past an ending that no longer stands (after
+            # `--recheck`), so everything retired after it is back in play. reset_segment
+            # drops that segment's rows and re-arms it from the offset handed down.
+            if following["state"] == "beyond":
+                store.rearm_beyond(archive_id, following["idx"] + 1)
             store.reset_segment(following["id"], segment["exit_offset"])
             store.log_event(archive_id, "repair",
                             f"segment {following['idx']} restarted at "
@@ -973,12 +975,14 @@ def cmd_archive_index(args) -> int:
     # Re-running `index` is how a walk resumes, so resuming a finished one reads
     # nothing and writes nothing.
     recheck = ("\n       if that is not what you expect, `archive index --recheck` walks "
-               "the segment where it ended again")
+               "the chain there again")
+    if args.recheck and row["state"] not in ("corrupt", "truncated", "unsupported"):
+        print(f"error: {row['name']} is {row['state']}; --recheck asks again a verdict a "
+              f"walk reached -- corrupt, truncated or unsupported"
+              + ("" if row["state"] in ("complete", "stale")
+                 else ", and `index` alone resumes this one"), file=sys.stderr)
+        return 1
     if row["state"] == "complete":
-        if args.recheck:
-            print(f"error: {row['name']} is complete; --recheck walks again only a walk "
-                  f"that ended short of that", file=sys.stderr)
-            return 1
         print(f"{row['name']}: complete ({row['n_members']:,} members)")
         return 0
     if row["state"] == "stale":
@@ -1042,14 +1046,13 @@ def _run_index(args, store, row) -> int:
     if args.recheck:
         # Only now, under the lock and with every part unchanged: rows are dropped to be
         # walked again, and an archive whose parts changed keeps its rows as evidence.
-        ending = store.recheck(archive_id)
-        if ending is None:
+        rechecked = store.recheck(archive_id)
+        if rechecked is None:
             print(f"error: {row['name']} is stale; re-register it", file=sys.stderr)
             return 1
-        start = ending["first_header"]
-        print(f"{row['name']}: walking segment {ending['idx']} again from "
-              f"{f'offset {start:,}' if start is not None else 'a fresh scan'}, and every "
-              f"segment after it")
+        again, ending = rechecked
+        print(f"{row['name']}: walking the chain again from offset {again['first_header']:,} "
+              f"(segment {again['idx']}; the walk had ended in segment {ending['idx']})")
 
     workers = max(args.workers, 1)
     tokens = limiter = None
@@ -1942,8 +1945,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_idx.add_argument("--batch", type=int, default=2000)
     p_idx.add_argument("--max-batches", type=int, default=0, help="stop early; 0 means no limit")
     p_idx.add_argument("--recheck", action="store_true",
-                       help="walk again, from its confirmed start, the segment where a walk "
-                            "ended short of complete, and every segment after it")
+                       help="ask a corrupt, truncated or unsupported verdict again: walk the "
+                            "chain again from the start of the segment before it")
     p_idx.add_argument("--lock")
     p_idx.set_defaults(func=cmd_archive_index)
 
