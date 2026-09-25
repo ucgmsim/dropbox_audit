@@ -1386,7 +1386,7 @@ def _plan_reads(archive_set, hdr_offset, data_offset, end, stop):
     with the reads either side. The exceptions are the two anchors, which are checked by
     what they say rather than by an overlap, and so are read whole wherever a boundary
     falls -- parts need not be a multiple of 512 bytes (`split -b 1GB`): the member's own
-    header sequence [hdr_offset, data_offset), and the block after it [end, stop).
+    header sequence [hdr_offset, data_offset), and what follows it [end, stop).
     """
     def part_end(offset):
         idx, _ = archive_set.locate(offset)
@@ -1396,11 +1396,14 @@ def _plan_reads(archive_set, hdr_offset, data_offset, end, stop):
     reads, at, first = [], hdr_offset, True
     while True:
         limit = part_end(max(data_offset - 1, at) if first else at)
-        if end < limit < stop:
-            limit = stop                # the boundary is inside the block after the member
         end_of_read = min(at + CAT_CHUNK, stop, limit)
         if first:
             end_of_read, first = max(end_of_read, min(data_offset, stop)), False
+        if end < end_of_read < stop:
+            # What follows the member is read whole, whether a part boundary or the read
+            # size would cut it: it is several blocks when the next member has a long
+            # name, more than two reads share.
+            end_of_read = stop
         reads.append((at, end_of_read - at))
         if end_of_read >= stop:
             return reads
@@ -1438,7 +1441,7 @@ def _headers_mismatch(block, member):
     return None
 
 
-def _verified_member_bytes(concat, member, total, next_is):
+def _verified_member_bytes(concat, member, total, follows):
     """Yield one member's bytes, none of them before a second request vouches for them.
 
     A tar keeps no checksum of member data, and Dropbox has answered range requests with
@@ -1448,17 +1451,20 @@ def _verified_member_bytes(concat, member, total, next_is):
     - the first read starts on the member's first header, and that whole header sequence
       must parse to exactly the member its index row describes -- every field, and its
       data where the row says it begins;
-    - the last read ends one block past the member, on what the index says follows: the
-      next member's header, the terminator's zeros, or either;
+    - the last read ends on what the index says follows the member (``follows``): the
+      next member's whole header sequence, which must parse to exactly that member's row
+      -- not merely to some header, which a read crossed with an equal-size twin's range
+      supplies too; or the terminator's zeros; or, where the index does not know (a walk
+      stopped early), a header or zeros, vouching for nothing;
     - consecutive reads share bytes and must agree on them, and no read crosses a part
       boundary (`_plan_reads`), so every request is checked at both ends;
     - a read is written only once the read after it agrees with its tail, so a read wrong
       in its back half is read again rather than half-written;
     - bytes too regular to tell one region from another -- zeros, fill, a short repeated
       pattern (`_ambiguous`) -- or too few, vouch for nothing. A read vouched for at one
-      end only by such bytes, or last before the terminator's zeros or the archive's end,
-      is taken once a second fetch agrees with it byte for byte. So zero-heavy data costs
-      about twice the requests.
+      end only by such bytes, or last before the terminator's zeros, the archive's end or
+      an unknown successor, is taken once a second fetch agrees with it byte for byte. So
+      zero-heavy data costs about twice the requests.
 
     A failed check is met by reading again, fresh, up to REREAD_LIMIT times; past that
     this raises _CatError, having written nothing it could not vouch for. What it cannot
@@ -1470,9 +1476,15 @@ def _verified_member_bytes(concat, member, total, next_is):
         raise _CatError(f"the archive ends {data_offset + size - total:,} byte(s) "
                         f"before this member does")
     end = data_offset + -(-size // BLOCK) * BLOCK      # where the next header sits
-    stop = min(end + BLOCK, total)
+    known = follows not in ("zeros", None)             # the next member's index row
+    stop = min(follows["data_offset"] if known else end + BLOCK, total)
     plan = _plan_reads(concat.archive, hdr, data_offset, end, stop)
     last = len(plan) - 1
+    # Part boundaries inside the two anchors, where a read spans them. The bytes of the
+    # anchor on the far side of one are all that vouches for that request's end.
+    bounds = [part.offset for part in concat.archive.parts[1:]]
+    head_cuts = [b for b in bounds if hdr < b < data_offset]
+    tail_cuts = [b for b in bounds if end < b < stop]
 
     def fetch(i):
         at, length = plan[i]
@@ -1497,18 +1509,22 @@ def _verified_member_bytes(concat, member, total, next_is):
         return shared(i, buf, "head") == head
 
     def trailer(buf):
-        """The block after the member, as the last read has it; None if the archive
-        ends first."""
-        return buf[end - plan[last][0]:end - plan[last][0] + BLOCK] if stop >= end + BLOCK \
-            else None
+        """What follows the member, as the last read has it: the next member's header
+        sequence, or one block. None if the archive ends first."""
+        at = plan[last][0]
+        if known:
+            return buf[end - at:stop - at] if stop == follows["data_offset"] else None
+        return buf[end - at:end - at + BLOCK] if stop >= end + BLOCK else None
 
     def trailer_ok(block):
         if block is None:
             return True
-        if next_is == "zeros":
-            return not any(block)
-        if next_is == "either" and not any(block):
+        if known:
+            return _headers_mismatch(block, follows) is None
+        if not any(block[:BLOCK]):
             return True
+        if follows == "zeros":
+            return False
         try:
             tarfile.TarInfo.frombuf(block, "utf-8", "surrogateescape")
         except tarfile.HeaderError:
@@ -1547,7 +1563,12 @@ def _verified_member_bytes(concat, member, total, next_is):
     if why is not None:
         raise _CatError(f"the headers at {hdr:,} never read as the member's index row "
                         f"says: {why}")
-    head, head_sure = None, True        # what the held read's head must equal; vouched?
+    # What the held read's head must equal, and whether that vouches for it. The member's
+    # headers do -- except that past a part boundary inside them, the request's head is
+    # vouched for only by the header bytes after the boundary, and a header's last bytes
+    # are mostly zeros.
+    head = None
+    head_sure = not any(_ambiguous(held[b - hdr:data_offset - hdr]) for b in head_cuts)
 
     for i in range(1, last + 1):
         nxt, tries = fetch(i), 0
@@ -1583,15 +1604,20 @@ def _verified_member_bytes(concat, member, total, next_is):
     while not trailer_ok(trailer(held)):
         tries += 1
         if tries > REREAD_LIMIT:
-            raise _CatError(f"the block after the member, at {end:,}, never read as the "
+            raise _CatError(f"what follows the member, at {end:,}, never read as the "
                             f"index says it should")
         redo = fetch(last)
         if head_ok(last, redo, head):
             held = redo
-    block = trailer(held)
-    if not (head_sure and block is not None and any(block)):
-        # The terminator's zeros vouch for no more than zeros anywhere, and an archive
-        # that ends at the member offers nothing at all.
+    # Only the member the index says comes next vouches for the read's tail -- and where a
+    # part boundary falls inside its headers, only if their bytes before the boundary say
+    # something. The terminator's zeros vouch for no more than zeros anywhere; a header
+    # the index cannot name could be anyone's; an archive that ends at the member offers
+    # nothing at all.
+    at = plan[last][0]
+    tail_sure = (known and trailer(held) is not None
+                 and not any(_ambiguous(held[end - at:b - at]) for b in tail_cuts))
+    if not (head_sure and tail_sure):
         sure = settle(last, held)
         if sure != held:
             if not head_ok(last, sure, head) or not trailer_ok(trailer(sure)):
@@ -1687,16 +1713,13 @@ def cmd_archive_cat(args) -> int:
     # Dropbox traffic that never reaches the output. window_min=window_max=1 makes
     # every fill read exactly what is asked, clamped only by the archive's own end.
     concat = ConcatFile(archive_set, reader, window_min=1, window_max=1)
-    # What the block after the member must be, for the trailing anchor. The index knows
-    # when another member starts there, and when a complete walk put the terminator
-    # there; a partial index knows neither, and then either will do.
+    # What must follow the member, for the trailing anchor: the member the index says
+    # starts there, or the terminator where a complete walk ended there. A walk stopped
+    # early knows neither, and then nothing there vouches for the read.
     end = chosen["data_offset"] + -(-chosen["size"] // BLOCK) * BLOCK
-    if store.member_at(row["id"], end) is not None:
-        next_is = "header"
-    elif row["state"] == "complete" and row["end_offset"] == end:
-        next_is = "zeros"
-    else:
-        next_is = "either"
+    follows = store.member_at(row["id"], end)
+    if follows is None and row["state"] == "complete" and row["end_offset"] == end:
+        follows = "zeros"
 
     # --out is written through a temp file in the same directory, promoted onto the
     # target only once every byte is confirmed written -- never opened (let alone
@@ -1725,7 +1748,7 @@ def cmd_archive_cat(args) -> int:
         with sink_cm as sink:
             try:
                 for piece in _verified_member_bytes(concat, chosen,
-                                                    archive_set.total_size, next_is):
+                                                    archive_set.total_size, follows):
                     sink.write(piece)
                     written += len(piece)
             except _CatError as exc:

@@ -1115,3 +1115,232 @@ def test_cat_does_not_let_a_few_shared_bytes_vouch_for_a_read(tmp_path, monkeypa
     assert _cat(db, "run/data.bin", out) == 0
     assert readers[0].lied == 1
     assert out.read_bytes() == payload
+
+
+# ---- review 5: the block after the member must be the member the index says follows ----
+
+TWINS = [("run/r01/out.bin", _random(40, 5_000)), ("run/r01/next.bin", b"n" * 100),
+         ("run/r02/out.bin", _random(41, 5_000)), ("run/r02/next.bin", b"m" * 100)]
+
+
+def _twins_back_half(me, twin):
+    """A read crossed halfway with the same range of an equal-size twin: its second half
+    is the twin's data, then the header after the twin -- a valid header, not this one's."""
+    shift = twin["hdr_offset"] - me["hdr_offset"]
+
+    def lie(reader, at, length, true):
+        half = length // 2
+        return true[:half] + reader.raw(at + shift + half, length - half)
+
+    return lie
+
+
+def test_cat_is_not_fooled_by_a_twins_back_half(tmp_path, monkeypatch):
+    """Two realisations' out.bin: same size, same header layout. Half of this read is the
+    twin's, ending on the header after the twin -- valid, so a check for "some header"
+    passed it. What follows this member is run/r01/next.bin, and the index says so."""
+    db, _ = _single_part_archive(tmp_path, TWINS)
+    me, twin = _row(db, "run/r01/out.bin"), _row(db, "run/r02/out.bin")
+    readers = _planned(monkeypatch, {1: _twins_back_half(me, twin)})
+    out = tmp_path / "out.bin"
+
+    assert _cat(db, "run/r01/out.bin", out) == 0
+    assert readers[0].lied == 1
+    assert out.read_bytes() == TWINS[0][1]
+
+
+def test_cat_is_not_fooled_by_a_twins_back_half_on_the_last_of_several_reads(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 2_048)
+    monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 512)
+    db, _ = _single_part_archive(tmp_path, TWINS)
+    me, twin = _row(db, "run/r01/out.bin"), _row(db, "run/r02/out.bin")
+    clean = _planned(monkeypatch, {})
+    assert _cat(db, "run/r01/out.bin", tmp_path / "clean.bin") == 0
+    last = clean[0].calls
+    readers = _planned(monkeypatch, {last: _twins_back_half(me, twin)})
+    out = tmp_path / "out.bin"
+
+    assert _cat(db, "run/r01/out.bin", out) == 0
+    assert readers[0].lied == 1
+    assert out.read_bytes() == TWINS[0][1]
+
+
+def test_cat_on_a_partial_index_does_not_take_any_header_after_the_member_on_trust(
+        tmp_path, monkeypatch):
+    """A walk stopped early knows nothing past its last member, so what follows the
+    member it last recorded could be anything -- and so it vouches for nothing: the read
+    is taken once a second fetch agrees with it."""
+    source = tmp_path / "parts"
+    source.mkdir()
+    write_parts(source, build_tar(TWINS), part_size=len(build_tar(TWINS)))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
+          "--batch", "1", "--max-batches", "1"])
+    store = ArchiveStore(db)
+    assert store.get("a.tar")["state"] == "walking"
+    assert store.member_at(store.get("a.tar")["id"], _row(db, "run/r01/out.bin")["data_offset"]
+                           + 5_120) is None, "the member after out.bin is not indexed yet"
+    raw = build_tar(TWINS)
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as t:
+        twin_offset = t.getmember("run/r02/out.bin").offset
+    me = _row(db, "run/r01/out.bin")
+    readers = _planned(monkeypatch, {1: _twins_back_half(me, {"hdr_offset": twin_offset})})
+    out = tmp_path / "out.bin"
+
+    assert _cat(db, "run/r01/out.bin", out) == 0
+    assert readers[0].lied == 1
+    assert out.read_bytes() == TWINS[0][1]
+
+
+def test_cat_reads_a_long_named_successors_headers_whole_wherever_a_read_ends(
+        tmp_path, monkeypatch):
+    """A member followed by one with a GNU long name: what must follow it is three
+    blocks, longer than two reads share. A read ending inside those blocks must not leave
+    the last read starting past their start -- the member here is healthy, and was
+    refused."""
+    monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 16_384)
+    monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 512)
+    payload = _random(42, 14_848)                 # data [512, 15360): a read ends at 16384
+    db, _ = _single_part_archive(tmp_path, [("run/data.bin", payload),
+                                            ("run/" + "l" * 150 + "/next.bin", b"n" * 100)])
+    member = _row(db, "run/data.bin")
+    assert (member["hdr_offset"], member["data_offset"] + 14_848) == (0, 15_360)
+    readers = _planned(monkeypatch, {})
+    out = tmp_path / "data.bin"
+
+    assert _cat(db, "run/data.bin", out) == 0
+    assert out.read_bytes() == payload
+    # One request, [0, 16896): the member, then its successor's three header blocks,
+    # which vouch for the read's tail -- so it is not read a second time.
+    assert readers[0].log == [(0, 16_896)]
+
+
+def test_cat_does_not_let_a_few_zero_bytes_of_a_header_vouch_for_a_request(
+        tmp_path, monkeypatch):
+    """A part boundary 48 bytes before a long-named member's data: the request after it
+    holds the end of the member's header -- zeros -- and then data. The anchor checks
+    those 48 bytes, but zeros agree with zeros: a bad read that is zeros there, and wrong
+    after, passes the anchor. So that read is taken only once a second fetch agrees."""
+    monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 16_384)
+    monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 1_024)
+    name = "run/" + "d" * 150 + "/data.bin"
+    payload = _random(43, 12_000)
+    data = build_tar([("run/before.bin", b"b" * 3_000), (name, payload),
+                      ("run/after.bin", b"a" * 3_000)])
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        start = t.getmember(name).offset_data
+    source = tmp_path / "parts"
+    source.mkdir()
+    cuts = [0, start - 48, start + 6_000, len(data)]
+    for k, (a, b) in enumerate(zip(cuts, cuts[1:])):
+        (source / f"a.tar.a{'abc'[k]}").write_bytes(data[a:b])
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+
+    def zeros_then_true(reader, at, length, true):
+        half = length // 2
+        return bytes(half) + true[half:]
+
+    readers = _planned(monkeypatch, {2: zeros_then_true})
+    out = tmp_path / "data.bin"
+
+    assert _cat(db, name, out) == 0
+    assert readers[0].lied == 1
+    assert readers[0].log[1][0] == start - 48, "the lie is on the request after the boundary"
+    assert out.read_bytes() == payload
+
+
+def test_cat_does_not_let_a_few_bytes_of_the_next_header_vouch_for_a_request(
+        tmp_path, monkeypatch):
+    """The mirror image: a part boundary 200 bytes into the header after the member. The
+    request before it ends on those 200 bytes -- too few to vouch for it -- so a read
+    right at its head and right in those last 200 bytes, wrong in between, is caught
+    only by a second fetch."""
+    payload = _random(44, 5_000)
+    data = build_tar([("run/data.bin", payload), ("run/next.bin", b"n" * 100),
+                      ("run/after.bin", b"a" * 1_000)])
+    end = 512 + 5_120
+    source = tmp_path / "parts"
+    source.mkdir()
+    (source / "a.tar.aa").write_bytes(data[:end + 200])
+    (source / "a.tar.ab").write_bytes(data[end + 200:])
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+
+    def right_at_both_ends(reader, at, length, true):
+        return true[:600] + b"x" * (length - 800) + true[length - 200:]
+
+    readers = _planned(monkeypatch, {1: right_at_both_ends})
+    out = tmp_path / "data.bin"
+
+    assert _cat(db, "run/data.bin", out) == 0
+    assert readers[0].lied == 1
+    assert readers[0].log[0] == (0, end + 200), "the lie is on the request that ends there"
+    assert out.read_bytes() == payload
+
+
+def _split_at(tmp_path, data, cuts):
+    source = tmp_path / "parts"
+    source.mkdir()
+    edges = [0, *cuts, len(data)]
+    for k, (a, b) in enumerate(zip(edges, edges[1:])):
+        (source / f"a.tar.a{'abcdefghij'[k]}").write_bytes(data[a:b])
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+    return db
+
+
+def test_cat_repairs_a_twins_body_behind_five_bytes_of_header_padding(tmp_path, monkeypatch):
+    """Review 5's T3, real constants: a part boundary 5 bytes before the member's data,
+    and the request after it replaced by the same shape of range around an equal-size
+    twin -- whose first 5 bytes are header padding like these, and whose tail lands on
+    the twin's successor. Five zero bytes vouch for nothing; the read is fetched again."""
+    mine, theirs = _random(30, 1_300), _random(31, 1_400)
+    data = build_tar([("run/r01/x.bin", mine), ("run/r01/y.bin", b"y" * 50),
+                      ("run/r02/x.bin", theirs), ("run/r02/y.bin", b"z" * 50)])
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        d1 = t.getmember("run/r01/x.bin").offset_data
+        d2 = t.getmember("run/r02/x.bin").offset_data
+    db = _split_at(tmp_path, data, [d1 - 5])
+    readers = _planned(monkeypatch, {2: lambda r, at, n, t: r.raw(d2 - 5, n)})
+    out = tmp_path / "x.bin"
+
+    assert _cat(db, "run/r01/x.bin", out) == 0
+    assert readers[0].lied == 1
+    assert readers[0].log[1][0] == d1 - 5
+    assert out.read_bytes() == mine
+
+
+def test_cat_repairs_a_twins_body_that_ends_one_byte_into_the_next_header(
+        tmp_path, monkeypatch):
+    """Review 5's T4: a boundary one byte past the member's padded end, so the request
+    before it ends on a single byte of the next header -- 'r', as in every sibling's
+    "run/...". A body right at its head and a twin's after it passes that one byte.
+    One byte vouches for nothing; the read is fetched again."""
+    monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 16_384)
+    monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 1_024)
+    a, b = _random(40, 40_000), _random(41, 40_000)
+    data = build_tar([("run/before.bin", _random(42, 3_000)), ("run/r01/m.bin", a),
+                      ("run/r01/n.bin", _random(43, 900)), ("run/r02/m.bin", b),
+                      ("run/r02/n.bin", _random(44, 900))])
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        i1, i2 = t.getmember("run/r01/m.bin"), t.getmember("run/r02/m.bin")
+    end1 = i1.offset_data + 40_448
+    shift = i2.offset - i1.offset
+    db = _split_at(tmp_path, data, [end1 + 1])
+
+    def splice(reader, at, length, true):
+        return true[:2_048] + reader.raw(at + shift + 2_048, length - 2_048)
+
+    readers = _planned(monkeypatch, {3: splice})
+    out = tmp_path / "m.bin"
+
+    assert _cat(db, "run/r01/m.bin", out) == 0
+    assert readers[0].lied == 1
+    assert sum(readers[0].log[2]) == end1 + 1, "the lie is on the request ending there"
+    assert out.read_bytes() == a
