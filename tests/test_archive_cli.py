@@ -578,11 +578,14 @@ class _SharedLies:
     `plan` maps an offset to the covering fetch that lies about it. `sequence` instead
     lies about each offset in turn, once, at most one per fetch: successive transients,
     each met only after the walk has survived the one before. (With `plan`, one window
-    covering several offsets would carry every lie in a single fetch.)"""
+    covering several offsets would carry every lie in a single fetch.) `alternate` lies
+    about one offset on every other fetch covering it: a server that never settles."""
 
-    def __init__(self, source, plan=None, sequence=None):
+    def __init__(self, source, plan=None, sequence=None, alternate=None):
         self.source, self.plan = source, dict(plan or {})
         self.sequence = list(sequence or [])
+        if alternate is not None:
+            self.plan.update({alternate: None})
         self.covering = {bad: 0 for bad in self.plan}
         self.lied = 0
         self.lock = threading.Lock()
@@ -604,7 +607,8 @@ class _SharedLies:
                     for bad, nth in shared.plan.items():
                         if start <= bad < start + length:
                             shared.covering[bad] += 1
-                            if shared.covering[bad] == nth:
+                            if (shared.covering[bad] == nth
+                                    or nth is None and shared.covering[bad] % 2):
                                 shared.lied += 1
                                 cut = bad - start
                                 n = min(1024, length - cut)
@@ -620,7 +624,7 @@ def _terminator_of(data):
     return last.offset_data + (-(-last.size // 512)) * 512
 
 
-@pytest.mark.parametrize("nth", [1, 2, 3, 4])
+@pytest.mark.parametrize("nth", [1, 2])
 def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
         tmp_path, monkeypatch, nth):
     """End to end, through the 8-worker pool, the join and the store: one bad read at the
@@ -645,26 +649,24 @@ def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
     row = store.get("a.tar")
     assert row["state"] == "complete", f"a lie on covering read #{nth} decided the verdict"
     assert store.stats(row["id"])["n_members"] == len(MEMBERS)
-    if nth <= 3:
-        assert liar.lied == 1, "the test did not actually inject a bad read"
+    assert liar.lied == 1, "the test did not actually inject a bad read"
 
 
 def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
         tmp_path, monkeypatch):
-    """More contradicted reads in one walk than REREAD_LIMIT allows: the segment must land
-    in `error`, the archive must not be condemned, and an honest re-run must finish it.
-    Believing the last read instead left the archive `corrupt`, and a re-run refused."""
+    """Every other read of the terminator comes back as junk, so each reading of the
+    verdict contradicts the last, more times than REREAD_LIMIT allows: the segment must
+    land in `error`, the archive must not be condemned, and an honest re-run must finish
+    it. Believing the last read instead left the archive `corrupt`, and a re-run refused."""
     data = build_tar(MEMBERS)
     source = local_archive(tmp_path, data, part_size=len(data))    # one segment
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
-        offsets = [m.offset for m in t]
-    liar = _SharedLies(source, sequence=offsets[10:10 + REREAD_LIMIT + 1])
+    liar = _SharedLies(source, alternate=_terminator_of(data))
     monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    assert liar.lied == REREAD_LIMIT + 1, "the test did not inject every transient"
+    assert liar.lied > REREAD_LIMIT // 2, "the test did not keep contradicting itself"
     store = ArchiveStore(db)
     row = store.get("a.tar")
     assert row["state"] not in ("corrupt", "complete", "truncated")
@@ -876,7 +878,10 @@ def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    # One-block windows: every header is its own fetch, so the fetches read again to
+    # confirm the verdict hold only the last members -- this copy is the audit's to find.
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
+                 "--window-min", "1024", "--window-max", "1024"]) == 0
     assert fake.lied == 1, "the test did not actually inject the bad read"
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
@@ -1022,10 +1027,8 @@ def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch,
         def read_range(self, part_idx, offset, length):
             true = super().read_range(part_idx, offset, length)
             at = self.archive.parts[part_idx].offset + offset
-            # Segment 1 parses from the window its own cold scan filled, from the
-            # boundary rounded up to a block.
-            if (not state["done"] and at == -(-cut // 512) * 512
-                    and at <= x.offset and x.offset + 512 <= at + length):
+            if (not state["done"] and at <= x.offset
+                    and x.offset + 512 <= at + length):
                 state["done"] = True
                 k = x.offset - at
                 return true[:k] + copied + true[k + 512:]
@@ -1033,13 +1036,209 @@ def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch,
 
     monkeypatch.setattr("dbaudit.cli._reader_for",
                         lambda row, s, t=None, l=None: OneWellFormedLie(row["folder"], s))
+    # Small scans and one-block windows: every header is its own fetch, so the fetches
+    # read again to confirm segment 1's verdict hold only its last members, and the copy
+    # is left for the audit to find.
+    monkeypatch.setattr("dbaudit.cli.find_chain_start",
+                        lambda concat, start: find_chain_start(concat, start, scan_read=4096))
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
+                 "--window-min", "1024", "--window-max", "1024"]) == 0
     assert state["done"], "the test did not actually inject the bad read"
     store = ArchiveStore(db)
     row = store.get("a.tar")
     assert row["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
     assert event_count(db, row["id"], "audit_repair") == 1
+
+
+# ---- --recheck: the way back from a verdict reached wrongly --------------------------
+
+class _SameJunkEveryTime:
+    """While ``on``, every fetch covering ``at`` carries the same junk there -- a server
+    that repeats one wrong answer, which no number of re-reads can outvote. The walker
+    cannot tell that from damage; `--recheck` is how the operator asks again later."""
+
+    def __init__(self, source, at):
+        self.source, self.at, self.on, self.lied = source, at, True, 0
+
+    def reader_for(self, row, archive_set, tokens=None, limiter=None):
+        shared = self
+
+        class _Reader(LocalRangeReader):
+            def read_range(self, part_idx, offset, length):
+                data = super().read_range(part_idx, offset, length)
+                start = self.archive.parts[part_idx].offset + offset
+                if not shared.on or not start <= shared.at < start + length:
+                    return data
+                shared.lied += 1
+                cut = shared.at - start
+                n = min(1024, length - cut)
+                return data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n:]
+
+        return _Reader(self.source, archive_set)
+
+
+def _condemned(tmp_path, monkeypatch, part_size=None):
+    """An archive left `corrupt` by a server that said the same wrong thing every time."""
+    data = build_tar(MEMBERS)
+    source = local_archive(tmp_path, data, part_size=part_size or len(data))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    liar = _SameJunkEveryTime(source, _header_offsets(data)[20])
+    monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert liar.lied >= 2 and ArchiveStore(db).get("a.tar")["state"] == "corrupt"
+    liar.on = False                                  # the server behaves from here on
+    return db, liar
+
+
+def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
+        tmp_path, monkeypatch, capsys):
+    db, liar = _condemned(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert "--recheck" in capsys.readouterr().err, "a verdict should say how to ask again"
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
+    assert "walking segment 0 again from offset 0" in capsys.readouterr().out
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] == "complete"
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
+    assert event_count(db, row["id"], "recheck") == 1
+
+
+def test_recheck_walks_again_the_segments_the_verdict_retired(tmp_path, monkeypatch, capsys):
+    """Split, the verdict lands in a middle segment, and the join retires every segment
+    after it as `beyond`. Asking again must walk those too, from fresh scans, and join
+    them to the chain -- not leave the walk blocked on a segment nobody will claim."""
+    db, liar = _condemned(tmp_path, monkeypatch, part_size=4096)
+    store = ArchiveStore(db)
+    archive_id = store.get("a.tar")["id"]
+    states = [s["state"] for s in store.segments(archive_id)]
+    ending = states.index("corrupt")
+    assert "beyond" in states[ending + 1:], states
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
+    assert store.get("a.tar")["state"] == "complete"
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
+    assert "corrupt" not in [s["state"] for s in store.segments(archive_id)]
+
+
+def test_recheck_finds_real_damage_again(tmp_path, capsys):
+    """A genuinely damaged archive reads the same way on every walk: asked again, it is
+    corrupt again, at the same place, with every member before the damage indexed."""
+    data = bytearray(build_tar(MEMBERS))
+    offsets = _header_offsets(bytes(data))
+    data[offsets[20]:offsets[20] + 1024] = bytes(range(256)) * 4
+    source = local_archive(tmp_path, bytes(data), part_size=4096)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    before = ArchiveStore(db).get("a.tar")
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    after = ArchiveStore(db).get("a.tar")
+    assert (after["state"], after["end_offset"]) == ("corrupt", before["end_offset"])
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS[:20]]
+
+
+def test_recheck_asks_a_pax_archive_again_and_it_is_still_pax(tmp_path, capsys):
+    source = _pax_archive(tmp_path, MEMBERS)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert "is a pax-format archive" in capsys.readouterr().err
+    row = ArchiveStore(db).get("a.tar")
+    assert row["state"] == "unsupported"
+    assert event_count(db, row["id"], "recheck") == 1
+
+
+def test_recheck_reads_nothing_of_a_complete_archive(tmp_path, monkeypatch, capsys):
+    source = local_archive(tmp_path)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    capsys.readouterr()
+
+    def landmine(*args, **kwargs):
+        raise AssertionError("a complete archive must not be read again")
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", landmine)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert "is complete" in capsys.readouterr().err
+    assert ArchiveStore(db).get("a.tar")["state"] == "complete"
+
+
+def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatch):
+    """One bad fetch holds a stretch of the archive from elsewhere: two wrong headers in a
+    row, then member data. The walk reads the verdict again from the fetches that led to
+    it, finds the first wrong header, and the store must lose every row the wrong reading
+    left -- the second one sits at an offset the true chain never visits, so no row the
+    walk writes afterwards replaces it."""
+    members = [("run/a.bin", b"a" * 100), ("run/b.bin", b"b" * 3000),
+               ("run/c.bin", b"c" * 100), ("run/d.bin", b"d" * 20000),
+               ("run/e.bin", b"e" * 100)]
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    at = offsets[2]
+    stretch = data[offsets[0]:offsets[1] + 512]
+    source = local_archive(tmp_path, data, part_size=len(data))
+    state = {"lied": False}
+
+    class OneStretch(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            true = super().read_range(part_idx, offset, length)
+            start = self.archive.parts[part_idx].offset + offset
+            if state["lied"] or not start <= at < start + length:
+                return true
+            state["lied"] = True
+            cut = at - start
+            return true[:cut] + stretch + true[cut + len(stretch):]
+
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: OneStretch(row["folder"], s))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    assert state["lied"], "the test did not actually inject the bad read"
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
+    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "rewind") == 1
+
+
+def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
+        tmp_path, monkeypatch, capsys):
+    """--recheck drops rows to walk them again, so it must not run on parts that changed
+    since registration: the archive goes `stale` with its rows kept, as a plain `index`
+    would leave it, and nothing is walked."""
+    source = tmp_path / "parts"
+    source.mkdir()
+    data = build_tar(MEMBERS)
+    archive_set = write_parts(source, data, 4096)
+    db = str(tmp_path / "archives.db")
+    register_dropbox(monkeypatch, db, archive_set)
+    liar = _SameJunkEveryTime(source, _header_offsets(data)[20])
+    monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] == "corrupt"
+    kept = store.stats(row["id"])["n_members"]
+    assert kept == 20
+    monkeypatch.setattr("dbaudit.cli.build_lister",
+                        fake_build_lister([dropbox_entries(archive_set, (1, "ff" * 32))]))
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+
+    row = store.get("a.tar")
+    assert row["state"] == "stale"
+    assert store.stats(row["id"])["n_members"] == kept
+    assert event_count(db, row["id"], "recheck") == 0

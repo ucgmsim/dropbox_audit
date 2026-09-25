@@ -535,6 +535,42 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
+    def rewind_segment(self, segment_id, offset) -> None:
+        """Drop this segment's rows at or past ``offset`` and put its cursor there, in
+        one transaction.
+
+        The walker calls this when a second reading of the chain shows the first one
+        recorded members past a header it read wrongly. Split across two statements, a
+        crash in between would resume from a cursor with the wrong rows still past it.
+        Only the segment's own span is touched: a successor's rows begin at its
+        ``stop_at``.
+        """
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT archive_id, scan_from, stop_at, idx FROM segments WHERE id=?",
+                (segment_id,)).fetchone()
+            self.drop_members_between(row["archive_id"], max(offset, row["scan_from"]),
+                                      row["stop_at"])
+            conn.execute("UPDATE segments SET cursor_offset=? WHERE id=?",
+                         (offset, segment_id))
+            conn.execute(
+                """UPDATE segments SET members = (
+                       SELECT COUNT(*) FROM members
+                       WHERE members.archive_id = segments.archive_id
+                         AND members.hdr_offset >= segments.scan_from
+                         AND (segments.stop_at IS NULL OR members.hdr_offset < segments.stop_at)
+                   ) WHERE id=?""",
+                (segment_id,))
+            self.log_event(row["archive_id"], "rewind",
+                           f"segment {row['idx']}: rows from {offset} dropped, read "
+                           f"again: a second reading of the chain disagreed")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
     def member_at(self, archive_id, hdr_offset):
         """The member whose header sits at ``hdr_offset``, or None -- how `cat` knows
         what must follow the member it extracts."""
@@ -716,6 +752,75 @@ class ArchiveStore:
         except Exception:
             conn.execute("ROLLBACK")
             raise
+
+    def recheck(self, archive_id):
+        """Walk again the segment where the walk ended, from its confirmed start, and
+        every segment after it. Returns that segment's row as it was, or None for a
+        `stale` archive, which only `register` may lift.
+
+        The way back from a verdict reached wrongly. The walker reads a verdict again
+        from the last fetches that led to it, but a bad read can send a chain onto real
+        headers -- a tarball stored inside the archive -- for longer than that, and there
+        the verdict repeats however often it is read. Walking the whole segment again
+        from a start the chain before it confirmed reads the header that went wrong a
+        second time. A genuinely damaged archive reaches its verdict again.
+
+        The segment where the walk ended is the first one, in order, that the chain did
+        not cross: every segment before it crossed into its successor. Its rows go, and
+        it is re-armed from its first header -- confirmed by the chain before it, or if
+        not yet (`joined` 0), still to be checked against that chain's exit by the join.
+        Every segment after it goes back to how `seed_segments` left it: the join may
+        have retired them `beyond` a verdict that no longer stands.
+        One transaction, like `reset_segment`: a crash half-way would leave rows from
+        chains nobody will walk again.
+        """
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            archive = conn.execute(
+                "SELECT state, detail, error FROM archives WHERE id=?",
+                (archive_id,)).fetchone()
+            if archive["state"] == "stale":
+                conn.execute("ROLLBACK")
+                return None
+            segments = conn.execute(
+                "SELECT * FROM segments WHERE archive_id=? ORDER BY idx",
+                (archive_id,)).fetchall()
+            # The last segment has no stop_at, so it never crosses: there is always one.
+            ending = next(s for s in segments if s["state"] != "crossed")
+            for segment in segments:
+                if segment["idx"] >= ending["idx"]:
+                    self.drop_members_between(archive_id, segment["scan_from"],
+                                              segment["stop_at"])
+            conn.execute(
+                """UPDATE segments SET cursor_offset=NULL, exit_offset=NULL, detail=NULL,
+                       error=NULL, owner=NULL, members=0, state='pending'
+                   WHERE id=?""",
+                (ending["id"],))
+            conn.execute(
+                """UPDATE segments SET first_header=NULL, cursor_offset=NULL,
+                       exit_offset=NULL, detail=NULL, error=NULL, owner=NULL, members=0,
+                       state='pending', joined=0
+                   WHERE archive_id=? AND idx>?""",
+                (archive_id, ending["idx"]))
+            confirmed = max((s["first_header"] for s in segments
+                             if s["idx"] <= ending["idx"] and s["joined"]
+                             and s["first_header"] is not None), default=0)
+            conn.execute(
+                """UPDATE archives SET state='registered', detail=NULL, error=NULL,
+                       end_offset=NULL, finished_at=NULL, cursor_offset=?
+                   WHERE id=?""",
+                (confirmed, archive_id))
+            self.log_event(
+                archive_id, "recheck",
+                f"segment {ending['idx']} walked again from {ending['first_header']}, and "
+                f"every segment after it: the walk had ended {archive['state']}: "
+                f"{archive['detail'] or archive['error'] or ''}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return ending
 
     def retire_segment(self, segment_id) -> None:
         """A segment lying entirely past where the archive's chain ended.

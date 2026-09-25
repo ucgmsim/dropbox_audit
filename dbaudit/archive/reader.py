@@ -85,6 +85,10 @@ class ConcatFile:
         self._cache = b""
         self._cache_start = -1          # nothing cached: the first fetch uses window_min
         self._pos = 0
+        #: Fetches made so far. The walker notes it around each header it reads, to know
+        #: which fetch served which header -- and so what to read again when a verdict
+        #: needs confirming.
+        self.fills = 0
 
     def tell(self) -> int:
         return self._pos
@@ -128,8 +132,8 @@ class ConcatFile:
 
         A read that came back wrong is indistinguishable from one that came back right
         until something reads those bytes a second time -- and a second read served out
-        of this cache is the same read. The walker drops it before believing any verdict
-        that would end a walk -- `corrupt` or `complete` -- so that verdict is read twice.
+        of this cache is the same read. The walker drops it before reading again the
+        fetches behind any verdict it reaches, so that verdict is read twice.
         """
         self._cache = b""
         self._cache_start = -1
@@ -147,6 +151,7 @@ class ConcatFile:
                   for idx, offset, count in self.archive.slices(pos, length)]
         self._cache = b"".join(chunks)
         self._cache_start = pos
+        self.fills += 1
 
 
 class DropboxRangeReader:
