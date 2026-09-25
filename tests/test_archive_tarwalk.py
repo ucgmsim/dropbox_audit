@@ -5,11 +5,27 @@ import tarfile
 import pytest
 
 from dbaudit.archive.reader import ConcatFile, LocalRangeReader
-from dbaudit.archive.tarwalk import (REREAD_LIMIT, UnsettledRead, UnsupportedArchive,
-                                     find_chain_start, walk)
+from dbaudit.archive.tarwalk import (CONFIRM_FILLS, REREAD_LIMIT, UnsettledRead,
+                                     UnsupportedArchive, find_chain_start, walk)
 from tests.archive_fakes import build_tar, write_parts
 
 MEMBERS = [(f"run/file{i:03d}.bin", bytes([i % 251]) * (1000 + i)) for i in range(50)]
+
+
+def _ignore(offset):
+    """A `rewind` for a walk whose rows the test does not keep."""
+
+
+def _dropping(rows):
+    """A `rewind` for a walk recorded into ``rows`` -- a list of members, or a dict keyed
+    by header offset: it drops those at or past the offset, as the store does."""
+    def rewind(offset):
+        if isinstance(rows, dict):
+            for key in [key for key in rows if key >= offset]:
+                del rows[key]
+        else:
+            rows[:] = [m for m in rows if m.hdr_offset < offset]
+    return rewind
 
 
 def collect(tmp_path, data, part_size=4096, start=0, batch_size=7):
@@ -21,7 +37,7 @@ def collect(tmp_path, data, part_size=4096, start=0, batch_size=7):
         seen.extend(members)
         cursors.append(next_offset)
 
-    result = walk(handle, start, commit, batch_size=batch_size)
+    result = walk(handle, start, commit, rewind=_dropping(seen), batch_size=batch_size)
     return seen, cursors, result
 
 
@@ -84,26 +100,44 @@ def test_a_missing_final_part_reports_truncated(tmp_path):
     data = build_tar(MEMBERS)
     archive = write_parts(tmp_path, data[:len(data) - 4096], part_size=4096)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
-    result = walk(handle, 0, lambda members, offset: None)
+    result = walk(handle, 0, lambda members, offset: None, rewind=_ignore)
     assert result.state == "truncated"
+
+
+class _Counting(LocalRangeReader):
+    """Counts the fetches that cover ``watch``."""
+
+    def __init__(self, directory, archive, watch):
+        super().__init__(directory, archive)
+        self.watch, self.covering = watch, 0
+
+    def read_range(self, part_idx, offset, length):
+        data = super().read_range(part_idx, offset, length)
+        start = self.archive.parts[part_idx].offset + offset
+        self.covering += start <= self.watch < start + length
+        return data
 
 
 def test_a_truncated_verdict_is_read_twice_before_it_stands(tmp_path):
     """A chain runs off the end because the last header's size claims more than is
     left. That size is one read's word, so it is read again before `truncated` stands:
-    one pass, then a confirming pass that records that last member a second time."""
+    one pass, then a second over the fetches that served the last headers -- which reads
+    that header afresh, agrees, and so records nothing again."""
     data = build_tar(MEMBERS)
+    last = _header_offsets(data)[-1]
     archive = write_parts(tmp_path, data[:len(data) - 4096], part_size=4096)
-    handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
+    assert last + 512 + 1049 > archive.total_size       # its member runs off the end
+    reader = _Counting(tmp_path, archive, last)
     calls = []
 
-    result = walk(handle, 0, lambda members, offset: calls.append(len(members)),
-                  batch_size=1000)
+    result = walk(ConcatFile(archive, reader), 0,
+                  lambda members, offset: calls.append(len(members)),
+                  rewind=_ignore, batch_size=1000)
 
     assert result.state == "truncated"
     assert "re-read at" not in result.detail
-    assert len(calls) == 2, f"one pass and one confirming pass, got {calls}"
-    assert calls[1] == 1, "the confirming pass re-reads the header that ran out"
+    assert calls == [len(MEMBERS), 0], "one pass, and one that agrees with it"
+    assert reader.covering == 2, "the header that ran out was read twice"
 
 
 def test_a_well_formed_bad_read_cannot_fake_a_truncated_archive(tmp_path):
@@ -123,7 +157,7 @@ def test_a_well_formed_bad_read_cannot_fake_a_truncated_archive(tmp_path):
     def commit(batch, offset):
         rows.update((m.hdr_offset, m.name) for m in batch)      # INSERT OR REPLACE
 
-    result = walk(ConcatFile(archive, reader), 0, commit)
+    result = walk(ConcatFile(archive, reader), 0, commit, rewind=_dropping(rows))
 
     assert reader.lied == 1, "the test did not actually inject the bad read"
     assert result.state == "complete"
@@ -150,7 +184,7 @@ def test_a_missing_middle_part_is_detected(tmp_path):
         offset += part.size
     archive = ArchiveSet(kept)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
-    result = walk(handle, 0, lambda members, offset: None)
+    result = walk(handle, 0, lambda members, offset: None, rewind=_ignore)
     assert result.state in {"corrupt", "truncated"}
 
 
@@ -192,7 +226,8 @@ def test_a_corrupt_first_block_is_read_twice_and_reports_corrupt(tmp_path):
     archive = write_parts(tmp_path, bytes(data), part_size=4096)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
     calls = []
-    result = walk(handle, 0, lambda members, offset: calls.append((list(members), offset)))
+    result = walk(handle, 0, lambda members, offset: calls.append((list(members), offset)),
+                  rewind=_ignore)
     assert result.state == "corrupt"
     assert calls == [([], 0), ([], 0)]
 
@@ -275,7 +310,8 @@ def test_should_stop_ends_the_walk_after_the_current_member(tmp_path):
         calls["n"] += 1
         return calls["n"] >= 5
 
-    result = walk(handle, 0, commit, batch_size=2000, should_stop=should_stop)
+    result = walk(handle, 0, commit, rewind=_dropping(seen), batch_size=2000,
+                  should_stop=should_stop)
     assert result.state == "stopped"
     assert [m.name for m in seen] == [m.name for m in reference[:5]]
     assert result.end_offset == reference[5].hdr_offset
@@ -295,7 +331,7 @@ def test_a_walk_stops_at_a_segment_boundary_on_the_next_header(tmp_path):
     directory.mkdir()
     archive = write_parts(directory, data, part_size=4096)
     handle = ConcatFile(archive, LocalRangeReader(directory, archive))
-    result = walk(handle, 0, lambda members, offset: None, stop_at=boundary)
+    result = walk(handle, 0, lambda members, offset: None, rewind=_ignore, stop_at=boundary)
     assert result.state == "crossed"
     assert result.end_offset == seen[5].hdr_offset
 
@@ -315,7 +351,7 @@ def test_a_walk_starting_at_or_past_stop_at_records_nothing(tmp_path):
     calls = []
     result = walk(handle, boundary,
                   lambda members, offset: calls.append((list(members), offset)),
-                  stop_at=boundary)
+                  rewind=_ignore, stop_at=boundary)
     assert result.state == "crossed"
     assert result.end_offset == boundary
     assert result.members == 0
@@ -387,13 +423,17 @@ class _LiesOnce(LocalRangeReader):
         if not start <= self.bad < start + length:
             return data
         self.covering += 1
-        if self.once and self.covering != self.nth:
+        if not self._lies_now():
             return data
         self.lied += 1
         cut = self.bad - start
         n = length - cut if self.span is None else min(self.span, length - cut)
         fill = self.fill * (n // len(self.fill) + 1)
         return data[:cut] + fill[:n] + data[cut + n:]
+
+
+    def _lies_now(self):
+        return not self.once or self.covering == self.nth
 
 
 class _AlwaysLies(_LiesOnce):
@@ -425,7 +465,8 @@ def test_one_bad_read_does_not_condemn_the_whole_archive(tmp_path):
     handle = ConcatFile(archive, reader)
     seen = []
 
-    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+    result = walk(handle, 0, lambda members, offset: seen.extend(members),
+                  rewind=_dropping(seen))
 
     assert reader.lied == 1, "the test did not actually inject a bad read"
     assert result.state == "complete"
@@ -481,7 +522,8 @@ def test_a_bad_read_of_zeros_is_not_mistaken_for_the_end_of_the_archive(tmp_path
     handle = ConcatFile(archive, reader)
     seen = []
 
-    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+    result = walk(handle, 0, lambda members, offset: seen.extend(members),
+                  rewind=_dropping(seen))
 
     assert reader.lied == 1, "the test did not actually inject a bad read"
     assert result.state == "complete"
@@ -503,7 +545,8 @@ def test_a_bad_read_of_zeros_cannot_end_the_walk_claiming_success(tmp_path):
     handle = ConcatFile(archive, reader)
     seen = []
 
-    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+    result = walk(handle, 0, lambda members, offset: seen.extend(members),
+                  rewind=_dropping(seen))
 
     assert reader.lied == 1
     assert result.members == len(MEMBERS), "members were silently dropped"
@@ -560,7 +603,7 @@ def _rows(tmp_path, reader_class=LocalRangeReader, data=None, **reader_kw):
     def commit(batch, offset):
         rows.update((m.hdr_offset, m) for m in batch)            # INSERT OR REPLACE
 
-    result = walk(ConcatFile(archive, reader), 0, commit)
+    result = walk(ConcatFile(archive, reader), 0, commit, rewind=_dropping(rows))
     return rows, result, reader
 
 
@@ -593,9 +636,9 @@ def test_a_bad_read_of_only_a_long_link_target_block_is_read_again(tmp_path):
                                   "gnu link target (100 bytes)"])
 def test_the_check_costs_nothing_when_the_writer_follows_gnu(tmp_path, form):
     """The header after the long blocks is still in the window that just served it, so
-    checking against it takes no request: one fetch for the whole small archive, and two
-    for the pass confirming the terminator (tarfile opens there, then seeks back a byte
-    to check the data before it) -- three, as before the check existed."""
+    checking against it takes no request: one fetch for the whole small archive, and one
+    for the second reading from the start of the fetch that served its last header --
+    two, as for an archive with no long names at all."""
     if form.startswith("oldgnu"):
         data, _ = _long_name_archive()
         long_name = "run/" + "d" * 150 + "/deep.bin"
@@ -607,7 +650,7 @@ def test_the_check_costs_nothing_when_the_writer_follows_gnu(tmp_path, form):
     rows, result, reader = _rows(tmp_path, data=data)
 
     assert result.state == "complete"
-    assert reader.requests == 3
+    assert reader.requests == 2
     assert "re-read" not in result.detail
 
 
@@ -615,7 +658,7 @@ def test_a_writer_that_does_not_copy_the_name_costs_one_read_not_a_refusal(tmp_p
     """A writer is free to put anything in the field the long name overrides. The two
     disagree, so the member is read again; the second read agrees with the first, which
     makes it the archive, not a bad read -- recorded as read, one request dearer than
-    the three a conforming archive costs."""
+    the two a conforming archive costs, and one more when the verdict is read again."""
     data, _ = _long_name_archive()
     data = _with_field(bytes(data), 2048, 0, 100, b"placeholder")
     rows, result, reader = _rows(tmp_path, data=data)
@@ -637,7 +680,8 @@ def test_a_long_name_that_reads_differently_every_time_gives_up(tmp_path):
 
     with pytest.raises(UnsettledRead, match="1024"):
         walk(ConcatFile(archive, reader), 0,
-             lambda members, offset: calls.append(([m.name for m in members], offset)))
+             lambda members, offset: calls.append(([m.name for m in members], offset)),
+             rewind=_ignore)
     assert calls[-1] == (["first.bin"], 1024)
 
 
@@ -696,7 +740,7 @@ def test_a_gnu_sparse_member_is_not_mistaken_for_a_long_name(tmp_path):
     assert result.state == "complete"
     assert (rows[0].name, rows[0].type, rows[0].size, rows[0].data_offset) == (
         "sparse.bin", "S", 4096, 1024)
-    assert reader.requests == 3
+    assert reader.requests == 2
 
 
 class _Scripted(LocalRangeReader):
@@ -763,7 +807,7 @@ def test_a_directory_named_in_exactly_100_bytes_costs_nothing(tmp_path):
 
     assert result.state == "complete"
     assert rows[0].name == "d" * 99 and rows[0].type == "5"
-    assert reader.requests == 3
+    assert reader.requests == 2
 
 
 def test_a_damaged_long_name_member_is_diagnosed_once_and_not_called_transient(tmp_path):
@@ -780,7 +824,8 @@ def test_a_damaged_long_name_member_is_diagnosed_once_and_not_called_transient(t
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
     calls = []
 
-    result = walk(handle, 0, lambda members, offset: calls.append((len(members), offset)))
+    result = walk(handle, 0, lambda members, offset: calls.append((len(members), offset)),
+                  rewind=_ignore)
 
     assert result.state == "corrupt"
     assert "re-read at" not in result.detail, "reported a rescue that did not happen"
@@ -799,7 +844,7 @@ def test_bytes_that_are_wrong_differently_every_time_are_still_corrupt(tmp_path)
     handle = ConcatFile(archive, reader)
     calls = []
 
-    result = walk(handle, 0, lambda members, offset: calls.append(offset))
+    result = walk(handle, 0, lambda members, offset: calls.append(offset), rewind=_ignore)
 
     assert result.state == "corrupt"
     assert reader.lied >= 2, "the test did not actually keep lying"
@@ -818,7 +863,8 @@ def test_a_bad_read_after_a_long_name_header_is_also_re_read(tmp_path):
     handle = ConcatFile(archive, reader)
     seen = []
 
-    result = walk(handle, 0, lambda members, offset: seen.extend(members))
+    result = walk(handle, 0, lambda members, offset: seen.extend(members),
+                  rewind=_dropping(seen))
 
     assert reader.lied == 1, "the test did not actually inject a bad read"
     assert result.state == "complete"
@@ -854,7 +900,8 @@ def _walk_with_transients(tmp_path, count):
     reader = _LiesAtEach(tmp_path, archive, offsets)
     handle = ConcatFile(archive, reader)
     seen = []
-    return walk(handle, 0, lambda members, offset: seen.extend(members)), seen, reader
+    return (walk(handle, 0, lambda members, offset: seen.extend(members),
+                 rewind=_dropping(seen)), seen, reader)
 
 
 def test_a_walk_rescues_up_to_the_reread_limit(tmp_path):
@@ -864,12 +911,67 @@ def test_a_walk_rescues_up_to_the_reread_limit(tmp_path):
     assert len(seen) == len(MEMBERS)
 
 
-def test_a_walk_that_cannot_get_two_reads_to_agree_gives_up_loudly(tmp_path):
-    """One more disagreement than REREAD_LIMIT allows, and the walk raises rather than
-    report a verdict it never confirmed. The segment then lands in `error`, which the
-    next run reclaims and resumes from its committed cursor."""
+class _LiesOnEach(_LiesOnce):
+    """Lies on every fetch covering ``bad`` whose number is in ``nths``."""
+
+    def __init__(self, directory, archive, bad, nths, **kw):
+        super().__init__(directory, archive, bad, **kw)
+        self.nths = set(nths)
+
+    def _lies_now(self):
+        return self.covering in self.nths
+
+
+def test_a_verdict_that_keeps_changing_gives_up_loudly(tmp_path):
+    """Every other read of the terminator comes back as junk: each reading of the verdict
+    contradicts the one before. One more contradiction than REREAD_LIMIT allows, and the
+    walk raises rather than report a verdict it never confirmed. The segment then lands
+    in `error`, which the next run reclaims and resumes from its committed cursor."""
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnEach(tmp_path, archive, _terminator(data), nths=range(1, 100, 2))
+
     with pytest.raises(UnsettledRead):
-        _walk_with_transients(tmp_path, REREAD_LIMIT + 1)
+        walk(ConcatFile(archive, reader), 0, lambda members, offset: None, rewind=_ignore)
+    # One reading of the terminator per pass: the first, and one contradicting the one
+    # before it for each of REREAD_LIMIT + 1 more.
+    assert reader.covering == REREAD_LIMIT + 2
+
+
+class _NeverTheSameTwice(LocalRangeReader):
+    """Every fetch covering ``bad`` carries a different member's valid header there."""
+
+    def __init__(self, directory, archive, bad, donors):
+        super().__init__(directory, archive)
+        self.bad, self.donors, self.lied = bad, list(donors), 0
+
+    def read_range(self, part_idx, offset, length):
+        data = super().read_range(part_idx, offset, length)
+        start = self.archive.parts[part_idx].offset + offset
+        if not start <= self.bad < start + length:
+            return data
+        donor = self.donors[self.lied % len(self.donors)]
+        self.lied += 1
+        cut = self.bad - start
+        return data[:cut] + donor[:length - cut] + data[cut + 512:]
+
+
+def test_a_header_that_never_reads_the_same_way_twice_gives_up_loudly(tmp_path):
+    """Two readings of a header disagree, and no third read agrees with either -- nor any
+    read after it. No version has two reads behind it, so none is recorded: the walk
+    raises, with what it walked before that header committed."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _NeverTheSameTwice(tmp_path, archive, offsets[30],
+                                [data[o:o + 512] for o in offsets[1:10]])
+    rows = _Rows()
+
+    with pytest.raises(UnsettledRead, match=str(offsets[30])):
+        walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+    assert rows.consistent()
+    assert all(key < offsets[30] or rows.rows[key].name == "file001.bin"
+               for key in rows.rows)
 
 
 # ---- no single read decides a final verdict -----------------------------------------
@@ -879,7 +981,7 @@ def test_a_walk_that_cannot_get_two_reads_to_agree_gives_up_loudly(tmp_path):
 # the read pattern fails here rather than leaving a case that quietly tests nothing.
 # Which fetch is the dangerous one depends on window sizes and pass structure, so the
 # tests do not guess it: whichever read the lie lands on, the verdict must be the truth.
-# On a walk from 0, N = 3 is the read that confirms the verdict, and a lie there used to
+# On a walk from 0, N = 2 is the read that confirms the verdict, and a lie there used to
 # overturn a correct one.
 
 def _terminator(data):
@@ -893,11 +995,11 @@ def _walk_lying_once(tmp_path, data, bad, nth, fill=JUNK, start=0, span=1024):
     reader = _LiesOnce(tmp_path, archive, bad, fill=fill, span=span, nth=nth)
     seen = []
     result = walk(ConcatFile(archive, reader), start,
-                  lambda members, offset: seen.extend(members))
+                  lambda members, offset: seen.extend(members), rewind=_dropping(seen))
     return result, seen, reader
 
 
-@pytest.mark.parametrize("nth", [1, 2, 3])
+@pytest.mark.parametrize("nth", [1, 2])
 def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path, nth):
     data = build_tar(MEMBERS)
     result, seen, reader = _walk_lying_once(tmp_path, data, _terminator(data), nth)
@@ -906,7 +1008,7 @@ def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path, nth):
     assert reader.lied == 1, "the test did not actually inject a bad read"
 
 
-@pytest.mark.parametrize("nth", [1, 2, 3])
+@pytest.mark.parametrize("nth", [1, 2])
 def test_one_bad_read_cannot_pass_a_damaged_archive_as_complete(tmp_path, nth):
     """The false `complete` is the silent failure: members go missing and `index`
     refuses to walk the archive again. Here the archive really is damaged -- junk after
@@ -978,7 +1080,7 @@ def test_a_rescue_that_ends_in_a_crossing_keeps_its_note(tmp_path):
     archive = write_parts(tmp_path, data, part_size=len(data))
     reader = _LiesOnce(tmp_path, archive, offs[10])
     result = walk(ConcatFile(archive, reader), 0, lambda members, offset: None,
-                  stop_at=offs[30])
+                  rewind=_ignore, stop_at=offs[30])
     assert reader.lied == 1
     assert result.state == "crossed"
     assert result.end_offset == offs[30]
@@ -990,7 +1092,12 @@ def test_the_note_names_each_re_read_offset_once(tmp_path):
     note is for a person, and should name the offset once."""
     data = build_tar(MEMBERS)
     t = _terminator(data)
-    result, _, _ = _walk_lying_once(tmp_path, data, t, 3)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnEach(tmp_path, archive, t, nths={1, 3})
+    result = walk(ConcatFile(archive, reader), 0, lambda members, offset: None,
+                  rewind=_ignore)
+    assert reader.lied == 2
+    assert result.state == "complete"
     assert result.detail.count(str(t)) == 1, result.detail
 
 
@@ -1004,7 +1111,7 @@ def test_a_walk_starting_on_a_damaged_long_name_member_says_what_is_wrong(tmp_pa
     first_span = 512 + (-(-100 // 512) * 512)
     archive = write_parts(tmp_path, bytes(data), part_size=len(data))
     result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), first_span,
-                  lambda members, offset: None)
+                  lambda members, offset: None, rewind=_ignore)
     assert result.state == "corrupt"
     assert result.end_offset == first_span
     assert "bad checksum" in result.detail
@@ -1037,7 +1144,8 @@ def _walk_all(tmp_path, data):
     archive = write_parts(tmp_path, data, part_size=len(data))
     calls = []
     result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0,
-                  lambda members, offset: calls.append(([m.name for m in members], offset)))
+                  lambda members, offset: calls.append(([m.name for m in members], offset)),
+                  rewind=_ignore)
     return result, calls
 
 
@@ -1061,8 +1169,10 @@ def test_a_pax_header_deep_in_the_archive_stops_the_walk_where_it_is(tmp_path):
     calls = []
     with pytest.raises(UnsupportedArchive, match=str(pax_member.offset)):
         walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0,
-             lambda members, offset: calls.append(([m.name for m in members], offset)))
-    assert calls[-1] == (["a.bin", "b.bin"], pax_member.offset)
+             lambda members, offset: calls.append(([m.name for m in members], offset)),
+             rewind=_ignore)
+    assert [name for names, _ in calls for name in names] == ["a.bin", "b.bin"]
+    assert calls[-1][1] == pax_member.offset
 
 
 def test_a_global_pax_header_is_refused_with_the_cursor_before_it(tmp_path):
@@ -1076,7 +1186,7 @@ def test_a_global_pax_header_is_refused_with_the_cursor_before_it(tmp_path):
     calls = []
     with pytest.raises(UnsupportedArchive, match="is a pax-format archive"):
         walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0,
-             lambda members, offset: calls.append((len(members), offset)))
+             lambda members, offset: calls.append((len(members), offset)), rewind=_ignore)
     assert calls[-1] == (0, 0)
 
 
@@ -1096,7 +1206,7 @@ def test_one_bad_read_carrying_a_pax_header_is_read_again_not_believed(tmp_path)
     def commit(batch, offset):
         rows.update((m.hdr_offset, m.name) for m in batch)
 
-    result = walk(ConcatFile(archive, reader), 0, commit)
+    result = walk(ConcatFile(archive, reader), 0, commit, rewind=_dropping(rows))
 
     assert reader.lied == 1, "the test did not actually inject the bad read"
     assert result.state == "complete"
@@ -1121,9 +1231,9 @@ def test_one_bad_read_carrying_a_global_pax_header_leaves_nothing_behind(tmp_pat
     def commit(batch, offset):
         rows.update((m.hdr_offset, m.name) for m in batch)
 
-    result = walk(ConcatFile(archive, reader), 0, commit)
+    result = walk(ConcatFile(archive, reader), 0, commit, rewind=_dropping(rows))
     clean = LocalRangeReader(tmp_path, archive)
-    walk(ConcatFile(archive, clean), 0, lambda members, offset: None)
+    walk(ConcatFile(archive, clean), 0, lambda members, offset: None, rewind=_ignore)
 
     assert reader.lied == 1, "the test did not actually inject the bad read"
     assert result.state == "complete"
@@ -1153,9 +1263,12 @@ def test_gnu_and_ustar_archives_are_not_mistaken_for_pax(tmp_path, fmt):
 def test_giving_up_on_a_member_after_a_g_header_keeps_the_cursor_before_the_g(tmp_path):
     """Review 5's K8. The member after a `g` header is suspect (pax); if its re-reads never
     agree, the walk raises UnsettledRead -- leaving the cursor where the member's header
-    sequence begins, at the `g`, or a resume walks on with no global header in force."""
+    sequence begins, at the `g`, or a resume walks on with no global header in force.
+    Here every read after the first has a valid header there, named differently each
+    time: no two reads agree on what the member is."""
     data = _pax_tar([(f"g/f{i}", bytes([i]) * 600, None) for i in range(3)],
                     pax_global={"comment": "0123abcd"})
+    assert data[156:157] == b"g" and data[1024:1027] == b"g/f"
     archive = write_parts(tmp_path, data, part_size=len(data))
 
     class EveryRereadDiffers(LocalRangeReader):
@@ -1163,11 +1276,605 @@ def test_giving_up_on_a_member_after_a_g_header_keeps_the_cursor_before_the_g(tm
             true = super().read_range(part_idx, offset, length)
             if self.requests == 1:
                 return true                   # the first read: the g and its member
-            return random.Random(self.requests).randbytes(length)
+            other = _with_field(data, 1024, 0, 100, b"g/other%d" % self.requests)
+            return other[offset:offset + length]
 
     reader = EveryRereadDiffers(tmp_path, archive)
     calls = []
     with pytest.raises(UnsettledRead):
         walk(ConcatFile(archive, reader, window_min=4_096, window_max=4_096), 0,
-             lambda members, offset: calls.append((len(members), offset)))
+             lambda members, offset: calls.append((len(members), offset)), rewind=_ignore)
     assert calls[-1] == (0, 0), calls
+
+
+# ---- a verdict is read again from the fills that led to it -----------------------------
+#
+# Review 5's P-a. A bad read that is valid tar from elsewhere -- a real header, just not the
+# one at this offset -- passes its checksum and moves the chain by its own size. Where it
+# lands is read truly, so reading the landing again only repeats the verdict. What decided
+# it is the fill that served the wrong header, so that is what is read again: every final
+# verdict, and every crossing, is re-walked from the start of the last fills that served a
+# header. Where the two readings part, a third read of that header settles which was
+# right, and the rows past it that the wrong one recorded are dropped (`rewind`).
+
+
+class _Rows:
+    """What the store holds after a walk: rows by header offset, the cursor, and every
+    call in order -- `rewind` drops each row at or past its offset, as the store does."""
+
+    def __init__(self):
+        self.rows, self.cursor, self.calls = {}, None, []
+
+    def commit(self, members, next_offset):
+        self.calls.append(("commit", [m.hdr_offset for m in members], next_offset))
+        self.rows.update((m.hdr_offset, m) for m in members)
+        self.cursor = next_offset
+
+    def rewind(self, offset):
+        self.calls.append(("rewind", offset))
+        self.rows = {k: v for k, v in self.rows.items() if k < offset}
+        self.cursor = offset
+
+    def names(self):
+        return [self.rows[k].name for k in sorted(self.rows)]
+
+    def consistent(self):
+        return all(k < self.cursor for k in self.rows)
+
+
+def _names_of(members):
+    return [name.rsplit("/", 1)[-1] for name, *_ in members]
+
+
+def _header_with_size(data, header, size):
+    """The header at ``header`` claiming ``size`` bytes, checksum redone: a valid header
+    that sends the chain wherever a test needs it -- as a real one from elsewhere would."""
+    return _with_field(data, header, 124, 12, b"%011o" % size)[header:header + 512]
+
+
+def test_a_header_copied_from_elsewhere_cannot_condemn_a_sound_archive(tmp_path):
+    """The big member's header served where member 30's belongs sends the chain 6,656
+    bytes on, into member data. Reading that landing again finds the same data, so it
+    used to stand as `corrupt`. Read again from the fill that served the wrong header,
+    member 30 is there, and the walk carries on to the end."""
+    members = [("run/big.bin", b"b" * 6000)] + MEMBERS
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    at = offsets[31]
+    landing = at + 512 + 6144
+    assert landing not in offsets and any(data[landing:landing + 512])
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=data[0:512], span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(members)
+    assert result.members == len(members)
+    assert f"re-read at {at}" in result.detail
+    assert rows.consistent()
+
+
+def _gnu_holding_a_pax_tarball():
+    """GNU members around a tarball Python wrote -- pax, an `x` header before each member
+    -- and where the second of its members' header sequences begins."""
+    inner = _pax_tar([(f"inner/p{i}.dat", bytes([i]) * 2000, {"mtime": "1700000000.5"})
+                      for i in range(4)])
+    members = [("run/a.bin", b"a" * 3000), ("run/b.bin", b"b" * 3000),
+               ("run/results.tar", inner), ("run/z.bin", b"z" * 3000)]
+    data = build_tar(members)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        stored = t.getmember("run/results.tar").offset_data
+    with tarfile.open(fileobj=io.BytesIO(inner), mode="r:") as t:
+        second = stored + t.getmembers()[1].offset
+    return members, data, second
+
+
+def test_a_header_copied_from_elsewhere_cannot_condemn_an_archive_as_pax(tmp_path):
+    """The wrong header's size lands the chain on a real pax header inside a stored
+    tarball. Every read of it says pax, so reading it twice confirmed `unsupported` -- for
+    good -- on the strength of one bad read of the header before it."""
+    members, data, pax_at = _gnu_holding_a_pax_tarball()
+    offsets = _header_offsets(data)
+    at = offsets[1]
+    wrong = _header_with_size(data, at, pax_at - at - 512)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=wrong, span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(members)
+    assert f"re-read at {at}" in result.detail
+
+
+def test_a_header_copied_from_elsewhere_cannot_move_where_a_chain_crosses(tmp_path):
+    """A crossing is what the next segment's start is judged by: a wrong one resets that
+    segment onto bytes that are not a header. The wrong header here skips three members
+    and crosses on a real header -- the wrong one."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    boundary = offsets[30] - 16
+    at = offsets[28]
+    wrong = _header_with_size(data, at, offsets[33] - at - 512)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=wrong, span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind,
+                  stop_at=boundary)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "crossed"
+    assert result.end_offset == offsets[30]
+    assert sorted(rows.rows) == offsets[:30]
+    assert rows.cursor == offsets[30]
+
+
+def test_a_copied_header_that_rejoins_the_chain_near_its_end_is_read_again(tmp_path):
+    """Member 5's header served where member 20's belongs: the same padded size, so the
+    chain rejoins and the walk ends `complete`, one row wrong. It lies within the fills
+    re-read to confirm the verdict, so that reading finds it."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, offsets[20], fill=data[offsets[5]:offsets[5] + 512],
+                       span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert rows.names() == _names_of(MEMBERS)
+    assert result.members == len(MEMBERS)
+    assert f"re-read at {offsets[20]}" in result.detail
+
+
+def test_a_verdict_read_the_same_way_twice_rewrites_nothing(tmp_path):
+    """The common case costs one more reading of the last fills, and nothing else: the
+    second pass matches the first, so it records nothing again and drops nothing."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0, rows.commit,
+                  rewind=rows.rewind)
+
+    t = _terminator(data)
+    assert result.state == "complete"
+    assert rows.calls == [("commit", offsets, t), ("commit", [], t)]
+    assert result.members == len(MEMBERS)
+
+
+class _LiesOnceArmed(LocalRangeReader):
+    """Truthful until ``armed``; then the first fetch covering ``bad`` carries ``fill``
+    there -- so a lie lands on the first read of a place after some event, whatever the
+    read pattern before it."""
+
+    def __init__(self, directory, archive, bad, fill):
+        super().__init__(directory, archive)
+        self.bad, self.fill, self.armed, self.lied, self.covering = bad, fill, False, 0, 0
+
+    def read_range(self, part_idx, offset, length):
+        data = super().read_range(part_idx, offset, length)
+        start = self.archive.parts[part_idx].offset + offset
+        self.covering += start <= self.bad < start + length
+        if not self.armed or self.lied or not start <= self.bad < start + length:
+            return data
+        self.lied += 1
+        cut = self.bad - start
+        return data[:cut] + self.fill[:length - cut] + data[cut + len(self.fill):]
+
+
+def test_a_wrong_header_read_by_the_confirming_pass_is_outvoted(tmp_path):
+    """The archive really is damaged at member 30's header. The second reading of it comes
+    back as a valid header from elsewhere -- one whose size rejoins the chain, so, believed,
+    that pass walks on to `complete` and its own confirmation, from fills near the end,
+    agrees. A third read of the header settles it: two reads say no header there."""
+    damaged = bytearray(build_tar(MEMBERS))
+    offsets = _header_offsets(bytes(damaged))
+    at = offsets[30]
+    donor = bytes(damaged[offsets[26]:offsets[26] + 512])       # the same padded size
+    damaged[at:at + 1024] = JUNK * 4
+    archive = write_parts(tmp_path, bytes(damaged), part_size=len(damaged))
+    reader = _LiesOnceArmed(tmp_path, archive, at, donor)
+    rows = _Rows()
+
+    def commit(members, next_offset):
+        rows.commit(members, next_offset)
+        reader.armed = reader.armed or next_offset == at      # the first pass has ended
+
+    # Two-block windows: the first pass's probe at the damage comes from the window that
+    # read the header there, so the first fetch covering it after that pass is the second
+    # reading's -- and the last fills before the end hold only the last few members.
+    result = walk(ConcatFile(archive, reader, window_min=2048, window_max=2048), 0,
+                  commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "corrupt", result.detail
+    assert result.end_offset == at
+    assert sorted(rows.rows) == offsets[:30]
+    # The first reading's vote counts: one more read, agreeing with it, settles it.
+    assert reader.covering == 3, "one read per pass, and one to break the tie"
+
+
+def test_a_stop_does_not_cut_short_a_second_reading_that_agrees(tmp_path):
+    """A stop asked for once the first pass has reached its verdict: the second reading
+    is a few fetches long and runs on to confirm it, rather than end the run with the
+    verdict unconfirmed -- or, under --max-batches, never reach it."""
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    rows = _Rows()
+    checks = {"n": 0}
+
+    def should_stop():
+        checks["n"] += 1
+        return checks["n"] > len(MEMBERS)          # any check after the first pass
+
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive)), 0, rows.commit,
+                  rewind=rows.rewind, should_stop=should_stop)
+
+    assert result.state == "complete"
+    assert rows.names() == _names_of(MEMBERS)
+    assert rows.cursor == _terminator(data)
+
+
+class _LiesAfter(_AlwaysLies):
+    """Truthful for the first ``first`` fetches covering ``bad``, then wrong -- and wrong
+    differently -- every time after."""
+
+    def __init__(self, directory, archive, bad, first, **kw):
+        super().__init__(directory, archive, bad, **kw)
+        self.first = first
+
+    def _lies_now(self):
+        return self.covering > self.first
+
+
+def test_giving_up_during_a_second_reading_keeps_every_row_it_had(tmp_path):
+    """The second reading matches the first, so it has recorded nothing; when it then
+    gives up on a long name that never reads the same way twice, the cursor must stay
+    where the first reading left it -- not move back over rows the store already holds,
+    where a resume would record them again."""
+    data, _ = _long_name_archive()
+    archive = write_parts(tmp_path, bytes(data), part_size=len(data))
+    reader = _LiesAfter(tmp_path, archive, 1536, first=1, span=512)
+    rows = _Rows()
+
+    with pytest.raises(UnsettledRead, match="1024"):
+        walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied >= 2, "the test did not reach the second reading"
+    assert rows.names() == ["first.bin", "deep.bin"]
+    assert rows.cursor == _terminator(bytes(data))
+
+
+def test_reads_that_agree_no_member_is_there_are_an_answer(tmp_path):
+    """A bad fetch holding a stretch of a stored pax tarball, served where z.bin's header
+    belongs: its first member sends the chain into z.bin's data, where the same fetch has
+    that tarball's next pax header. Read again, there is no member there at all -- and
+    two reads agreeing on that is an answer, not a reason to give up. Giving up left the
+    cursor there, on the wrong path, and the resume condemned the archive."""
+    inner = _pax_tar([(f"inner/p{i}.dat", bytes([i]) * 2000, {"mtime": "1700000000.5"})
+                      for i in range(4)])
+    members = [("run/a.bin", b"a" * 3000), ("run/results.tar", inner),
+               ("run/z.bin", b"z" * 30000), ("run/last.bin", b"l" * 100)]
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    at = offsets[2]
+    with tarfile.open(fileobj=io.BytesIO(inner), mode="r:") as t:
+        real = t.getmembers()[1].offset_data - 512          # member 1's own header
+    chunk = inner[real:real + 512 + 2048 + 1536]            # ... and member 2's `x` on
+    assert chunk[2560 + 156:2560 + 157] == b"x"
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=chunk, span=len(chunk))
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(members)
+    landing = at + 512 + 2048
+    assert f"re-read at {landing}" in result.detail, "the pax read there was a rescue"
+
+
+def test_a_landing_on_a_real_header_in_its_own_fetch_is_read_back_past(tmp_path):
+    """The wrong header's size lands the chain on a real header -- the last member of a
+    tarball stored in the archive -- in a fetch of its own. The chain walks that member and
+    meets the stored tarball's terminator mid-archive, and reading the landing's fetch
+    again finds the same. The fetch before it, which served the wrong header, is the one
+    that has to be read again: why a verdict is read again from more than one fetch."""
+    inner = build_tar([(f"inner/g{i}.dat", bytes([i]) * 600) for i in range(3)])
+    members = [("run/a.bin", b"a" * 3000), ("run/b.bin", b"b" * 3000),
+               ("run/results.tar", inner), ("run/z.bin", b"z" * 3000)]
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        stored = t.getmember("run/results.tar").offset_data
+    landing = stored + _header_offsets(inner)[2]        # the stored tarball's last member
+    at = offsets[1]
+    assert landing - at > 4096                            # beyond the fetch that lies
+    wrong = _header_with_size(data, at, landing - at - 512)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=wrong, span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader, window_min=4096, window_max=4096), 0,
+                  rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(members)
+
+
+def test_a_bad_fetch_is_read_again_from_the_first_header_it_served(tmp_path):
+    """A bad fetch holding a stretch of the archive from elsewhere serves two wrong headers
+    in a row before the chain leaves it, landing in member data. The last of them is not
+    where the walk went wrong: it is read again from the first, and the rows from there
+    on are replaced."""
+    members = [("run/a.bin", b"a" * 100), ("run/b.bin", b"b" * 3000),
+               ("run/c.bin", b"c" * 100), ("run/d.bin", b"d" * 20000),
+               ("run/e.bin", b"e" * 100)]
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    at = offsets[2]
+    stretch = data[offsets[0]:offsets[1] + 512]     # a.bin's header and data, b.bin's header
+    landing = at + 1024 + 512 + 3072
+    assert landing not in offsets and data[landing:landing + 1] == b"d"
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=stretch, span=len(stretch))
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(members)
+    assert rows.consistent()
+
+
+def test_damage_read_as_a_valid_header_is_found_by_the_second_reading(tmp_path):
+    """The archive really is damaged at member 30's header, and the first pass read it as a
+    valid header from elsewhere that rejoins the chain, walking on to `complete`. The
+    second reading finds the damage -- and the rows the first pass recorded past it go, or
+    the index would hold members past its own verdict."""
+    damaged = bytearray(build_tar(MEMBERS))
+    offsets = _header_offsets(bytes(damaged))
+    at = offsets[30]
+    donor = bytes(damaged[offsets[26]:offsets[26] + 512])       # the same padded size
+    damaged[at:at + 1024] = JUNK * 4
+    archive = write_parts(tmp_path, bytes(damaged), part_size=len(damaged))
+    reader = _LiesOnce(tmp_path, archive, at, fill=donor, span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert (result.state, result.end_offset) == ("corrupt", at), result.detail
+    assert sorted(rows.rows) == offsets[:30]
+    assert rows.consistent()
+
+
+class _GarblesEachOnce(LocalRangeReader):
+    """Garbles 512 bytes at each of ``offsets`` in turn, at most one per fetch: successive
+    transients, each met only after the walk has survived the one before."""
+
+    def __init__(self, directory, archive, offsets):
+        super().__init__(directory, archive)
+        self.pending, self.lied = sorted(offsets), 0
+
+    def read_range(self, part_idx, offset, length):
+        data = bytearray(super().read_range(part_idx, offset, length))
+        start = self.archive.parts[part_idx].offset + offset
+        if self.pending and start <= self.pending[0] and self.pending[0] + 512 <= start + length:
+            bad = self.pending.pop(0)
+            self.lied += 1
+            data[bad - start:bad - start + 512] = b"garbled/" * 64
+        return bytes(data)
+
+
+def test_rescues_on_the_way_do_not_use_up_the_verdicts_own_re_reads(tmp_path):
+    """A long walk meets independent transients far apart -- here a garbled long name for
+    each of REREAD_LIMIT + 1 members. Each is settled where it is met. None of them is
+    the verdict's, and the verdict's own re-reads are counted from where it is reached:
+    a six-hour walk must not end in UnsettledRead for having survived four bad reads."""
+    long_named = [(f"run/{'d' * 120}/f{i}.bin", bytes([i]) * 700)
+                  for i in range(REREAD_LIMIT + 1)]
+    members = long_named + list(MEMBERS[:5])
+    data = build_tar(members, format=tarfile.GNU_FORMAT)
+    blocks = [o + 512 for o in _header_offsets(data)[:REREAD_LIMIT + 1]]
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _GarblesEachOnce(tmp_path, archive, blocks)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == REREAD_LIMIT + 1
+    assert result.state == "complete", result.detail
+    assert all(f"{o - 512}" in result.detail for o in blocks), "each one was a rescue"
+    assert [f"{rows.rows[k].dir}/{rows.rows[k].name}" for k in sorted(rows.rows)] == [
+        name for name, _ in members]
+
+
+def test_confirming_a_verdict_reads_its_last_fetches_again_not_the_walk(tmp_path):
+    """One-block windows make every header a fetch of its own, so what a confirmation
+    costs can be counted: the fetches that served the last CONFIRM_FILLS headers, the one
+    that finds the terminator, and the two that check the zeros after it -- not a second
+    walk of fifty."""
+    data = build_tar(MEMBERS)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = LocalRangeReader(tmp_path, archive)
+    at_commit = []
+
+    def commit(members, next_offset):
+        at_commit.append(reader.requests)
+
+    result = walk(ConcatFile(archive, reader, window_min=1024, window_max=1024), 0, commit,
+                  rewind=_ignore)
+
+    assert result.state == "complete"
+    first = at_commit[0] + 2            # the first pass's own two checks of the zeros
+    assert reader.requests - first == CONFIRM_FILLS + 3
+
+
+def test_a_copied_header_spanning_two_members_is_read_again_and_counted(tmp_path):
+    """A wrong header whose size covers members 20 and 21 together: the chain rejoins at
+    22 with 21 never read, and the walk ends `complete`, one member short. The second
+    reading records both -- and the result's count is what the second reading found."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    at = offsets[20]
+    wrong = _header_with_size(data, at, offsets[22] - at - 512)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=wrong, span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete"
+    assert rows.names() == _names_of(MEMBERS)
+    assert result.members == len(MEMBERS)
+
+
+def test_a_wrong_header_read_by_the_second_reading_of_a_sound_archive_is_outvoted(tmp_path):
+    """The first pass reads member 45 right; the second reading gets a valid header there
+    claiming another size. A third read agrees with the first, and the walk must go on
+    from where *that* reading says, not the wrong one -- or it leaves the chain."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    at = offsets[45]
+    t = _terminator(data)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnceArmed(tmp_path, archive, at, _header_with_size(data, at, 5000))
+    rows = _Rows()
+
+    def commit(members, next_offset):
+        rows.commit(members, next_offset)
+        reader.armed = reader.armed or next_offset == t       # the first pass has ended
+
+    result = walk(ConcatFile(archive, reader), 0, commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(MEMBERS)
+    assert f"re-read at {at}" in result.detail
+
+
+def test_a_global_header_only_the_second_readings_bad_read_saw_stops_applying(tmp_path):
+    """The second reading of member 48 comes back as a `g` header and a copy of it. The `g`
+    makes the member suspect, so it is read again at once, and that read agrees with the
+    first reading; the `g` must stop applying there, or every member after it looks like
+    pax and is read again, one request each. (Two-block windows: the second reading covers
+    only the last two members.)"""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    at = offsets[48]
+    t = _terminator(data)
+    glob = _pax_tar([("a.bin", b"a", None)], pax_global={"comment": "elsewhere"})
+    assert glob[156:157] == b"g"
+    archive = write_parts(tmp_path, data, part_size=len(data))
+
+    def run(lie):
+        reader = _LiesOnceArmed(tmp_path, archive, at, glob[:1024] + data[at:at + 512])
+        rows = _Rows()
+
+        def commit(members, next_offset):
+            rows.commit(members, next_offset)
+            reader.armed = lie and (reader.armed or next_offset == t)
+
+        result = walk(ConcatFile(archive, reader, window_min=2048, window_max=2048), 0,
+                      commit, rewind=rows.rewind)
+        return result, rows, reader
+
+    clean, _, honest = run(lie=False)
+    result, rows, reader = run(lie=True)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(MEMBERS)
+    # The tie-break's one fresh read, and nothing per member after it.
+    assert reader.requests == honest.requests + 1, (reader.requests, honest.requests)
+
+
+def _cut_after_a_long_name(damaged=False):
+    """MEMBERS[:5], then a long-named member whose real header is cut short by the end of
+    the archive -- or, if ``damaged``, present but corrupt. Returns the data and where the
+    long-named member's header sequence begins."""
+    long_name = "run/" + "d" * 150 + "/deep.bin"
+    data = build_tar(list(MEMBERS[:5]) + [(long_name, b"x" * 700)], format=tarfile.GNU_FORMAT)
+    start = _header_offsets(data)[-1]
+    if damaged:
+        data = bytearray(data)
+        data[start + 1024:start + 1032] = b"\xff" * 8
+        return bytes(data), start
+    return data[:start + 1024 + 100], start
+
+
+def test_a_tie_break_that_finds_the_archive_cut_short_says_truncated(tmp_path):
+    """The archive ends inside the real header of a long-named member: `truncated`. The
+    second reading gets a valid header there instead; two reads settle that none begins
+    there -- and say so as the first pass did, `truncated`, so the readings agree at once
+    instead of disagreeing about wording for two more passes."""
+    data, start = _cut_after_a_long_name()
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnceArmed(tmp_path, archive, start, data[0:512])
+    rows = _Rows()
+
+    def commit(members, next_offset):
+        rows.commit(members, next_offset)
+        reader.armed = reader.armed or next_offset == start
+
+    result = walk(ConcatFile(archive, reader), 0, commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "truncated"
+    assert reader.covering == 3, "one read per pass, and one to break the tie"
+
+
+def test_reads_that_agree_no_member_is_there_say_what_tarfile_found(tmp_path):
+    """A pax header served where a long-named member's own sequence begins -- whose real
+    header is damaged. Read again, tarfile rejects the sequence for that damage, twice; the
+    verdict names it, as a walk arriving there would, rather than "not a header"."""
+    data, start = _cut_after_a_long_name(damaged=True)
+    pax = _pax_tar([("x/" + "p" * 120 + ".bin", b"q" * 700, None)])
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, start, fill=pax[:1536], span=1536)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader), 0, rows.commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert (result.state, result.end_offset) == ("corrupt", start)
+    assert "bad checksum" in result.detail, result.detail
+
+
+def test_a_second_reading_that_moves_a_sparse_member_is_outvoted(tmp_path):
+    """A GNU sparse member records the file's expanded size, so where its stored bytes end
+    -- where the chain goes next -- is not among the fields recorded. A second reading that
+    agrees on every recorded field but stores a different amount would move the chain; it
+    is compared too, outvoted by a third read, and costs no extra pass."""
+    data = _gnu_sparse_archive()
+    t = 1536
+    wrong = _with_field(data, 0, 124, 12, b"%011o" % 1024)[0:512]
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnceArmed(tmp_path, archive, 0, wrong)
+    rows = _Rows()
+
+    def commit(members, next_offset):
+        rows.commit(members, next_offset)
+        reader.armed = reader.armed or next_offset == t
+
+    result = walk(ConcatFile(archive, reader), 0, commit, rewind=rows.rewind)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert (rows.rows[0].size, rows.rows[0].data_offset) == (4096, 1024)
+    assert reader.covering == 3, "one read per pass, and one to break the tie"

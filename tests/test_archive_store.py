@@ -446,3 +446,80 @@ def test_replaying_a_batch_does_not_inflate_the_segment_member_count(tmp_path):
     store.commit_batch(archive_id, segment_id, [member(0), member(10)], 512)  # replay
 
     assert seg(store, archive_id, segment_id)["members"] == 2
+
+
+def test_rewinding_a_segment_drops_its_rows_from_there_and_moves_its_cursor(tmp_path):
+    """A second reading of a chain parts from the first: the rows the first recorded from
+    there on go, and the cursor moves back to match, in one transaction -- leaving the
+    segment's earlier rows, and every other segment's, alone."""
+    store, archive_id, _ = registered(tmp_path, count=3)      # spans 0, 100, 200..
+    segments = store.segments(archive_id)
+    store.commit_batch(archive_id, segments[0]["id"], [member(0)], 100)
+    store.commit_batch(archive_id, segments[1]["id"],
+                       [member(100), member(150), member(180)], 190)
+    store.commit_batch(archive_id, segments[2]["id"], [member(250)], 300)
+
+    store.rewind_segment(segments[1]["id"], 150)
+
+    remaining = [r["hdr_offset"] for r in store.query_members(archive_id)]
+    assert remaining == [0, 100, 250]
+    row = seg(store, archive_id, segments[1]["id"])
+    assert row["cursor_offset"] == 150 and row["members"] == 1
+    assert row["state"] == "pending"            # a rewind is not a verdict
+    events = store.query("SELECT kind, detail FROM events WHERE archive_id=? "
+                         "AND kind='rewind'", (archive_id,))
+    assert len(events) == 1 and "150" in events[0]["detail"]
+
+
+def _ended_in_segment_1(tmp_path):
+    """Four segments: 0 crossed into 1, 1 ended `corrupt`, 2 retired `beyond` by the join,
+    3 with rows and `joined` left from an earlier run. The archive carries 1's verdict."""
+    store, archive_id, _ = registered(tmp_path, count=4)      # spans 0, 100, 200, 300..
+    segments = store.segments(archive_id)
+    store.commit_batch(archive_id, segments[0]["id"], [member(0)], 120)
+    store.finish_segment(segments[0]["id"], WalkResult("crossed", 120, 1))
+    store.set_segment_start(segments[1]["id"], 120)
+    store.mark_joined(segments[1]["id"])
+    store.commit_batch(archive_id, segments[1]["id"], [member(120), member(150)], 180)
+    store.finish_segment(segments[1]["id"], WalkResult("corrupt", 180, 2, "junk at 180"))
+    store.set_segment_start(segments[2]["id"], 250)
+    store.commit_batch(archive_id, segments[2]["id"], [member(250)], 290)
+    store.retire_segment(segments[2]["id"])
+    store.set_segment_start(segments[3]["id"], 320)
+    store.mark_joined(segments[3]["id"])
+    store.commit_batch(archive_id, segments[3]["id"], [member(320)], 400)
+    store.finish(archive_id, WalkResult("corrupt", 180, 2, "junk at 180"))
+    return store, archive_id
+
+
+def test_recheck_rearms_the_segment_where_the_walk_ended_and_every_one_after_it(tmp_path):
+    store, archive_id = _ended_in_segment_1(tmp_path)
+
+    ending = store.recheck(archive_id)
+
+    assert ending["idx"] == 1
+    assert [r["hdr_offset"] for r in store.query_members(archive_id)] == [0]
+    rows = store.segments(archive_id)
+    assert (rows[0]["state"], rows[0]["cursor_offset"]) == ("crossed", 120)   # untouched
+    assert (rows[1]["state"], rows[1]["first_header"], rows[1]["joined"],
+            rows[1]["cursor_offset"], rows[1]["detail"]) == ("pending", 120, 1, None, None)
+    for later in rows[2:]:
+        assert (later["state"], later["first_header"], later["joined"],
+                later["cursor_offset"], later["members"]) == ("pending", None, 0, None, 0)
+    archive = store.get("a.tar")
+    assert (archive["state"], archive["detail"], archive["cursor_offset"]) == (
+        "registered", None, 120)
+    [event] = store.query("SELECT detail FROM events WHERE archive_id=? AND kind='recheck'",
+                          (archive_id,))
+    assert "corrupt" in event["detail"] and "junk at 180" in event["detail"]
+
+
+def test_recheck_leaves_a_stale_archive_to_register(tmp_path):
+    """Only `register` lifts `stale`: the parts changed, and walking them again under the
+    old registration would mix bytes from two different archives into one index."""
+    store, archive_id = _ended_in_segment_1(tmp_path)
+    store.mark_stale(archive_id, "a part changed")
+
+    assert store.recheck(archive_id) is None
+    assert store.get("a.tar")["state"] == "stale"
+    assert [r["hdr_offset"] for r in store.query_members(archive_id)] == [0, 120, 150, 320]

@@ -745,6 +745,9 @@ def _walk_segment(run, segment) -> None:
         run.commit(segment["id"], members, next_offset, requests, fetched)
         charged()          # only once the write went through
 
+    def rewind(offset):
+        run.store.rewind_segment(segment["id"], offset)
+
     # Every exit below charges what the reader spent, so the try covers the scan too:
     # this is the last place that still knows what it cost.
     try:
@@ -763,7 +766,7 @@ def _walk_segment(run, segment) -> None:
         cursor = segment["cursor_offset"]
         if cursor is None:
             cursor = start
-        result = walk(concat, cursor, commit, batch_size=args.batch,
+        result = walk(concat, cursor, commit, rewind=rewind, batch_size=args.batch,
                       stop_at=segment["stop_at"], should_stop=run.stop.is_set)
     except _Stopped:
         # The refused batch was read before it was refused.
@@ -969,20 +972,26 @@ def cmd_archive_index(args) -> int:
 
     # Re-running `index` is how a walk resumes, so resuming a finished one reads
     # nothing and writes nothing.
+    recheck = ("\n       if that is not what you expect, `archive index --recheck` walks "
+               "the segment where it ended again")
     if row["state"] == "complete":
+        if args.recheck:
+            print(f"error: {row['name']} is complete; --recheck walks again only a walk "
+                  f"that ended short of that", file=sys.stderr)
+            return 1
         print(f"{row['name']}: complete ({row['n_members']:,} members)")
         return 0
-    if row["state"] in ("truncated", "corrupt"):
-        print(f"error: {row['name']} is {row['state']}: {row['detail'] or ''}",
-              file=sys.stderr)
-        return 1
     if row["state"] == "stale":
         print(f"error: {row['name']} is stale ({row['detail'] or ''}); re-register it "
               f"to index the parts as they are now", file=sys.stderr)
         return 1
-    if row["state"] == "unsupported":
+    if row["state"] in ("truncated", "corrupt") and not args.recheck:
+        print(f"error: {row['name']} is {row['state']}: {row['detail'] or ''}{recheck}",
+              file=sys.stderr)
+        return 1
+    if row["state"] == "unsupported" and not args.recheck:
         print(f"error: {row['name']} is a pax-format archive, which dbaudit does not "
-              f"index: {row['detail'] or ''}", file=sys.stderr)
+              f"index: {row['detail'] or ''}{recheck}", file=sys.stderr)
         return 1
 
     try:
@@ -1029,6 +1038,18 @@ def _run_index(args, store, row) -> int:
             print(f"error: {detail}\n       the stored offsets describe bytes that are "
                   f"no longer there; re-register to walk it again", file=sys.stderr)
             return 1
+
+    if args.recheck:
+        # Only now, under the lock and with every part unchanged: rows are dropped to be
+        # walked again, and an archive whose parts changed keeps its rows as evidence.
+        ending = store.recheck(archive_id)
+        if ending is None:
+            print(f"error: {row['name']} is stale; re-register it", file=sys.stderr)
+            return 1
+        start = ending["first_header"]
+        print(f"{row['name']}: walking segment {ending['idx']} again from "
+              f"{f'offset {start:,}' if start is not None else 'a fresh scan'}, and every "
+              f"segment after it")
 
     workers = max(args.workers, 1)
     tokens = limiter = None
@@ -1920,6 +1941,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_idx.add_argument("--window-max", type=int, default=WINDOW_MAX)
     p_idx.add_argument("--batch", type=int, default=2000)
     p_idx.add_argument("--max-batches", type=int, default=0, help="stop early; 0 means no limit")
+    p_idx.add_argument("--recheck", action="store_true",
+                       help="walk again, from its confirmed start, the segment where a walk "
+                            "ended short of complete, and every segment after it")
     p_idx.add_argument("--lock")
     p_idx.set_defaults(func=cmd_archive_index)
 
