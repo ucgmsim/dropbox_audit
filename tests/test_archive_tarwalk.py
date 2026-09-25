@@ -1,4 +1,5 @@
 import io
+import random
 import tarfile
 
 import pytest
@@ -1147,3 +1148,26 @@ def test_gnu_and_ustar_archives_are_not_mistaken_for_pax(tmp_path, fmt):
     result, calls = _walk_all(tmp_path, buf.getvalue())
     assert result.state == "complete"
     assert [name for names, _ in calls for name in names] == ["a.bin", "b.bin"]
+
+
+def test_giving_up_on_a_member_after_a_g_header_keeps_the_cursor_before_the_g(tmp_path):
+    """Review 5's K8. The member after a `g` header is suspect (pax); if its re-reads never
+    agree, the walk raises UnsettledRead -- leaving the cursor where the member's header
+    sequence begins, at the `g`, or a resume walks on with no global header in force."""
+    data = _pax_tar([(f"g/f{i}", bytes([i]) * 600, None) for i in range(3)],
+                    pax_global={"comment": "0123abcd"})
+    archive = write_parts(tmp_path, data, part_size=len(data))
+
+    class EveryRereadDiffers(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            true = super().read_range(part_idx, offset, length)
+            if self.requests == 1:
+                return true                   # the first read: the g and its member
+            return random.Random(self.requests).randbytes(length)
+
+    reader = EveryRereadDiffers(tmp_path, archive)
+    calls = []
+    with pytest.raises(UnsettledRead):
+        walk(ConcatFile(archive, reader, window_min=4_096, window_max=4_096), 0,
+             lambda members, offset: calls.append((len(members), offset)))
+    assert calls[-1] == (0, 0), calls

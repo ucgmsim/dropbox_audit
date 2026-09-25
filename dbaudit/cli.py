@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import zlib
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -854,11 +855,17 @@ def _audit_repeated_paths(run) -> list[int]:
     each segment holding a row that disagrees. Returns those segments' indexes.
 
     A path can repeat legitimately (`tar -r`), but a bad read that is valid tar from
-    elsewhere in the archive always makes one: it records another member's header a
+    elsewhere in the archive usually makes one: it records another member's header a
     second time, at an offset that was never that member's. When the member it replaced
     pads to the same size, the chain rejoins straight after, and nothing else notices --
     the walk ends `complete` with one member twice and one never. A fresh read of each
-    such row says which is which. An archive with no repeated path pays nothing.
+    such row says which is which, and a row that disagrees is read once more before a
+    segment is walked again: one bad read by the audit must not cost a 300 GiB re-walk.
+    An archive with no repeated path pays nothing.
+
+    What it cannot see: a copied header whose path is recorded nowhere else -- a member
+    of a tarball stored inside the archive, or a long-named member's header read
+    without its long-name block.
     """
     store, archive_id = run.store, run.archive_id
     rows = store.repeated_paths(archive_id, AUDIT_LIMIT + 1)
@@ -873,9 +880,15 @@ def _audit_repeated_paths(run) -> list[int]:
     reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
     concat = ConcatFile(run.archive_set, reader, window_min=run.args.window_min,
                         window_max=run.args.window_max)
+    def disagrees(row):
+        return _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)
+
+    def confirmed(row):
+        concat.drop_cache()                 # a second, fresh request of its own
+        return disagrees(row)
+
     try:
-        wrong = [row["hdr_offset"] for row in rows
-                 if _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)]
+        wrong = [row["hdr_offset"] for row in rows if disagrees(row) and confirmed(row)]
     finally:
         store.charge(archive_id, reader.requests, reader.bytes_fetched)
     store.log_event(archive_id, "audit", f"read {len(rows)} rows under repeated paths "
@@ -1469,7 +1482,10 @@ def _verified_member_bytes(concat, member, total, follows):
     A failed check is met by reading again, fresh, up to REREAD_LIMIT times; past that
     this raises _CatError, having written nothing it could not vouch for. What it cannot
     catch: a read wrong only between two ends that were each right, or a wrong body the
-    server serves identically every time.
+    server repeats on consecutive fetches of the same range where only regular bytes
+    surround it -- twice running from the start, or three times after a right one.
+    Memory: the read held and the next, plus up to two more while a disagreement is
+    settled -- at most five reads (80 MiB), usually two.
     """
     hdr, data_offset, size = member["hdr_offset"], member["data_offset"], member["size"]
     if data_offset + size > total:
@@ -1513,7 +1529,7 @@ def _verified_member_bytes(concat, member, total, follows):
         sequence, or one block. None if the archive ends first."""
         at = plan[last][0]
         if known:
-            return buf[end - at:stop - at] if stop == follows["data_offset"] else None
+            return buf[end - at:stop - at]      # short only if the parts shrank: refused
         return buf[end - at:end - at + BLOCK] if stop >= end + BLOCK else None
 
     def trailer_ok(block):
@@ -1532,16 +1548,25 @@ def _verified_member_bytes(concat, member, total, follows):
         return True
 
     def settle(i, buf):
-        """Read i as two fetches agree on it: ``buf`` and a fresh one, or failing that
-        any two. Earlier fetches are compared by digest, so none is kept."""
-        seen = {hashlib.sha256(buf).digest()}
-        for _ in range(REREAD_LIMIT):
+        """Read i as the fetches settle it: the version that leads every other by two.
+        Normally that is ``buf`` and one fresh fetch agreeing with it. Once fetches have
+        disagreed it takes more, so a wrong body served twice cannot outvote a right one
+        served first. What no vote can catch is a server repeating one wrong answer --
+        ``buf`` and the fetch after it, or three fetches in a row. Versions are counted
+        by digest; only the leader's bytes are kept."""
+        votes = Counter({hashlib.sha256(buf).digest(): 1})
+        kept = {hashlib.sha256(buf).digest(): buf}
+        for _ in range(2 * REREAD_LIMIT):
             again = fetch(i)
             digest = hashlib.sha256(again).digest()
-            if digest in seen:
-                return again
-            seen.add(digest)
-        raise _CatError(f"no two reads at {plan[i][0]:,} ever agreed")
+            votes[digest] += 1
+            kept.setdefault(digest, again)
+            (lead, top), *rest = votes.most_common(2) + [(None, 0)]
+            if top - rest[0][1] >= 2:
+                return kept[lead]
+            leader = votes.most_common(1)[0][0]
+            kept = {d: b for d, b in kept.items() if d == leader or d == digest}
+        raise _CatError(f"the reads at {plan[i][0]:,} never settled on one version")
 
     written = data_offset
 
@@ -1615,8 +1640,7 @@ def _verified_member_bytes(concat, member, total, follows):
     # the index cannot name could be anyone's; an archive that ends at the member offers
     # nothing at all.
     at = plan[last][0]
-    tail_sure = (known and trailer(held) is not None
-                 and not any(_ambiguous(held[end - at:b - at]) for b in tail_cuts))
+    tail_sure = known and not any(_ambiguous(held[end - at:b - at]) for b in tail_cuts)
     if not (head_sure and tail_sure):
         sure = settle(last, held)
         if sure != held:
@@ -1687,6 +1711,20 @@ def cmd_archive_cat(args) -> int:
         return 2
     else:
         chosen = matches[0]
+
+    if row["state"] != "complete":
+        # A walk not yet finished can hold rows from a chain whose start nothing has
+        # confirmed -- one a cold scan began inside a tarball stored in the archive,
+        # listing that tarball's members as if they were the archive's own.
+        segment = next(s for s in store.segments(row["id"])
+                       if s["scan_from"] <= chosen["hdr_offset"]
+                       and (s["stop_at"] is None or chosen["hdr_offset"] < s["stop_at"]))
+        if not segment["joined"]:
+            print(f"error: {args.member!r} was found by a chain whose start is not yet "
+                  f"confirmed (segment {segment['idx']}); it may belong to a tar stored "
+                  f"inside the archive. Run `archive index` to finish the walk first.",
+                  file=sys.stderr)
+            return 1
 
     if chosen["type"] not in REGULAR_MEMBER_TYPES:
         print(f"error: {args.member!r} is not a regular file (type "

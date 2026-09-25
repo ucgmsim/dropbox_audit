@@ -547,8 +547,10 @@ class ArchiveStore:
         ``limit`` of them.
 
         A tar can hold a path twice (`tar -r` appends a newer copy), but a bad read that
-        is valid tar from elsewhere in the archive always makes one: it records that
-        other member's header, path and all, a second time.
+        is valid tar from elsewhere in the archive usually makes one: it records that
+        other member's header, path and all, a second time. Not always -- a member of a
+        tarball stored inside the archive, or a long-named member's header without its
+        long-name block, has a path recorded nowhere else.
         """
         return self.connect().execute(
             """SELECT m.* FROM members AS m
