@@ -1178,8 +1178,11 @@ def test_cat_on_a_partial_index_does_not_take_any_header_after_the_member_on_tru
     write_parts(source, build_tar(TWINS), part_size=len(build_tar(TWINS)))
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    # One-block windows: members leave the held-back window, and are committed, a few
+    # headers behind the walk -- so one batch of one is the first member alone.
     main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-          "--batch", "1", "--max-batches", "1"])
+          "--batch", "1", "--max-batches", "1", "--window-min", "1024",
+          "--window-max", "1024"])
     store = ArchiveStore(db)
     assert store.get("a.tar")["state"] == "walking"
     assert store.member_at(store.get("a.tar")["id"], _row(db, "run/r01/out.bin")["data_offset"]

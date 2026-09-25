@@ -299,11 +299,7 @@ def main() -> int:
                                    window_max=WINDOW_MAX)
                 readers.append(fresh_reader)
                 try:
-                    def rewind(offset):
-                        members[:] = [m for m in members if m.hdr_offset < offset]
-
-                    res = walk(fresh, at, lambda ms, nxt: members.extend(ms),
-                               rewind=rewind, stop_at=alive)
+                    res = walk(fresh, at, lambda ms, nxt: members.extend(ms), stop_at=alive)
                 except UnsettledRead as exc:
                     # The walker re-reads for itself now, and gives up only when reads
                     # will not agree -- a finding about the server, worth reporting.
