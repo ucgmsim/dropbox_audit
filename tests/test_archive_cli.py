@@ -960,3 +960,86 @@ def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
     monkeypatch.undo()
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
+
+
+def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(tmp_path, monkeypatch,
+                                                                  capsys):
+    """A path truly in the archive twice, and the audit's own read of one copy comes
+    back wrong. That is a disagreement between one read and the index, not a proof the
+    index is wrong -- the row is read once more before a whole segment (300 GiB, on the
+    archives this is for) is walked again."""
+    data = build_tar(MEMBERS + [("run/file05.bin", b"y" * 705)])
+    offsets = _header_offsets(data)
+    source = local_archive(tmp_path, data, part_size=len(data))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    made = []
+
+    def reader_for(row, archive_set, tokens=None, limiter=None):
+        reader = LocalRangeReader(row["folder"], archive_set)
+        made.append(reader)
+        if len(made) == 2:                  # the first reader walks, the second audits
+            real = reader.read_range
+
+            def once_wrong(part_idx, offset, length):
+                body = real(part_idx, offset, length)
+                if reader.requests == 1 and offset <= offsets[-1] < offset + length:
+                    cut = offsets[-1] - offset
+                    body = body[:cut] + b"\xff" * 512 + body[cut + 512:]
+                return body
+
+            reader.read_range = once_wrong
+        return reader
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] == "complete"
+    assert event_count(db, row["id"], "audit_repair") == 0
+    assert len(store.find_members(row["id"], "run/file05.bin")) == 2
+
+
+def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch, capsys):
+    """Review 5's K6. A well-formed bad read in segment 1: member 18's header read as
+    member 5's (same padded size, so the chain rejoins). The audit finds member 5's path
+    twice, reads the row afresh, and walks segment 1 again from its own confirmed start.
+    The audit's other tests use one part; this pins a repair in a later segment."""
+    members = [(f"run/f{i:02d}.bin", bytes([i]) * (2_900 + (i % 3) * 10)) for i in range(24)]
+    data = build_tar(members)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        infos = t.getmembers()
+    cut = infos[12].offset_data + 1_000
+    x, y = infos[18], infos[5]
+    copied = data[y.offset:y.offset + 512]
+    source = tmp_path / "parts"
+    source.mkdir()
+    (source / "a.tar.aa").write_bytes(data[:cut])
+    (source / "a.tar.ab").write_bytes(data[cut:])
+    state = {"done": False}
+
+    class OneWellFormedLie(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            true = super().read_range(part_idx, offset, length)
+            at = self.archive.parts[part_idx].offset + offset
+            # Segment 1 parses from the window its own cold scan filled, from the
+            # boundary rounded up to a block.
+            if (not state["done"] and at == -(-cut // 512) * 512
+                    and at <= x.offset and x.offset + 512 <= at + length):
+                state["done"] = True
+                k = x.offset - at
+                return true[:k] + copied + true[k + 512:]
+            return true
+
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: OneWellFormedLie(row["folder"], s))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert state["done"], "the test did not actually inject the bad read"
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] == "complete"
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
+    assert event_count(db, row["id"], "audit_repair") == 1
