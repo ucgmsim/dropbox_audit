@@ -699,9 +699,11 @@ class _Run:
         write is fine: SQLite serialises writers anyway.
 
         Only a commit that carries members is refused. An empty one buys nothing, so
-        refusing it cannot help the budget, and it costs: a cursor goes unwritten, and
-        the walk's confirming second read of a final verdict ends as a stop instead of
-        the verdict it went to fetch.
+        refusing it cannot help the budget, and it costs a cursor. A verdict the limit
+        cuts short -- the walk stops at the next member once it is reached, a verdict's
+        second reading too, and the commit that confirms a verdict carries the members
+        held back for it -- is read again, from where those members begin, on the next
+        run.
 
         Only a batch that carries members counts against the budget. A part lying
         wholly inside one member has no header of its own, so its chain crosses the
@@ -1051,8 +1053,11 @@ def _run_index(args, store, row) -> int:
             print(f"error: {row['name']} is stale; re-register it", file=sys.stderr)
             return 1
         again, ending = rechecked
+        further = (" -- a segment further back than the last --recheck, which ended the "
+                   "same way" if again["idx"] < ending["idx"] - 1 else "")
         print(f"{row['name']}: walking the chain again from offset {again['first_header']:,} "
-              f"(segment {again['idx']}; the walk had ended in segment {ending['idx']})")
+              f"(segment {again['idx']}; the walk had ended in segment {ending['idx']})"
+              f"{further}")
 
     workers = max(args.workers, 1)
     tokens = limiter = None
@@ -1946,7 +1951,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_idx.add_argument("--max-batches", type=int, default=0, help="stop early; 0 means no limit")
     p_idx.add_argument("--recheck", action="store_true",
                        help="ask a corrupt, truncated or unsupported verdict again: walk the "
-                            "chain again from the start of the segment before it")
+                            "chain again from the start of the segment before it -- and, "
+                            "asked again about the same verdict, a segment further back "
+                            "each time")
     p_idx.add_argument("--lock")
     p_idx.set_defaults(func=cmd_archive_index)
 

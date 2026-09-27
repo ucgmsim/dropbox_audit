@@ -1316,6 +1316,93 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
 
 
+def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
+        tmp_path, monkeypatch, capsys):
+    """Review 7's B2. The stored tarball a bad read sends segment 0 into fills the whole of
+    part 1, so the wrong start is handed on twice: segment 0 crosses at one of its
+    headers, and segment 1 at another. Walked again from segment 1's start, the chain
+    ends where it did. Asked again about that same verdict, --recheck goes a segment
+    further back -- to segment 0, where the bad read was -- and the archive is whole."""
+    inner = build_tar([(f"ginner/g{i:03d}.dat", bytes([i % 251]) * 600)
+                       for i in range(200)])
+    members = ([(f"run/f{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
+               + [("run/results.tar", inner)]
+               + [(f"run/z{i:02d}.bin", bytes([i]) * 700) for i in range(6)])
+    data = build_tar(members)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        stored = t.getmember("run/results.tar").offset_data
+    inner_headers = [stored + o for o in _header_offsets(inner)]
+    at = _header_offsets(data)[2]
+    wrong = _header_claiming(data, at, inner_headers[5] - at - 512)
+    source = tmp_path / "parts"
+    source.mkdir()
+    cuts = [0, inner_headers[40] + 700, inner_headers[150] + 700, len(data)]
+    for name, start, end in zip(("a.tar.aa", "a.tar.ab", "a.tar.ac"), cuts, cuts[1:]):
+        (source / name).write_bytes(data[start:end])
+    state = {"lie": True, "lied": 0}
+
+    class OneLie(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            true = super().read_range(part_idx, offset, length)
+            start = self.archive.parts[part_idx].offset + offset
+            if state["lie"] and not state["lied"] and start <= at and at + 512 <= start + length:
+                state["lied"] = 1
+                return true[:at - start] + wrong + true[at - start + 512:]
+            return true
+
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: OneLie(row["folder"], s))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    small = ["--workers", "1", "--window-min", "1024", "--window-max", "1024"]
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", *small]) == 1
+    assert state["lied"], "the test did not actually inject the bad read"
+    store = ArchiveStore(db)
+    segments = store.segments(store.get("a.tar")["id"])
+    assert [s["state"] for s in segments] == ["crossed", "crossed", "corrupt"]
+    assert {segments[1]["first_header"], segments[2]["first_header"]} <= set(inner_headers)
+    state["lie"] = False
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck",
+                 *small]) == 1
+    out = capsys.readouterr().out
+    assert "(segment 1; the walk had ended in segment 2)" in out
+    assert "further back" not in out
+    assert store.get("a.tar")["state"] == "corrupt"
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck",
+                 *small]) == 0
+    out = capsys.readouterr().out
+    assert "walking the chain again from offset 0 (segment 0;" in out
+    assert "further back" in out
+    assert store.get("a.tar")["state"] == "complete"
+    assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
+
+
+def test_recheck_scans_for_no_start_it_already_has(tmp_path, monkeypatch):
+    """Review 7's B4. The segment where the walk ended keeps the start it had, for the join
+    to check against the crossing into it: scanning for it again finds the same header,
+    and on v01p0 a part can begin 37 GiB before its first header."""
+    data = bytearray(build_tar(MEMBERS))
+    offsets = _header_offsets(bytes(data))
+    data[offsets[20]:offsets[20] + 1024] = bytes(range(256)) * 4
+    source = local_archive(tmp_path, bytes(data), part_size=4096)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    scans = []
+
+    def scan(concat, offset, *args, **kwargs):
+        scans.append(offset)
+        return find_chain_start(concat, offset, *args, **kwargs)
+
+    monkeypatch.setattr("dbaudit.cli.find_chain_start", scan)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert ArchiveStore(db).get("a.tar")["end_offset"] == offsets[20]
+    assert scans == []
+
+
 def test_recheck_is_refused_for_a_walk_that_only_stopped(tmp_path, capsys):
     """Review 6's #3. --recheck asks a verdict again; a walk that merely stopped reached
     none, and `index` alone resumes it. Accepted, it would throw away everything walked
