@@ -85,9 +85,9 @@ class ConcatFile:
         self._cache = b""
         self._cache_start = -1          # nothing cached: the first fetch uses window_min
         self._pos = 0
-        #: Fetches made so far. The walker stamps each header it reads with it, to know
-        #: which headers the latest fetches served -- what to read again to confirm a
-        #: verdict.
+        #: Fetches made so far. The walker stamps each header it reads with this, less the
+        #: fetches it made only to read one place again, to know which headers its own
+        #: latest fetches served -- what to hold back and read again to confirm a verdict.
         self.fills = 0
 
     def tell(self) -> int:

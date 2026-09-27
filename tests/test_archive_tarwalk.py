@@ -1277,7 +1277,8 @@ def test_giving_up_on_a_member_after_a_g_header_keeps_the_cursor_before_the_g(tm
 # it is the fill that served the wrong header, so that is what is read again: every final
 # verdict, and every crossing, is re-walked from the start of the last fills that served a
 # header. Where the two readings part, a third read of that header settles which was
-# right, and the rows past it that the wrong one recorded are dropped (`rewind`).
+# right. (Review 6 replaced dropping the wrong reading's rows with never committing them:
+# the members of those fills are held back until two readings agree.)
 
 
 class _Rows:
@@ -1873,7 +1874,7 @@ def test_a_second_reading_that_moves_a_sparse_member_is_outvoted(tmp_path):
     assert reader.covering == 3, "one read per pass, and one to break the tie"
 
 
-# ---- review 6: nothing read once is committed; what a proven-bad fetch served is re-read
+# ---- review 6: the last fetches' members are held back; a proven-bad fetch's are re-read
 
 class _LiesThenFails(_LiesOnce):
     """`_LiesOnce`, and then, once ``armed``, a fetch that fails for good -- as five 429s
@@ -2100,3 +2101,201 @@ def test_a_landing_that_reads_two_more_fetches_of_real_headers_is_read_back_past
     assert reader.lied == 1, "the test did not actually inject the bad read"
     assert result.state == "complete", result.detail
     assert rows.names() == _names_of(members)
+
+
+# ---- review 7: every pass that goes against the one before it counts --------------------
+
+@pytest.mark.parametrize("settles_on", ["another member", "no member"])
+def test_a_header_that_flips_from_pass_to_pass_gives_up_rather_than_loop(tmp_path,
+                                                                         settles_on):
+    """Review 7's B1. The server serves member 20's header one way on one pass and another
+    way on the next, each version holding for the whole pass, tie-break included. Where
+    each version leads it serves a pax header, and a read starting there finds none. So
+    each pass goes against the one before it at 20, then is caught reading wrongly where
+    the other never read, and ends `rescued`, with no verdict to compare. Rescued passes
+    were never counted, so the walk read those places forever. A pass that goes against
+    the one before it is a disagreement, whether it reaches a verdict or not -- and
+    whether the tie-break takes it to another member or, as fresh reads that find
+    nothing there would, to none."""
+    data = build_tar(MEMBERS)
+    offsets = _header_offsets(data)
+    flip, lands_a, lands_b = offsets[20], offsets[21], offsets[23]
+    version_b = _header_with_size(data, flip, lands_b - flip - 512)
+    suspect = _pax_tar([("elsewhere/p.dat", b"q" * 10, {"mtime": "1700000000.5"})])[:1536]
+    assert suspect[156:157] == b"x"
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    state = {"flipped": False, "passes": 1, "fetches": 0}
+
+    class Flipping(ConcatFile):
+        def drop_cache(self, keep_window=False):
+            if keep_window:                 # the walk starting its next pass
+                state["flipped"] = not state["flipped"]
+                state["passes"] += 1
+            super().drop_cache(keep_window)
+
+    class Reader(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            state["fetches"] += 1
+            if state["fetches"] > 500:
+                raise RuntimeError("still reading: the walk is going round in circles")
+            got = bytearray(super().read_range(part_idx, offset, length))
+            start = self.archive.parts[part_idx].offset + offset
+            if state["flipped"] and start <= flip and flip + 512 <= start + length:
+                nothing = settles_on == "no member" and start == flip
+                got[flip - start:flip - start + 512] = JUNK * 2 if nothing else version_b
+            for at in (lands_a, lands_b):
+                if start < at and at + len(suspect) <= start + length:
+                    got[at - start:at - start + len(suspect)] = suspect
+            return bytes(got)
+
+    rows = _Rows()
+    with pytest.raises(UnsettledRead, match="kept contradicting") as raised:
+        walk(Flipping(archive, Reader(tmp_path, archive), window_min=8192,
+                      window_max=8192), 0, rows.commit)
+    # The first pass, and one going against the one before it for each of REREAD_LIMIT + 1.
+    assert state["passes"] == REREAD_LIMIT + 2
+    assert (f"the last pass was cut short at {lands_a}, where a fresh read contradicted it"
+            in str(raised.value))
+    assert rows.consistent() and rows.cursor <= flip
+
+
+# ---- review 7: what is held back costs no more than it must ------------------------------
+
+def _dense(count=600, where="run"):
+    return [(f"{where}/s{i:05d}.bin", b"s" * 100) for i in range(count)]
+
+
+def test_no_commit_carries_more_than_a_batch(tmp_path):
+    """Review 7's B3. In a run of small members one fetch serves hundreds of headers, and
+    they leave the held-back window together; and once a verdict's two readings agree,
+    everything held back is committed at once. Neither may pass `batch_size` in one
+    transaction: `--batch` is what bounds one, and `--max-batches` counts them."""
+    members = _dense()
+    data = build_tar(members)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive), window_min=65536,
+                             window_max=65536), 0, rows.commit, batch_size=50)
+
+    assert result.state == "complete"
+    assert rows.names() == _names_of(members)
+    assert max(len(offsets) for _, offsets, _ in rows.calls) == 50
+    headers = _header_offsets(data) + [_terminator(data)]
+    for _, offsets, cursor in rows.calls:
+        # Each commit's cursor is where the first member it did not carry begins.
+        assert cursor == (headers[headers.index(offsets[-1]) + 1] if offsets else cursor)
+
+
+def test_a_crossing_or_a_stop_anywhere_in_a_dense_run_commits_no_more_than_a_batch(
+        tmp_path):
+    """A crossing or a stop ends the pass on the member that reaches the boundary, or the
+    one read when the stop came. When that member is the first a new fetch served, a whole
+    fetch's worth leaves the held-back window with it, and the pass's last commit carries
+    them: it too goes a batch at a time."""
+    members = _dense()
+    data = build_tar(members)
+    headers = _header_offsets(data)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+
+    def fresh():
+        return ConcatFile(archive, LocalRangeReader(tmp_path, archive), window_min=65536,
+                          window_max=65536)
+
+    largest = set()
+    for stop_at in headers[300:400]:
+        rows = _Rows()
+        result = walk(fresh(), 0, rows.commit, batch_size=10, stop_at=stop_at)
+        assert (result.state, result.end_offset) == ("crossed", stop_at)
+        assert rows.names() == _names_of(members[:headers.index(stop_at)])
+        largest.add(max(len(offsets) for _, offsets, _ in rows.calls))
+    for when in range(300, 400):
+        rows, checks = _Rows(), iter(range(10**6))
+        result = walk(fresh(), 0, rows.commit, batch_size=10,
+                      should_stop=lambda: next(checks) == when)
+        assert result.state == "stopped" and rows.consistent()
+        largest.add(max(len(offsets) for _, offsets, _ in rows.calls))
+    assert largest == {10}
+
+
+@pytest.mark.parametrize("refused", range(1, 30))
+def test_a_commit_refused_anywhere_in_a_dense_run_resumes_exactly(tmp_path, refused):
+    """Committed a batch at a time, the members of an agreeing second reading carry the
+    cursor of the next one in each commit. Refuse any one commit and resume from the
+    cursor the store holds: nothing lost, nothing repeated."""
+    members = _dense()
+    data = build_tar(members)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    rows, calls = _Rows(), {"n": 0}
+
+    def commit(batch, next_offset):
+        calls["n"] += 1
+        if calls["n"] == refused:
+            raise RuntimeError("simulated: the store refused this commit")
+        rows.commit(batch, next_offset)
+
+    def fresh():
+        return ConcatFile(archive, LocalRangeReader(tmp_path, archive), window_min=65536,
+                          window_max=65536)
+
+    try:
+        walk(fresh(), 0, commit, batch_size=50)
+    except RuntimeError:
+        assert rows.cursor is None or rows.consistent()
+        walk(fresh(), rows.cursor or 0, rows.commit, batch_size=50)
+    assert rows.names() == _names_of(members)
+
+
+def test_a_second_reading_is_not_handed_the_members_the_first_one_held_back(tmp_path,
+                                                                           monkeypatch):
+    """Review 7's B3. The second reading compares each header with the first reading's --
+    for which it needs where each member begins and how it read, not the members: those
+    it commits are its own. In a dense run the first reading holds back tens of
+    thousands, and every chain in the pool keeps them while it reads them again."""
+    import gc
+
+    import dbaudit.archive.tarwalk as tarwalk
+
+    data = build_tar(_dense(where="run/held"))
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    alive = []
+    original = tarwalk._walk_chain
+
+    def counting(*args, **kwargs):
+        alive.append(sum(isinstance(o, tarwalk.Member) and o.dir == "run/held"
+                         for o in gc.get_objects()))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tarwalk, "_walk_chain", counting)
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive), window_min=65536,
+                             window_max=65536), 0, lambda members, offset: None)
+
+    assert result.state == "complete"
+    assert alive == [0, 0]
+    assert hasattr(tarwalk.Member, "__slots__"), "and each one carries no dict of its own"
+
+
+def test_a_second_reading_lets_go_of_the_first_as_it_passes_it(tmp_path, monkeypatch):
+    """Review 7's B3. Each header sequence is compared once, so the second reading drops
+    the first reading's version of each as it passes it: the two readings' held-back
+    windows are never both held whole."""
+    import dbaudit.archive.tarwalk as tarwalk
+
+    data = build_tar(_dense())
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    handed = []
+    original = tarwalk._walk_chain
+
+    def keeping(*args):
+        handed.append((args[-1], len(args[-1])))
+        return original(*args)
+
+    monkeypatch.setattr(tarwalk, "_walk_chain", keeping)
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive), window_min=65536,
+                             window_max=65536), 0, lambda members, offset: None)
+
+    assert result.state == "complete"
+    (_, none), (versions, compared) = handed
+    assert none == 0 and compared > 100
+    # All but the terminator's: where the pass ends, it reads no member to compare.
+    assert list(versions) == [_terminator(data)]

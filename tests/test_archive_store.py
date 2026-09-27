@@ -478,8 +478,10 @@ def test_recheck_walks_again_from_the_segment_before_the_verdict(tmp_path):
     """The segment where the walk ended was handed its start by the crossing out of the
     one before; a derailed chain can cross at a wrong header that re-reading agrees with.
     So the chain is walked again from that earlier segment's own confirmed start; the
-    segment where it ended is scanned afresh, to be joined like any other; and every
-    segment after it waits, `beyond`, for the chain to cross that far."""
+    segment where it ended keeps its start, but no longer joined -- the join checks it
+    against the crossing, and scanning for it again would find the same header at a
+    cost with no bound; and every segment after it waits, `beyond`, for the chain to
+    cross that far."""
     store, archive_id = _ended_in_segment_2(tmp_path)
 
     again, ending = store.recheck(archive_id)
@@ -492,7 +494,7 @@ def test_recheck_walks_again_from_the_segment_before_the_verdict(tmp_path):
             rows[1]["cursor_offset"], rows[1]["exit_offset"]) == ("pending", 120, 1, None,
                                                                   None)
     assert (rows[2]["state"], rows[2]["first_header"], rows[2]["joined"],
-            rows[2]["cursor_offset"], rows[2]["members"]) == ("pending", None, 0, None, 0)
+            rows[2]["cursor_offset"], rows[2]["members"]) == ("pending", 210, 0, None, 0)
     for later in rows[3:]:
         assert (later["state"], later["first_header"], later["joined"],
                 later["cursor_offset"], later["members"]) == ("beyond", None, 0, None, 0)
@@ -502,6 +504,68 @@ def test_recheck_walks_again_from_the_segment_before_the_verdict(tmp_path):
     [event] = store.query("SELECT detail FROM events WHERE archive_id=? AND kind='recheck'",
                           (archive_id,))
     assert "corrupt" in event["detail"] and "junk at 280" in event["detail"]
+
+
+def _walked_again_to_the_same_verdict(store, archive_id):
+    """What walking segments 1 and 2 of `_ended_in_segment_2` again, from the same starts,
+    leaves: the same crossing, the same rows, the same `corrupt` at 280."""
+    segments = store.segments(archive_id)
+    store.commit_batch(archive_id, segments[1]["id"], [member(120), member(150)], 210)
+    store.finish_segment(segments[1]["id"], WalkResult("crossed", 210, 2))
+    store.commit_batch(archive_id, segments[2]["id"], [member(210)], 280)
+    store.finish_segment(segments[2]["id"], WalkResult("corrupt", 280, 1, "junk at 280"))
+    store.mark_joined(segments[2]["id"])
+    store.finish(archive_id, WalkResult("corrupt", 280, 4, "junk at 280"))
+
+
+def test_a_recheck_that_reaches_the_same_verdict_steps_one_segment_further_back(tmp_path):
+    """Review 7's B2. Walked again from segment 1's start, the chain ends where it did --
+    which says nothing about segment 1's start itself: a stored tarball that fills a
+    whole part hands a wrong one across two boundaries. So asking again about the same
+    verdict walks one segment further back each time, down to segment 0, whose start
+    nobody hands it."""
+    store, archive_id = _ended_in_segment_2(tmp_path)
+    assert store.recheck(archive_id)[0]["idx"] == 1
+    _walked_again_to_the_same_verdict(store, archive_id)
+
+    again, ending = store.recheck(archive_id)
+
+    assert (again["idx"], ending["idx"]) == (0, 2)
+    assert store.query_members(archive_id) == []
+    rows = store.segments(archive_id)
+    assert (rows[0]["state"], rows[0]["first_header"], rows[0]["joined"]) == (
+        "pending", 0, 1)
+    # Walked again, and joined to the chain again, from where they began.
+    assert [(r["state"], r["first_header"], r["joined"], r["members"])
+            for r in rows[1:3]] == [("pending", 120, 0, 0), ("pending", 210, 0, 0)]
+    assert [r["state"] for r in rows[3:]] == ["beyond", "beyond"]
+    assert store.get("a.tar")["cursor_offset"] == 0
+    [_, event] = store.query("SELECT detail FROM events WHERE archive_id=? AND "
+                             "kind='recheck' ORDER BY rowid", (archive_id,))
+    assert "further back" in event["detail"]
+
+    _walked_again_to_the_same_verdict(store, archive_id)
+    store.commit_batch(archive_id, store.segments(archive_id)[0]["id"], [member(0)], 120)
+    assert store.recheck(archive_id)[0]["idx"] == 0          # there is nothing further back
+
+
+def test_a_recheck_that_reaches_another_verdict_starts_again_from_the_segment_before_it(
+        tmp_path):
+    """The step back is for a verdict that came back the same. One that changed -- here, the
+    chain now ends in segment 2 somewhere else -- is asked again from segment 1, as a
+    first recheck would."""
+    store, archive_id = _ended_in_segment_2(tmp_path)
+    store.recheck(archive_id)
+    segments = store.segments(archive_id)
+    store.commit_batch(archive_id, segments[1]["id"], [member(120), member(150)], 210)
+    store.finish_segment(segments[1]["id"], WalkResult("crossed", 210, 2))
+    store.commit_batch(archive_id, segments[2]["id"], [member(210), member(250)], 290)
+    store.finish_segment(segments[2]["id"], WalkResult("corrupt", 290, 2, "junk at 290"))
+    store.finish(archive_id, WalkResult("corrupt", 290, 4, "junk at 290"))
+
+    again, ending = store.recheck(archive_id)
+
+    assert (again["idx"], ending["idx"]) == (1, 2)
 
 
 def test_a_recheck_of_segment_0_walks_it_again_from_offset_0(tmp_path):

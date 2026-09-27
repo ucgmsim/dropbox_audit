@@ -14,6 +14,7 @@ Task 7 reconciles where each chain actually starts and ends.
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 import threading
 import time
@@ -718,37 +719,41 @@ class ArchiveStore:
             raise
 
     def recheck(self, archive_id):
-        """Walk again, from a confirmed start, the segment before the one where the walk
-        ended, and from there the rest of the chain. Returns (the segment walked again,
-        the segment where the walk had ended), or None for a `stale` archive, which only
-        `register` may lift.
+        """Walk the chain again, from a confirmed start before the segment where the walk
+        ended, and from there on. Returns (the segment walked again from, the segment
+        where the walk had ended), or None for a `stale` archive, which only `register`
+        may lift.
 
         The way back from a verdict reached wrongly. The walker reads a verdict again
         from the last fetches that led to it, but a bad read can send a chain onto real
         headers -- a tarball stored inside the archive -- for longer than that, and there
         the verdict repeats however often it is read. Walking the chain again from a
         start confirmed before the bad read reads the header that went wrong a second
-        time -- if the bad read was in that segment or the next; one further back needs
-        --recheck again. A genuinely damaged archive reaches its verdict again.
+        time. A genuinely damaged archive reaches its verdict again.
 
         The segment where the walk ended is the first one, in order, that the chain did
         not cross. Its start was handed to it by the crossing out of the segment before --
         and a derailed chain can cross at a real header of a stored tarball, where
-        re-reading the crossing agrees -- so that segment is walked again too, from its
-        own start. (Segment 0's start, offset 0, needs no one to confirm it.) Rows go from
-        there on. The segment where the walk ended goes back to how `seed_segments` left
-        it, to be scanned and walked alongside and joined to the chain as any other.
-        Every segment after it is left `beyond`, so the pool does not walk them: a
-        genuine verdict would only retire them again, and if the chain now crosses where
-        the walk had ended, `_join` puts them all back to be walked.
-        One transaction, like `reset_segment`: a crash half-way would leave rows from
-        chains nobody will walk again.
+        re-reading the crossing agrees -- so the chain is walked again from that segment's
+        own start. And if that reaches the same verdict (the same segment, state and
+        offset) the next recheck goes one segment further back, and so on down to segment
+        0, whose start, offset 0, nobody hands it: a stored tarball that fills a whole part
+        hands a wrong start across two boundaries.
+
+        Rows go from the segment walked again onwards. The segments after it, up to where
+        the walk ended, keep their starts but no longer count as joined: the join checks
+        each against the crossing into it, and a scan for it again would find the same
+        header, at a cost with no bound. Every segment after the one where the walk ended
+        is left `beyond`, so the pool does not walk them: a genuine verdict would only
+        retire them again, and if the chain now crosses where the walk had ended, `_join`
+        puts them all back to be walked. One transaction, like `reset_segment`: a crash
+        half-way would leave rows from chains nobody will walk again.
         """
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             archive = conn.execute(
-                "SELECT state, detail, error FROM archives WHERE id=?",
+                "SELECT state, detail, error, end_offset FROM archives WHERE id=?",
                 (archive_id,)).fetchone()
             if archive["state"] == "stale":
                 conn.execute("ROLLBACK")
@@ -758,7 +763,12 @@ class ArchiveStore:
                 (archive_id,)).fetchall()
             # The last segment has no stop_at, so it never crosses: there is always one.
             ending = next(s for s in segments if s["state"] != "crossed")
-            again = segments[max(ending["idx"] - 1, 0)]
+            verdict = [ending["idx"], archive["state"], archive["end_offset"]]
+            key = f"recheck:{archive_id}"
+            last = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            last = json.loads(last["value"]) if last else None
+            repeated = last is not None and last["verdict"] == verdict
+            again = segments[max((last["from"] if repeated else ending["idx"]) - 1, 0)]
             for segment in segments:
                 if segment["idx"] >= again["idx"]:
                     self.drop_members_between(archive_id, segment["scan_from"],
@@ -769,21 +779,30 @@ class ArchiveStore:
                    WHERE id=?""",
                 (again["id"],))
             conn.execute(
+                """UPDATE segments SET cursor_offset=NULL, exit_offset=NULL, detail=NULL,
+                       error=NULL, owner=NULL, members=0, state='pending', joined=0
+                   WHERE archive_id=? AND idx>? AND idx<=?""",
+                (archive_id, again["idx"], ending["idx"]))
+            conn.execute(
                 """UPDATE segments SET first_header=NULL, cursor_offset=NULL,
                        exit_offset=NULL, detail=NULL, error=NULL, owner=NULL, members=0,
-                       state=CASE WHEN idx=? THEN 'pending' ELSE 'beyond' END, joined=0
+                       state='beyond', joined=0
                    WHERE archive_id=? AND idx>?""",
-                (ending["idx"], archive_id, again["idx"]))
+                (archive_id, ending["idx"]))
             conn.execute(
                 """UPDATE archives SET state='registered', detail=NULL, error=NULL,
                        end_offset=NULL, finished_at=NULL, cursor_offset=?
                    WHERE id=?""",
                 (again["first_header"] or 0, archive_id))
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                         (key, json.dumps({"from": again["idx"], "verdict": verdict})))
+            further = (" -- one segment further back than the last recheck, which ended "
+                       "the same way" if repeated else "")
             self.log_event(
                 archive_id, "recheck",
                 f"segment {again['idx']} walked again from {again['first_header']}, then "
-                f"on: the walk had ended {archive['state']} in segment {ending['idx']}: "
-                f"{archive['detail'] or archive['error'] or ''}")
+                f"on{further}: the walk had ended {archive['state']} in segment "
+                f"{ending['idx']}: {archive['detail'] or archive['error'] or ''}")
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
