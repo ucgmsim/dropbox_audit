@@ -2299,3 +2299,186 @@ def test_a_second_reading_lets_go_of_the_first_as_it_passes_it(tmp_path, monkeyp
     assert none == 0 and compared > 100
     # All but the terminator's: where the pass ends, it reads no member to compare.
     assert list(versions) == [_terminator(data)]
+
+
+# ---- review 8: the window ages by how far the walk moves on, not by what it re-reads ---
+
+def _uncopied_long_names(count):
+    """``count`` small members with GNU long names, from a writer that does not copy the
+    start of the name into the header after the name's blocks -- which `_settled`
+    accepts, at the cost of one more read each."""
+    data = bytearray(build_tar([("run/" + "d" * 120 + f"/f{i:05d}.dat", b"z" * 100)
+                                for i in range(count)]))
+    with tarfile.open(fileobj=io.BytesIO(bytes(data)), mode="r:") as t:
+        reals = [m.offset_data - 512 for m in t]
+    for real in reals:
+        block = data[real:real + 512]
+        block[0:100] = b"elsewhere".ljust(100, b"\0")
+        block[148:156] = b" " * 8
+        block[148:156] = b"%06o\0 " % sum(block)
+        data[real:real + 512] = block
+    return bytes(data)
+
+
+def test_a_run_of_members_each_read_twice_still_commits_as_it_goes(tmp_path, monkeypatch):
+    """Review 8's #1. A member that needs a second read costs a fetch of its own, and the
+    walk goes on reading the headers after it out of that fetch. Those re-reading fetches
+    are not the walk's own, so the headers read from them never counted as moving on: in a
+    run of such members the held-back window never aged. Nothing was committed until the
+    verdict -- a stop or a crash walked the run again from its start -- and the verdict's
+    second reading read every member of it twice again. How far the walk has read decides
+    what it holds back, whichever fetch the headers came out of."""
+    import dbaudit.archive.tarwalk as tarwalk
+
+    count = 2000
+    data = _uncopied_long_names(count)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = LocalRangeReader(tmp_path, archive)
+    rows, held = _Rows(), []
+    original = tarwalk._walk_chain
+
+    def recording(*args):
+        this = original(*args)
+        held.append((len(rows.rows), len(this.window)))
+        return this
+
+    monkeypatch.setattr(tarwalk, "_walk_chain", recording)
+    result = walk(ConcatFile(archive, reader), 0, rows.commit)
+
+    assert result.state == "complete"
+    assert len(rows.rows) == count
+    (committed, held_back), _ = held
+    assert held_back < count // 10, "the first reading held the whole run back"
+    assert committed + held_back == count
+    # A read of each member, once more for each one held back, and a handful of the walk's.
+    assert reader.requests < count * 11 // 10
+
+
+def test_a_server_that_lies_about_most_headers_is_given_up_on(tmp_path, monkeypatch):
+    """Review 8's #2. The server serves a pax header in place of every header a read does
+    not start at -- as a first read of each does not -- and the truth to a read that
+    starts there, as a re-read does. So every pass ends `rescued` one member further on,
+    having read every member it held back again: 601 passes and 181,499 requests for a
+    0.9 MiB archive. Rescues one after another inside one held-back window, with nothing
+    committed in between, are a server lying too often to walk through, and count."""
+    import dbaudit.archive.tarwalk as tarwalk
+
+    data = build_tar([(f"d/f{i:06d}", b"z" * 1000) for i in range(200)])
+    offsets = _header_offsets(data)
+    suspect = _pax_tar([("elsewhere/p.dat", b"", {"mtime": "1700000000.5"})])[:1536]
+    assert suspect[156:157] == b"x"
+    archive = write_parts(tmp_path, data, part_size=len(data))
+
+    class LiesUnlessAskedThere(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            got = bytearray(super().read_range(part_idx, offset, length))
+            start = self.archive.parts[part_idx].offset + offset
+            for at in offsets:
+                if start < at and at + len(suspect) <= start + length:
+                    got[at - start:at - start + len(suspect)] = suspect
+            return bytes(got)
+
+    passes = []
+    original = tarwalk._walk_chain
+    monkeypatch.setattr(tarwalk, "_walk_chain",
+                        lambda *args: passes.append(1) or original(*args))
+    reader = LiesUnlessAskedThere(tmp_path, archive)
+    rows = _Rows()
+
+    with pytest.raises(UnsettledRead, match="was cut short"):
+        walk(ConcatFile(archive, reader, window_min=65536, window_max=65536), 0,
+             rows.commit)
+    # The first pass, and REREAD_LIMIT + 1 rescued one after another with nothing between.
+    assert len(passes) == REREAD_LIMIT + 2
+    assert reader.requests < 30
+    assert rows.consistent()
+
+
+def test_a_header_sequence_two_fetches_serve_counts_as_two(tmp_path, monkeypatch):
+    """A long name's blocks and the header after them can take two fetches of a small
+    window, and both are the walk's own. Counted as one, the walk holds back a fetch more
+    than it says -- and reads it again, at a request's cost, before every verdict."""
+    import dbaudit.archive.tarwalk as tarwalk
+
+    members = [("run/a.bin", b"a" * 100), ("run/" + "d" * 120 + "/b.bin", b"b" * 100),
+               ("run/c.bin", b"c" * 100)]
+    data = build_tar(members)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    held = []
+    original = tarwalk._walk_chain
+
+    def recording(*args):
+        this = original(*args)
+        held.append([member.name for _, _, member in this.window])
+        return this
+
+    monkeypatch.setattr(tarwalk, "_walk_chain", recording)
+    result = walk(ConcatFile(archive, LocalRangeReader(tmp_path, archive), window_min=1024,
+                             window_max=1024), 0, lambda members, offset: None)
+
+    assert result.state == "complete"
+    # The last three fetches: two for b.bin's header sequence, one for c.bin's.
+    assert held[0] == ["b.bin", "c.bin"]
+
+
+def test_reading_on_out_of_re_reads_fetches_moves_on_a_fetch_at_a_time(tmp_path):
+    """Review 6's #4 case, one stored member longer: the wrong header lands in a stored
+    tarball whose members each take a re-read, and the walk reads on out of those re-reads'
+    fetches through four of them before the verdict. That is a fetch's worth of reading on,
+    not four: counted a header at a time, the fetch that served the wrong header left what
+    is read again first, and the verdict stood."""
+    inner = build_tar([("ginner/" + "d" * 110 + f"/g{i:02d}.dat", bytes([i]) * 600)
+                       for i in range(5)])
+    with tarfile.open(fileobj=io.BytesIO(inner), mode="r:") as t:
+        sequences = [m.offset for m in t]
+        reals = [m.offset_data - 512 for m in t]
+    for real in reals:                              # a writer that does not copy the name
+        inner = _with_field(inner, real, 0, 100, b"elsewhere")
+    members = [("run/a.bin", b"a" * 3000), ("run/b.bin", b"b" * 3000),
+               ("run/results.tar", inner), ("run/z.bin", b"z" * 3000)]
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
+        stored = t.getmember("run/results.tar").offset_data
+    at = offsets[1]
+    wrong = _header_with_size(data, at, stored + sequences[1] - at - 512)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    reader = _LiesOnce(tmp_path, archive, at, fill=wrong, span=512)
+    rows = _Rows()
+
+    result = walk(ConcatFile(archive, reader, window_min=4096, window_max=4096), 0,
+                  rows.commit)
+
+    assert reader.lied == 1, "the test did not actually inject the bad read"
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(members)
+
+
+def test_a_verdict_reached_after_rescues_does_not_count_as_one(tmp_path):
+    """Rescues one after another count toward REREAD_LIMIT; the pass that then walks on to
+    the verdict was not cut short, and does not. Here REREAD_LIMIT + 1 headers in a row
+    read wrongly unless read from exactly where they begin: the first rescue is the walk's
+    first reading, the rest count, and the archive is still read to its end."""
+    members = [(f"run/m{i:02d}.bin", bytes([i]) * 1000) for i in range(30)]
+    data = build_tar(members)
+    offsets = _header_offsets(data)
+    lying = offsets[20:20 + REREAD_LIMIT + 1]
+    suspect = _pax_tar([("elsewhere/p.dat", b"", {"mtime": "1700000000.5"})])[:1536]
+    archive = write_parts(tmp_path, data, part_size=len(data))
+
+    class LiesUnlessAskedThere(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            got = bytearray(super().read_range(part_idx, offset, length))
+            start = self.archive.parts[part_idx].offset + offset
+            for at in lying:
+                if start < at and at + len(suspect) <= start + length:
+                    got[at - start:at - start + len(suspect)] = suspect
+            return bytes(got)
+
+    rows = _Rows()
+    result = walk(ConcatFile(archive, LiesUnlessAskedThere(tmp_path, archive),
+                             window_min=65536, window_max=65536), 0, rows.commit)
+
+    assert result.state == "complete", result.detail
+    assert rows.names() == _names_of(members)
+    assert all(f"{at}" in result.detail for at in lying), "each one was a rescue"

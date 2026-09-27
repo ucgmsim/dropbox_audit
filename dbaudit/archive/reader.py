@@ -85,9 +85,9 @@ class ConcatFile:
         self._cache = b""
         self._cache_start = -1          # nothing cached: the first fetch uses window_min
         self._pos = 0
-        #: Fetches made so far. The walker stamps each header it reads with this, less the
-        #: fetches it made only to read one place again, to know which headers its own
-        #: latest fetches served -- what to hold back and read again to confirm a verdict.
+        #: Fetches made so far. The walker tells from this, less the fetches it made only to
+        #: read one place again, when a fetch of its own served a header -- part of how it
+        #: knows which headers to hold back and read again to confirm a verdict.
         self.fills = 0
 
     def tell(self) -> int:
@@ -126,6 +126,10 @@ class ConcatFile:
         data = self._cache[start:start + (end - self._pos)]
         self._pos += len(data)
         return data
+
+    def cached(self) -> tuple[int, int]:
+        """The stretch of the archive the last fetch holds: (start, end), empty if none."""
+        return self._cache_start, self._cache_start + len(self._cache)
 
     def drop_cache(self, keep_window: bool = False) -> None:
         """Forget the fetched window, so the next read asks the server again.
