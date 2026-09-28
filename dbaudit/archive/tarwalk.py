@@ -38,15 +38,17 @@ _RAN_OUT = frozenset({"unexpected end of data", "empty header", "truncated heade
 #: member recorded -- and where it lands can be a real header too, inside a stored tarball,
 #: whose own fetches serve more members before the verdict comes. Fetches count by how
 #: far the walk reads on: one that only re-reads one place to settle it is not the walk
-#: moving on, but reading on out of it, past the walk's latest, is. A bad read that sends
-#: the walk over real headers for longer than this -- a large stored tarball of small
-#: members -- still reaches a false verdict, loudly; `archive index --recheck` walks the
-#: chain there again, from a segment further back each time the same verdict comes back.
+#: moving on, nor is fetching again what that took out of the cache, but reading on out
+#: of it, past what was counted, is. A bad read that sends the walk over real headers for
+#: longer than this -- a large stored tarball of small members -- still reaches a false
+#: verdict, loudly; `archive index --recheck` walks the chain there again, from a segment
+#: further back each time the same verdict comes back.
 CONFIRM_FILLS = 3
 
 #: How many times a walk will accept a second reading of its verdict that disagrees with the
-#: first before it gives up and raises UnsettledRead. A bad read is rare and independent; a
-#: bad archive is neither, so a verdict that keeps changing is the server, not the archive.
+#: first before it gives up and raises UnsettledRead -- and how many passes in a row it lets
+#: be cut short with nothing more committed. A bad read is rare and independent; a bad
+#: archive is neither, so a verdict that keeps changing is the server, not the archive.
 REREAD_LIMIT = 3
 
 #: What a pass that crossed its boundary, or was stopped, read where it ended: nothing.
@@ -129,8 +131,8 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     before it is a change, whether it reaches another verdict or a tie-break takes it off
     that one's path; a confirmed pax header raises UnsupportedArchive. A first reading
     that `_settled` catches wrong mid-walk proves its fetch bad, and the headers that
-    fetch served before it are read again the same way -- and a pass cut short like that
-    again, with nothing more committed, counts as a change too.
+    fetch served before it are read again the same way; more than REREAD_LIMIT passes in
+    a row cut short like that, with nothing more committed, raise UnsettledRead too.
 
     ``commit`` is expected to write the members and the cursor in one transaction, so
     that an interrupted walk resumes from exactly the last committed offset. The cursor
@@ -169,7 +171,7 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     #
     # A verdict is its state, the offset it names and where the walk stopped reading
     # headers -- not its wording -- and the first of two agreeing readings is reported.
-    position, seen, rescued, disagreements = start_offset, 0, [], 0
+    position, seen, rescued, disagreements, stalled = start_offset, 0, [], 0, 0
     prior, versions = None, {}      # the pass being read again, and how it read each place
     while True:
         this = _walk_chain(concat, position, commit, batch_size, stop_at, should_stop,
@@ -188,15 +190,20 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
                 disagreements += 1
                 if not this.diverged:
                     rescued.append(this.vpos)   # the two readings parted here
-            elif this.diverged or (result.state == "rescued"
-                                   and this.held_from <= prior.held_from):
+            elif this.diverged:
                 # No two verdicts to compare, but it went against the pass before it all
-                # the same -- or was cut short again with nothing committed in between.
-                # Uncounted, a header that reads one way on one pass and the other way on
-                # the next is read again forever, and a server that lies about most
-                # headers is walked one member a pass, each reading all held back again.
+                # the same. Uncounted, a header that reads one way on one pass and the
+                # other way on the next is read again forever.
                 disagreements += 1
-            if disagreements > REREAD_LIMIT:
+            # Cut short again with nothing more committed: uncounted, a server that lies
+            # about most headers is walked one member a pass, each reading all held back
+            # again. Only a run of these counts -- a pass that moves the cursor on ends
+            # it -- so a transient here and another far away are not added up.
+            if this.held_from > prior.held_from:
+                stalled = 0
+            elif result.state == "rescued":
+                stalled += 1
+            if disagreements > REREAD_LIMIT or stalled > REREAD_LIMIT:
                 where = ", ".join(str(o) for o in dict.fromkeys(rescued))
                 last = (f"was cut short at {result.end_offset}, where a fresh read "
                         f"contradicted it" if result.state == "rescued" else
@@ -305,11 +312,14 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
             return lambda n: WalkResult("truncated", total, n, how)
         return lambda n: WalkResult("corrupt", before, n, f"{how} after the header at {before}")
 
-    # How far the walk has read, in fetches: the stamp each header gets. A header a fetch of
-    # the walk's own served starts a new one. So does one past what the latest held, read
-    # out of the fetch a re-read left: re-reading one place is not the walk moving on, but
-    # reading on out of that fetch is, just as out of the one the walk would have made.
-    stamp, own, lo, hi = 0, concat.fills, 0, 0
+    # How far the walk has read, in fetches: the stamp each header gets, and ``reach``, where
+    # what the fetches counted so far hold ends. A header sequence the walk's own fetches
+    # served counts them -- unless it ends inside what was counted: a re-read took that out
+    # of the cache, and fetching it again is not the walk moving on. A header past what was
+    # counted, read out of a fetch that was not, counts one -- the fetch the walk would have
+    # made there: re-reading one place is not the walk moving on, but reading on out of
+    # that fetch is.
+    stamp, own, reach = 0, concat.fills, 0
     concat.seek(start_offset)
     try:
         archive = tarfile.open(fileobj=concat, mode="r:")
@@ -328,12 +338,13 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
             return finish(before, None, found_nothing(before, str(exc)))
         if info is None:
             break
-        if concat.fills - rereads != own:   # fetches of the walk's own served this one
-            stamp, own = stamp + concat.fills - rereads - own, concat.fills - rereads
-            lo, hi = concat.cached()
-        elif not lo <= before < hi:         # read on, past it, out of a re-read's fetch
+        new, own = concat.fills - rereads - own, concat.fills - rereads
+        if new:                             # fetches of the walk's own served this one
+            if info.offset_data > reach:    # not only fetched again
+                stamp, reach = stamp + new, concat.cached()[1]
+        elif before >= reach:               # read on, past it, out of a fetch not counted
             start, end = concat.cached()
-            stamp, lo, hi = stamp + 1, before, before + max(end - start, BLOCK)
+            stamp, reach = stamp + 1, before + max(end - start, BLOCK)
         fetched, settled = concat.fills, len(rescued)
         try:
             info = _settled(concat, archive, info, before, rescued)
