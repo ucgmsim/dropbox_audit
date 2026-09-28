@@ -2657,3 +2657,37 @@ def test_rescues_far_apart_do_not_add_up_to_giving_up(tmp_path):
     assert result.state == "complete", result.detail
     assert rows.names() == _names_of(members)
     assert all(f"{at}" in result.detail for at in lying), "each one was a rescue"
+
+
+# ---- review 10: a walk on from a chain-start scan counts from where the scan ends --------
+
+def test_a_walk_on_from_a_chain_start_scan_counts_from_where_the_scan_ends(tmp_path,
+                                                                          monkeypatch):
+    """Review 10's #1. A segment's first walk starts out of find_chain_start's read, which
+    can begin up to its whole length before the first header. Taken as the fetch the walk
+    would have made at that header, it stood for bytes it never held: the walk's own
+    fetches after it went uncounted for up to that length, and nothing the scan served
+    left what is held back before the verdict. The scan's read holds what it holds; the
+    walk's own fetches past it count."""
+    import dbaudit.archive.tarwalk as tarwalk
+
+    window, scan, scan_from = 4096, 65536, 1024
+    members = ([("run/big.bin", b"\1" * 40_000)]
+               + [(f"run/s/f{i:04d}", b"z" * 100) for i in range(60)])
+    data = build_tar(members)
+    archive = write_parts(tmp_path, data, part_size=len(data))
+    concat = ConcatFile(archive, LocalRangeReader(tmp_path, archive), window_min=window,
+                        window_max=window)
+    start = find_chain_start(concat, scan_from, scan_read=scan)
+    assert concat.cached() == (scan_from, scan_from + scan), "the scan is one read"
+    passes = []
+    original = tarwalk._walk_chain
+    monkeypatch.setattr(tarwalk, "_walk_chain",
+                        lambda *args: passes.append(original(*args)) or passes[-1])
+
+    result = walk(concat, start, lambda members, offset: None)
+
+    assert result.state == "complete"
+    # The walk read on well past the scan's read, a window at a time, before the verdict.
+    assert len(data) - (scan_from + scan) > 4 * window
+    assert passes[0].held_from >= scan_from + scan, "the scan's members were held to the end"

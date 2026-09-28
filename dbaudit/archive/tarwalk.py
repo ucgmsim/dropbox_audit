@@ -314,11 +314,10 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
 
     # How far the walk has read, in fetches: the stamp each header gets, and ``reach``, where
     # what the fetches counted so far hold ends. A header sequence the walk's own fetches
-    # served counts them -- unless it ends inside what was counted: a re-read took that out
-    # of the cache, and fetching it again is not the walk moving on. A header past what was
-    # counted, read out of a fetch that was not, counts one -- the fetch the walk would have
-    # made there: re-reading one place is not the walk moving on, but reading on out of
-    # that fetch is.
+    # served counts them -- unless it ends inside what was counted, which they only fetched
+    # again: a re-read took it out of the cache, or a re-read's fetch already counted for
+    # it. A header past what was counted, read out of a fetch that was not, counts one:
+    # re-reading one place is not the walk moving on, but reading on out of that fetch is.
     stamp, own, reach = 0, concat.fills, 0
     concat.seek(start_offset)
     try:
@@ -344,7 +343,13 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
                 stamp, reach = stamp + new, concat.cached()[1]
         elif before >= reach:               # read on, past it, out of a fetch not counted
             start, end = concat.cached()
-            stamp, reach = stamp + 1, before + max(end - start, BLOCK)
+            if stamp:
+                # A fetch made mid-pass -- a re-read's, or one that only fetched again --
+                # stands, from here, for the one the walk would have made. The pass's first
+                # header can instead come out of one made before the walk -- a chain-start
+                # scan's, begun up to 16 MiB before it -- which holds what it holds.
+                end = before + max(end - start, BLOCK)
+            stamp, reach = stamp + 1, end
         fetched, settled = concat.fills, len(rescued)
         try:
             info = _settled(concat, archive, info, before, rescued)
