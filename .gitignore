@@ -9,3 +9,6 @@ __pycache__/
 .venv/
 exports/
 *.out
+
+# Claude Code design notes (specs, plans) are not kept on this branch
+docs/superpowers/
