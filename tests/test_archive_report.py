@@ -330,7 +330,7 @@ GOLDEN_MEMBERS = (
 )
 
 # Captured verbatim from `summary(store, archive_id, top=5)` against GOLDEN_MEMBERS
-# under the pre-streaming-refactor implementation (commit 38fae10) -- see
+# under the pre-streaming-refactor implementation (commit d055e39) -- see
 # task-9-report.md's fix-round-1 section for the capture script and its output.
 # `largest`'s sqlite3.Row objects are reduced to (dir, name, size) tuples, the only
 # fields anything reads off them, both here and in the real code after the fix.
