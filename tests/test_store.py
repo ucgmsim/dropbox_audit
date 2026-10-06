@@ -181,6 +181,24 @@ def test_entry_without_path_display_is_kept_not_dropped(tmp_path):
     assert store.query("SELECT COUNT(*) FROM api_events WHERE kind='no_path_display'")[0][0] == 1
 
 
+def test_a_deleted_entry_is_logged_not_applied(tmp_path):
+    """A crawl asks for no deleted entries. One arriving anyway names something that
+    went while the crawl ran, which a snapshot cannot be exact about either way: keep
+    the rows and leave a trace rather than delete on a feed this crawl never reads."""
+    store = new_store(tmp_path)
+    sid = store.add_shard("/TeamSpace/x", depth=2, mode="recursive")
+    store.claim_shard("w1")
+    store.commit_page(sid, [FOLDER, FILE], cursor="c1", has_more=True)
+    gone = {".tag": "deleted", "name": "x",
+            "path_display": "/TeamSpace/x", "path_lower": "/teamspace/x"}
+    store.commit_page(sid, [gone], cursor="c2", has_more=False)
+    assert store.stats()["files"] == 1
+    assert store.query("SELECT path_lower FROM dirs ORDER BY 1") == [
+        ("/teamspace",), ("/teamspace/x",)]
+    assert store.query("SELECT kind, detail FROM api_events") == [
+        ("deleted_entry", "/TeamSpace/x")]
+
+
 def test_child_shards_are_enqueued_in_the_same_transaction(tmp_path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace", depth=1, mode="split")

@@ -86,16 +86,6 @@ class Crawler:
 
     # ---- seeding --------------------------------------------------------
 
-    def seed_delta_cursor(self, root: str) -> str | None:
-        """Take the whole-tree cursor before crawling, if the lister supports it."""
-        getter = getattr(self.lister, "get_latest_cursor", None)
-        if getter is None:
-            return None
-        cursor = getter(root, True, True)
-        if cursor:
-            self.store.set_delta_cursor(cursor)
-        return cursor
-
     def seed(self, root: str) -> int:
         """Create the single root shard. Everything else grows from splits.
 
@@ -110,8 +100,6 @@ class Crawler:
     # ---- the decision that keeps workers busy ---------------------------
 
     def _should_split(self, shard) -> bool:
-        if shard.mode == "delta":
-            return False  # a whole-tree change feed, never a listing to split
         # The persisted mode is checked first and wins unconditionally. A cursor
         # belongs to the kind of listing that created it, so a resumed split shard
         # must stay split: continuing a non-recursive cursor in recursive mode would
@@ -154,15 +142,9 @@ class Crawler:
     # ---- per-shard work -------------------------------------------------
 
     def _process(self, shard, stop: threading.Event, after_page) -> None:
-        if shard.mode == "delta":
-            mode = "delta"
-            if not shard.cursor:
-                self._fail(shard, "delta shard has no cursor; run a full pass")
-                return
-        else:
-            mode = "split" if self._should_split(shard) else "recursive"
-            if mode != shard.mode:
-                self.store.set_shard_mode(shard.id, mode)
+        mode = "split" if self._should_split(shard) else "recursive"
+        if mode != shard.mode:
+            self.store.set_shard_mode(shard.id, mode)
 
         cursor = shard.cursor
         attempts = 0
@@ -183,12 +165,6 @@ class Crawler:
                 continue
             except CursorReset:
                 self.store.log_event("cursor_reset", shard.path)
-                if mode == "delta":
-                    # Re-listing is not an option here: this cursor stands for the
-                    # whole tree, so recovery means a fresh full pass.
-                    self._fail(shard, "delta cursor invalidated by Dropbox; "
-                                      "re-run a full pass to re-establish it")
-                    return
                 self.store.clear_cursor(shard.id)
                 cursor = None
                 continue
@@ -282,10 +258,8 @@ class Crawler:
         finally:
             store.close()  # one connection per worker, closed once at the end
 
-    def run(self, stop_event=None, incremental: bool = False, _after_page=None) -> RunSummary:
+    def run(self, stop_event=None, _after_page=None) -> RunSummary:
         stop = stop_event or threading.Event()
-        if incremental:
-            self.store.begin_incremental_pass()
 
         # Any shard still marked running belongs to a process that died; the
         # single-instance lock guarantees no live owner. Cursors are preserved.

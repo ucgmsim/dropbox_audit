@@ -62,7 +62,7 @@ def fake_build_lister(pages):
         def continue_(self, cursor):
             raise AssertionError("these fakes never paginate")
 
-    def build(remote, include_deleted=False):
+    def build(remote):
         return object(), Lister()
 
     build.calls = calls

@@ -70,8 +70,6 @@ class Lister(Protocol):
 
     def continue_(self, cursor: str) -> Page: ...
 
-    def get_latest_cursor(self, path: str, recursive: bool, include_deleted: bool) -> str: ...
-
 
 def _classify(status: int, body: dict, headers: dict) -> ApiError:
     if status == 429:
@@ -110,9 +108,8 @@ def _classify(status: int, body: dict, headers: dict) -> ApiError:
 class HttpLister:
     """Real :class:`Lister`. Reuses one HTTP session so TLS handshakes are amortised."""
 
-    def __init__(self, token_provider, session=None, include_deleted: bool = False):
+    def __init__(self, token_provider, session=None):
         self.tokens = token_provider
-        self.include_deleted = include_deleted
         if session is None:
             import requests
 
@@ -151,7 +148,8 @@ class HttpLister:
                 "path": path,
                 "recursive": recursive,
                 "limit": PAGE_LIMIT,
-                "include_deleted": self.include_deleted,
+                # A crawl lists what exists; the store keeps no record of what went.
+                "include_deleted": False,
                 "include_media_info": False,
                 "include_mounted_folders": True,
                 "include_non_downloadable_files": True,
@@ -160,24 +158,3 @@ class HttpLister:
 
     def continue_(self, cursor: str) -> Page:
         return self._post(f"{API_BASE}/files/list_folder/continue", {"cursor": cursor})
-
-    def get_latest_cursor(self, path: str, recursive: bool = True,
-                          include_deleted: bool = True) -> str:
-        """A cursor for "the tree as it is right now", without listing anything.
-
-        Returns in well under a second even for a 250 TB tree, which is what makes a
-        repeat audit cost one call per 2000 *changes* rather than one call per shard.
-        """
-        page = self._post(
-            f"{API_BASE}/files/list_folder/get_latest_cursor",
-            {
-                "path": path,
-                "recursive": recursive,
-                "limit": PAGE_LIMIT,
-                "include_deleted": include_deleted,
-                "include_media_info": False,
-                "include_mounted_folders": True,
-                "include_non_downloadable_files": True,
-            },
-        )
-        return page.cursor
