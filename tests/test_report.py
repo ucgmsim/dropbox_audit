@@ -141,7 +141,7 @@ def test_top_dirs_survives_rows_appearing_mid_report(tmp_path):
     conn = store.connect()
     # A file whose directory was created after our snapshot of `dirs`.
     conn.execute(
-        "INSERT INTO files(dbx_id, dir_id, name, size, seen_run) VALUES('id:new', 9999, 'n', 3, 1)"
+        "INSERT INTO files(dbx_id, dir_id, name, size) VALUES('id:new', 9999, 'n', 3)"
     )
     rows = {r.path: r.bytes for r in top_dirs(store, limit=10)}
     assert rows["/R/sub"] == 5  # known directories still roll up correctly
@@ -151,7 +151,7 @@ def test_top_dirs_ignores_parent_ids_beyond_the_snapshot(tmp_path):
     store = seed(tmp_path, [mk("x", 5, "a", d="/R/sub")])
     conn = store.connect()
     conn.execute(
-        "INSERT INTO dirs(id, parent_id, name, path_display, path_lower, depth, seen_run) "
-        "VALUES(500, 9999, 'orphan', '/R/orphan', '/r/orphan', 2, 1)"
+        "INSERT INTO dirs(id, parent_id, name, path_display, path_lower, depth) "
+        "VALUES(500, 9999, 'orphan', '/R/orphan', '/r/orphan', 2)"
     )
     assert top_dirs(store, limit=10)  # must not raise

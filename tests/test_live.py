@@ -73,21 +73,6 @@ def test_interrupted_crawl_resumes_to_the_same_totals(tmp_path):
     assert (files, total) == (ref_files, ref_bytes)
 
 
-def test_incremental_pass_costs_a_single_call(tmp_path):
-    db = str(tmp_path / "inc.db")
-    dbaudit("init", "--db", db, "--root", SUBTREE, "--min-free-gb", "1")
-    dbaudit("run", "--db", db, "--workers", "4")
-
-    import sqlite3
-
-    before = sqlite3.connect(db).execute("SELECT COUNT(*), SUM(size) FROM files").fetchone()
-    dbaudit("run", "--db", db, "--incremental")
-
-    conn = sqlite3.connect(db)
-    assert conn.execute("SELECT COUNT(*), SUM(size) FROM files").fetchone() == before
-    assert conn.execute("SELECT pages FROM shards WHERE path='<delta>'").fetchone()[0] == 1
-
-
 def test_second_instance_is_refused(tmp_path):
     from dbaudit.lock import InstanceLock
 

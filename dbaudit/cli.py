@@ -157,9 +157,9 @@ def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
     )
 
 
-def build_lister(remote: str, include_deleted: bool = False):
+def build_lister(remote: str):
     tokens = TokenProvider(remote=remote)
-    return tokens, HttpLister(tokens, include_deleted=include_deleted)
+    return tokens, HttpLister(tokens)
 
 
 # ---- subcommands --------------------------------------------------------
@@ -193,31 +193,20 @@ def cmd_init(args) -> int:
     store.init_schema()
     store.set_meta("root", root)
     store.set_meta("remote", args.remote)
-    store.set_meta("schema_version", "1")
+    store.set_meta("schema_version", "2")
     store.set_meta("root_namespace_id", tokens.root_namespace_id())
     store.set_meta("account_id", account.get("account_id", ""))
     store.set_meta("team", (account.get("team") or {}).get("name", ""))
     store.set_meta("created_at", time.time())
-    store.set_meta("seen_run", store.get_meta("seen_run", "1"))
 
     crawler = Crawler(store, lister, AdaptiveLimiter(), split_depth=args.split_depth)
     crawler.seed(root)
-    # Taken before the crawl starts, so the first incremental pass also catches
-    # anything that changed while the full crawl was running.
-    delta = None
-    try:
-        delta = crawler.seed_delta_cursor(root)
-    except Exception as exc:
-        print(f"  warning: could not record a delta cursor ({exc}); "
-              f"incremental passes will be unavailable", file=sys.stderr)
 
     print(f"initialised {args.db}")
     print(f"  root      : {root} ({len(page.entries)}+ entries at the top level)")
     print(f"  account   : {account.get('email', '?')} / team {(account.get('team') or {}).get('name', '?')}")
     print(f"  namespace : {tokens.root_namespace_id()}")
     print(f"  free disk : {human_bytes(available)}")
-    print(f"  delta     : {'recorded' if delta else 'unavailable'} "
-          f"(enables `run --incremental` later)")
     print(f"\nnext: python -m dbaudit run --db {args.db}")
     return 0
 
@@ -297,8 +286,8 @@ def cmd_run(args) -> int:
         signal.signal(signal.SIGTERM, handle)
 
         store.connect().execute(
-            "INSERT INTO runs(started_at, mode, host) VALUES(?, ?, ?)",
-            (time.time(), "incremental" if args.incremental else "full", socket.gethostname()),
+            "INSERT INTO runs(started_at, host) VALUES(?, ?)",
+            (time.time(), socket.gethostname()),
         )
 
         reporter_stop = threading.Event()
@@ -313,7 +302,7 @@ def cmd_run(args) -> int:
         log.info("crawling %s with %d workers at %.1f req/s",
                  store.get_meta("root"), args.workers, args.rps)
         try:
-            summary = crawler.run(stop_event=stop, incremental=args.incremental)
+            summary = crawler.run(stop_event=stop)
         finally:
             reporter_stop.set()
 
@@ -1890,8 +1879,6 @@ def build_parser() -> argparse.ArgumentParser:
                        help="shards to keep pending (default: 2 x workers). Raising "
                             "this splits more aggressively and measured much slower")
     p_run.add_argument("--max-shards", type=int, default=2_000_000)
-    p_run.add_argument("--incremental", action="store_true",
-                       help="re-audit changes only, using the cursors from a completed pass")
     p_run.add_argument("--progress-interval", type=float, default=30.0)
     p_run.add_argument("--no-index", action="store_true",
                        help="skip building analysis indexes when the crawl completes")

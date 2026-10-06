@@ -125,13 +125,15 @@ def test_5xx_is_transient():
         lst.list_folder("/x", recursive=True)
 
 
-def test_include_deleted_is_configurable():
+def test_a_listing_asks_for_no_deleted_entries():
+    """The store records what exists and never applies a delete, so a crawl must not
+    ask for entries that are already gone."""
     import json
 
     lst = HttpLister(FakeTokens(), session=FakeSession(
-        [FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})]), include_deleted=True)
+        [FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})]))
     lst.list_folder("/x", recursive=True)
-    assert json.loads(lst.session.calls[0][1])["include_deleted"] is True
+    assert json.loads(lst.session.calls[0][1])["include_deleted"] is False
 
 
 def test_missing_has_more_defaults_to_false():

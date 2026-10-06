@@ -15,7 +15,6 @@ CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
     started_at  REAL,
     finished_at REAL,
-    mode        TEXT,
     host        TEXT,
     notes       TEXT
 );
@@ -66,13 +65,12 @@ CREATE TABLE IF NOT EXISTS dirs (
     shared_folder_id        TEXT,
     parent_shared_folder_id TEXT,
     is_mount                INTEGER NOT NULL DEFAULT 0,
-    shard_id                INTEGER,
-    seen_run                INTEGER NOT NULL DEFAULT 1
+    shard_id                INTEGER
 );
 
--- dbx_id is UNIQUE so that re-listing a subtree (after a cursor reset, or during an
--- incremental pass) updates rows instead of duplicating them. It is the only index
--- maintained on `files` during the crawl; analysis indexes are built afterwards.
+-- dbx_id is UNIQUE so that re-listing a subtree after a cursor reset updates rows
+-- instead of duplicating them. It is the only index maintained on `files` during
+-- the crawl; analysis indexes are built afterwards.
 CREATE TABLE IF NOT EXISTS files (
     dbx_id          TEXT UNIQUE,
     dir_id          INTEGER NOT NULL,
@@ -85,14 +83,7 @@ CREATE TABLE IF NOT EXISTS files (
     server_modified INTEGER,
     modified_by     INTEGER,
     is_downloadable INTEGER,
-    shard_id        INTEGER,
-    seen_run        INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS tombstones (
-    path_lower TEXT NOT NULL,
-    seen_run   INTEGER,
-    ts         REAL
+    shard_id        INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS api_events (

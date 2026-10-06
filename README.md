@@ -35,7 +35,8 @@ python -m dbaudit report --db audit.db     # or `export --db audit.db --out DIR`
   the page in flight and never duplicates a row. Ctrl-C finishes that page and exits
   cleanly. A lockfile keeps it to one crawler per database, and `--log FILE` keeps a
   log for unattended runs.
-- `run --incremental` re-audits only what has changed since a completed pass.
+- **Each database is one snapshot.** To audit again, crawl into a new database;
+  keeping the old one makes before-and-after comparisons a join between the two.
 - `verify --db audit.db [subtree]` re-walks a subtree with rclone and diffs it
   against the database. The exit code is non-zero if anything differs.
 

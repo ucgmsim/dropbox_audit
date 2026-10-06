@@ -58,8 +58,7 @@ class FakeLister:
         chunk = items[offset:offset + self.page_size]
         nxt = min(offset + self.page_size, len(items))
         has_more = nxt < len(items)
-        # The real API returns a cursor on every page, including the last one --
-        # that final cursor is what an incremental pass resumes from.
+        # The real API returns a cursor on every page, including the last one.
         return Page(entries=chunk, cursor=f"{root}|{int(recursive)}|{nxt}", has_more=has_more)
 
     def list_folder(self, path, recursive):
@@ -69,11 +68,6 @@ class FakeLister:
         if path not in self.tree:
             raise PathNotFound(f"no such folder: {path}")
         return self._page(path, recursive, 0)
-
-    def get_latest_cursor(self, path, recursive=True, include_deleted=True):
-        """A cursor positioned at the end of the current listing: no changes yet."""
-        self.calls.append(("latest", path, recursive))
-        return f"{path}|{int(recursive)}|{len(self._walk(path, recursive))}"
 
     def continue_(self, cursor):
         self.calls.append(("cont", cursor, None))

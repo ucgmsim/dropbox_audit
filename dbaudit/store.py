@@ -19,8 +19,6 @@ from pathlib import Path
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
-# Not a Dropbox path -- every real one starts with "/" -- so it cannot collide.
-DELTA_SHARD_PATH = "<delta>"
 DIR_CACHE_LIMIT = 200_000
 TIME_CACHE_LIMIT = 50_000
 
@@ -54,7 +52,6 @@ class PageStats:
     files: int = 0
     dirs: int = 0
     bytes: int = 0
-    deleted: int = 0
 
 
 def _epoch(stamp: str | None) -> int | None:
@@ -259,70 +256,6 @@ class Store:
         finally:
             self._drop_caches()
 
-    def set_delta_cursor(self, cursor: str) -> int:
-        """Record the whole-tree cursor that incremental passes continue from.
-
-        Taken once, before the full crawl starts, so the first incremental pass also
-        picks up anything that changed *while* the crawl was running.
-        """
-        conn = self.connect()
-        conn.execute(
-            "INSERT INTO shards(path, depth, mode, state, cursor, created_at) "
-            "VALUES(?, -1, 'delta', 'done', ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET cursor=excluded.cursor",
-            (DELTA_SHARD_PATH, cursor, time.time()),
-        )
-        return conn.execute(
-            "SELECT id FROM shards WHERE path=?", (DELTA_SHARD_PATH,)
-        ).fetchone()[0]
-
-    def has_delta_cursor(self) -> bool:
-        row = self.connect().execute(
-            "SELECT cursor FROM shards WHERE path=?", (DELTA_SHARD_PATH,)
-        ).fetchone()
-        return bool(row and row[0])
-
-    def begin_incremental_pass(self) -> int:
-        """Re-open only the whole-tree delta cursor.
-
-        Continuing one root cursor costs one call per 2000 changes. Re-opening every
-        shard's own cursor instead would cost one call per shard -- tens of thousands
-        of calls to discover that nothing changed.
-        """
-        conn = self.connect()
-        unfinished = conn.execute(
-            "SELECT COUNT(*) FROM shards WHERE state != 'done'"
-        ).fetchone()[0]
-        if unfinished:
-            raise RuntimeError(
-                f"cannot start an incremental pass: {unfinished} shard(s) from the "
-                f"full pass are unfinished -- run a normal pass to completion first"
-            )
-        if not self.has_delta_cursor():
-            raise RuntimeError(
-                "cannot start an incremental pass: no delta cursor was recorded. "
-                "This database predates delta cursors; run a fresh full pass."
-            )
-        run = int(self.get_meta("seen_run", 1)) + 1
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES('seen_run', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(run),),
-            )
-            conn.execute(
-                "UPDATE shards SET state='pending', owner=NULL, finished_at=NULL "
-                "WHERE path=?",
-                (DELTA_SHARD_PATH,),
-            )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        self.refresh_seen_run()
-        return run
-
     def reset_stale_shards(self) -> int:
         """Reclaim shards owned by a process that died. Cursors are preserved."""
         cur = self.connect().execute(
@@ -387,9 +320,8 @@ class Store:
         before = conn.total_changes
         conn.execute(
             "INSERT OR IGNORE INTO dirs(parent_id, name, path_display, path_lower, depth, "
-            "                           shard_id, seen_run) VALUES(?, ?, ?, ?, ?, ?, ?)",
-            (parent_id, name, path_display, key, _depth_of(path_display), shard_id,
-             self._seen_run(conn)),
+            "                           shard_id) VALUES(?, ?, ?, ?, ?, ?)",
+            (parent_id, name, path_display, key, _depth_of(path_display), shard_id),
         )
         if created is not None and conn.total_changes > before:
             created[0] += 1
@@ -398,17 +330,6 @@ class Store:
             cache.clear()
         cache[key] = dir_id
         return dir_id
-
-    def _seen_run(self, conn) -> int:
-        run = getattr(self._local, "seen_run", None)
-        if run is None:
-            row = conn.execute("SELECT value FROM meta WHERE key='seen_run'").fetchone()
-            run = int(row[0]) if row else 1
-            self._local.seen_run = run
-        return run
-
-    def refresh_seen_run(self) -> None:
-        self._local.seen_run = None
 
     def commit_page(
         self,
@@ -426,7 +347,6 @@ class Store:
         """
         conn = self.connect()
         dir_cache, principal_cache, time_cache = self._caches()
-        seen_run = self._seen_run(conn)
         stats = PageStats()
         created_dirs = [0]
 
@@ -434,7 +354,6 @@ class Store:
             conn.execute("BEGIN IMMEDIATE")
 
             file_rows = []
-            deleted_paths = []
             for entry in entries:
                 tag = entry.get(".tag")
                 path_display = entry.get("path_display")
@@ -469,7 +388,6 @@ class Store:
                             self._principal_id(conn, principal_cache, sharing.get("modified_by")),
                             1 if entry.get("is_downloadable", True) else 0,
                             shard_id,
-                            seen_run,
                         )
                     )
                     stats.files += 1
@@ -481,21 +399,26 @@ class Store:
                     shared_folder_id = entry.get("shared_folder_id")
                     conn.execute(
                         "UPDATE dirs SET dbx_id=?, shared_folder_id=?, parent_shared_folder_id=?, "
-                        "  is_mount=?, seen_run=? WHERE id=?",
+                        "  is_mount=? WHERE id=?",
                         (
                             entry.get("id"),
                             shared_folder_id,
                             entry.get("parent_shared_folder_id")
                             or sharing.get("parent_shared_folder_id"),
                             1 if shared_folder_id else 0,
-                            seen_run,
                             dir_id,
                         ),
                     )
 
                 elif tag == "deleted":
-                    deleted_paths.append(path_display)
-                    stats.deleted += 1
+                    # A crawl asks for no deleted entries, so one arriving names
+                    # something that went while the crawl ran -- which a snapshot taken
+                    # over hours cannot be exact about either way. Keep the rows and
+                    # leave a trace.
+                    conn.execute(
+                        "INSERT INTO api_events(ts, kind, detail) VALUES(?, 'deleted_entry', ?)",
+                        (time.time(), path_display[:500]),
+                    )
 
             stats.dirs = created_dirs[0]
 
@@ -503,43 +426,16 @@ class Store:
                 conn.executemany(
                     "INSERT INTO files(dbx_id, dir_id, name, ext, size, content_hash, rev, "
                     "  client_modified, server_modified, modified_by, is_downloadable, "
-                    "  shard_id, seen_run) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "  shard_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(dbx_id) DO UPDATE SET "
                     "  dir_id=excluded.dir_id, name=excluded.name, ext=excluded.ext, "
                     "  size=excluded.size, "
                     "  content_hash=excluded.content_hash, rev=excluded.rev, "
                     "  client_modified=excluded.client_modified, "
                     "  server_modified=excluded.server_modified, "
-                    "  modified_by=excluded.modified_by, shard_id=excluded.shard_id, "
-                    "  seen_run=excluded.seen_run",
+                    "  modified_by=excluded.modified_by, shard_id=excluded.shard_id",
                     file_rows,
                 )
-
-            for path in deleted_paths:
-                lowered = path.lower()
-                parent, _, leaf = lowered.rpartition("/")
-                # DeletedMetadata does not say whether the entry was a file or a
-                # folder, so handle both: drop a file at exactly this path, and drop
-                # any directory at or below it along with everything it contained.
-                conn.execute(
-                    "DELETE FROM files WHERE dir_id IN (SELECT id FROM dirs WHERE path_lower=?) "
-                    "  AND lower(name)=?",
-                    (parent or "/", leaf),
-                )
-                conn.execute(
-                    "DELETE FROM files WHERE dir_id IN "
-                    "  (SELECT id FROM dirs WHERE path_lower=? OR path_lower LIKE ?)",
-                    (lowered, lowered + "/%"),
-                )
-                conn.execute(
-                    "DELETE FROM dirs WHERE path_lower=? OR path_lower LIKE ?",
-                    (lowered, lowered + "/%"),
-                )
-                conn.execute(
-                    "INSERT INTO tombstones(path_lower, seen_run, ts) VALUES(?, ?, ?)",
-                    (lowered, seen_run, time.time()),
-                )
-                self._drop_caches()  # cached dir ids may now point at deleted rows
 
             for path, depth, mode in child_shards:
                 conn.execute(
