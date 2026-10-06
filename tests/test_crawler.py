@@ -152,6 +152,51 @@ def test_transient_errors_eventually_fail_the_shard_not_the_run(tmp_path):
     assert store.query("SELECT state FROM shards")[0][0] == "error"
 
 
+class StallsAfterOnePage(FakeLister):
+    """What Dropbox did on a 13.8M-file folder in October 2026: the first page of the
+    recursive listing came back, then every continue timed out."""
+
+    def __init__(self, tree, stalled, **kw):
+        super().__init__(tree, **kw)
+        self.stalled = stalled
+
+    def continue_(self, cursor):
+        if cursor.startswith(self.stalled + "|"):
+            from dbaudit.api import TransientError
+
+            self.calls.append(("cont", cursor, None))
+            raise TransientError("read timed out")
+        return super().continue_(cursor)
+
+
+def crawl_with_a_failed_shard(tmp_path):
+    """/R/a fails after committing its first page; split_depth=1 keeps it one listing."""
+    store, crawler = build(tmp_path, StallsAfterOnePage(TREE, "/R/a", page_size=2),
+                           workers=1, split_depth=1, max_page_attempts=2, backoff_base=0.01)
+    crawler.seed("/R")
+    assert crawler.run().errors == 1
+    return store
+
+
+def test_a_failed_shard_is_retried_on_the_next_run(tmp_path):
+    store = crawl_with_a_failed_shard(tmp_path)
+    summary = Crawler(store, FakeLister(TREE, page_size=2), limiter(), workers=1).run()
+    assert summary.errors == 0
+    assert files_in(store) == ALL_FILES
+    assert store.query("SELECT COUNT(*) FROM files") == [(len(ALL_FILES),)]
+    assert store.query("SELECT COUNT(*) FROM shards WHERE state='error'") == [(0,)]
+
+
+def test_a_retried_shard_starts_over_instead_of_resuming_its_cursor(tmp_path):
+    """Resuming would repeat the continue that kept failing. Starting over lets the
+    crawler split the subtree, as it splits whatever it reaches with the queue empty."""
+    store = crawl_with_a_failed_shard(tmp_path)
+    lister = FakeLister(TREE, page_size=2)
+    Crawler(store, lister, limiter(), workers=1).run()
+    calls = [call for call in lister.calls if call[1].startswith("/R/a")]
+    assert calls and calls[0][0] == "list"
+
+
 def test_summary_reports_totals(tmp_path):
     store, crawler = build(tmp_path, FakeLister(TREE))
     crawler.seed("/R")

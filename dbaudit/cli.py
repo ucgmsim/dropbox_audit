@@ -322,7 +322,8 @@ def cmd_run(args) -> int:
             log.info("interrupted with %d shard(s) outstanding; re-run to resume", remaining)
             return 0
         if summary.errors:
-            log.warning("%d shard(s) ended in error; see `status`", summary.errors)
+            log.warning("%d shard(s) ended in error; see `status`, and run again to "
+                        "retry them from scratch", summary.errors)
             return 1
         if remaining == 0:
             store.set_meta("last_full_pass_completed_at", time.time())
