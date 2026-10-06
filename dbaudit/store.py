@@ -263,6 +263,23 @@ class Store:
         )
         return cur.rowcount
 
+    def retry_failed_shards(self) -> int:
+        """Queue every shard that ended in error again, from scratch.
+
+        Its cursor is forgotten and its rows dropped, as after a cursor reset.
+        Resuming would repeat the request that kept failing; starting over lets the
+        crawler split a subtree that was too much for one listing.
+        """
+        failed = [row[0] for row in self.connect().execute(
+            "SELECT id FROM shards WHERE state='error'").fetchall()]
+        for shard_id in failed:
+            self.clear_cursor(shard_id)
+        self.connect().execute(
+            "UPDATE shards SET state='pending', owner=NULL, error=NULL, finished_at=NULL "
+            "WHERE state='error'"
+        )
+        return len(failed)
+
     def pending_count(self) -> int:
         return self.connect().execute(
             "SELECT COUNT(*) FROM shards WHERE state='pending'"

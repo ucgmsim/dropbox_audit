@@ -266,6 +266,10 @@ class Crawler:
         reclaimed = self.store.reset_stale_shards()
         if reclaimed:
             log.info("reclaimed %d shard(s) from a previous run", reclaimed)
+        retried = self.store.retry_failed_shards()
+        if retried:
+            log.info("retrying %d shard(s) that failed in a previous run, from scratch",
+                     retried)
 
         threads = [
             threading.Thread(target=self._worker, args=(f"w{i}", stop, _after_page),
