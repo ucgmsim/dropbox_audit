@@ -35,8 +35,11 @@ python -m dbaudit report --db audit.db     # or `export --db audit.db --out DIR`
   the page in flight and never duplicates a row. Ctrl-C finishes that page and exits
   cleanly. A lockfile keeps it to one crawler per database, and `--log FILE` keeps a
   log for unattended runs.
-- **Running it again also retries any subtree that failed,** from scratch, so a
-  subtree too big for one listing can be split into smaller ones.
+- **A subtree too big for Dropbox to list in one go is split on the spot.** Dropbox
+  answers a recursive listing of a big enough subtree with an HTTP 500 after about
+  three minutes, so the crawler lists that folder one level down instead and tries
+  each child on its own. Running `run` again retries anything that still failed, from
+  scratch.
 - **Each database is one snapshot.** To audit again, crawl into a new database;
   keeping the old one makes before-and-after comparisons a join between the two.
 - `verify --db audit.db [subtree]` re-walks a subtree with rclone and diffs it

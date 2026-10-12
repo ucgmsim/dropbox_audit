@@ -153,8 +153,8 @@ def test_transient_errors_eventually_fail_the_shard_not_the_run(tmp_path):
 
 
 class StallsAfterOnePage(FakeLister):
-    """What Dropbox did on a 13.8M-file folder in October 2026: the first page of the
-    recursive listing came back, then every continue timed out."""
+    """What Dropbox did on a 13.8M-file folder in October 2026: the first page of a
+    listing came back, then every continue timed out."""
 
     def __init__(self, tree, stalled, **kw):
         super().__init__(tree, **kw)
@@ -170,9 +170,10 @@ class StallsAfterOnePage(FakeLister):
 
 
 def crawl_with_a_failed_shard(tmp_path):
-    """/R/a fails after committing its first page; split_depth=1 keeps it one listing."""
+    """/R/a fails holding a cursor: with the queue short it is listed one level at a
+    time, and the continue after its first page keeps failing."""
     store, crawler = build(tmp_path, StallsAfterOnePage(TREE, "/R/a", page_size=2),
-                           workers=1, split_depth=1, max_page_attempts=2, backoff_base=0.01)
+                           workers=1, max_page_attempts=2, backoff_base=0.01)
     crawler.seed("/R")
     assert crawler.run().errors == 1
     return store
@@ -188,13 +189,65 @@ def test_a_failed_shard_is_retried_on_the_next_run(tmp_path):
 
 
 def test_a_retried_shard_starts_over_instead_of_resuming_its_cursor(tmp_path):
-    """Resuming would repeat the continue that kept failing. Starting over lets the
-    crawler split the subtree, as it splits whatever it reaches with the queue empty."""
+    """Resuming would repeat the continue that kept failing; starting over lists the
+    folder again from its first page."""
     store = crawl_with_a_failed_shard(tmp_path)
     lister = FakeLister(TREE, page_size=2)
     Crawler(store, lister, limiter(), workers=1).run()
     calls = [call for call in lister.calls if call[1].startswith("/R/a")]
     assert calls and calls[0][0] == "list"
+
+
+class FullListingsFail(FakeLister):
+    """Dropbox in October 2026: a recursive listing of a big enough subtree failed with
+    HTTP 500 after about 180 s, whatever page size was asked for, while one level of the
+    same folder came back in about a second."""
+
+    def __init__(self, tree, failing, **kw):
+        super().__init__(tree, **kw)
+        self.failing = set(failing)
+
+    def list_folder(self, path, recursive):
+        if recursive and path in self.failing:
+            from dbaudit.api import TransientError
+
+            self.calls.append(("list", path, recursive))
+            raise TransientError("500 from Dropbox")
+        return super().list_folder(path, recursive)
+
+
+def test_a_full_listing_that_fails_is_split_instead_of_retried(tmp_path):
+    """split_depth=0 asks for full listings everywhere; /R and /R/a fail as one."""
+    lister = FullListingsFail(TREE, {"/R", "/R/a"})
+    store, crawler = build(tmp_path, lister, workers=1, split_depth=0, backoff_base=0.01)
+    crawler.seed("/R")
+    assert crawler.run().errors == 0
+    assert files_in(store) == ALL_FILES
+    assert lister.calls.count(("list", "/R", True)) == 1
+    assert store.query("SELECT COUNT(*) FROM api_events WHERE kind='split_after_failure'") \
+        == [(2,)]
+
+
+def test_a_full_listing_failing_after_its_first_page_is_split_after_two_failures(tmp_path):
+    """The first page holds /R/top.txt; the split drops it and lists it again, once."""
+    lister = StallsAfterOnePage(TREE, "/R", page_size=4)
+    store, crawler = build(tmp_path, lister, workers=1, split_depth=0, backoff_base=0.01)
+    crawler.seed("/R")
+    summary = crawler.run()
+    assert summary.errors == 0
+    assert summary.files == len(ALL_FILES)      # what `status` reports, from shard counters
+    assert files_in(store) == ALL_FILES
+    assert store.query("SELECT COUNT(*) FROM files") == [(len(ALL_FILES),)]
+    assert sum(1 for call in lister.calls if call[0] == "cont" and call[1].startswith("/R|1|")) \
+        == 2
+
+
+def test_a_failing_full_listing_is_not_split_past_max_shards(tmp_path):
+    store, crawler = build(tmp_path, FullListingsFail(TREE, {"/R"}), workers=1, split_depth=0,
+                           max_shards=1, max_page_attempts=2, backoff_base=0.01)
+    crawler.seed("/R")
+    assert crawler.run().errors == 1
+    assert store.query("SELECT COUNT(*) FROM shards") == [(1,)]
 
 
 def test_summary_reports_totals(tmp_path):

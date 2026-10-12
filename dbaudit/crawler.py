@@ -182,6 +182,22 @@ class Crawler:
                 continue
             except TransientError as exc:
                 attempts += 1
+                # Dropbox gives up on a recursive listing of a big enough subtree -- an
+                # HTTP 500 after about 180 s, whatever the page size -- while one level of
+                # the same folder comes back in a second. Retrying cannot help, so list it
+                # one level at a time instead: its children are smaller and try a
+                # recursive listing of their own. At once if it has no cursor, as nothing
+                # is lost; after a second failure in a row if it has, since splitting
+                # drops the pages it holds. This ignores split_depth, which bounds only
+                # the splitting done to keep workers busy.
+                if (mode == "recursive" and attempts >= (1 if cursor is None else 2)
+                        and self.store.shard_count() < self.max_shards):
+                    self.store.log_event("split_after_failure", f"{shard.path}: {exc}")
+                    if cursor is not None:
+                        self.store.clear_cursor(shard.id)
+                    mode, cursor, attempts = "split", None, 0
+                    self.store.set_shard_mode(shard.id, mode)
+                    continue
                 if attempts >= self.max_page_attempts:
                     self._fail(shard, f"transient failures exhausted: {exc}")
                     return

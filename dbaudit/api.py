@@ -25,7 +25,10 @@ from typing import Protocol
 API_BASE = "https://api.dropboxapi.com/2"
 PAGE_LIMIT = 2000
 DEFAULT_RETRY_AFTER = 60.0
-REQUEST_TIMEOUT = 180
+# A healthy listing answers in about a second. A recursive listing of a subtree too big
+# for Dropbox fails with HTTP 500 after about 180 s, so waiting longer than a minute only
+# delays the crawler's split of that subtree.
+REQUEST_TIMEOUT = 60
 
 
 @dataclass(frozen=True)
