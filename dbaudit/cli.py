@@ -56,6 +56,8 @@ log = logging.getLogger("dbaudit")
 # ~4,600 entries/s with zero 429s; 16 started drawing them.
 DEFAULT_WORKERS = 8
 DEFAULT_RPS = 5.0
+# The ceiling the request rate may climb to while Dropbox answers without a 429.
+DEFAULT_MAX_RPS = 20.0
 # Chains for `archive index`. Deliberately NOT DEFAULT_WORKERS: that figure measures
 # `files/list_folder`, a different endpoint class, and conflating the two is a mistake
 # this project has already made once and corrected. The closest measured analogue for
@@ -261,7 +263,8 @@ def cmd_run(args) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
-        limiter = AdaptiveLimiter(rps=args.rps, max_concurrency=args.workers)
+        limiter = AdaptiveLimiter(rps=args.rps, max_rps=args.max_rps,
+                                  max_concurrency=args.workers)
         crawler = Crawler(
             store, lister, limiter,
             workers=args.workers,
@@ -1055,7 +1058,8 @@ def _run_index(args, store, row) -> int:
         # One provider and one limiter for the whole command: Dropbox limits per
         # account, and the provider caches its token behind a lock.
         tokens = TokenProvider(remote=args.remote)
-        limiter = AdaptiveLimiter(rps=args.rps, max_concurrency=workers)
+        limiter = AdaptiveLimiter(rps=args.rps, max_rps=args.max_rps,
+                                  max_concurrency=workers)
 
     store.start_walk(archive_id)
     stop = threading.Event()
@@ -1872,7 +1876,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="crawl until finished; safe to interrupt and re-run")
     p_run.add_argument("--db", required=True)
     p_run.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
-    p_run.add_argument("--rps", type=float, default=DEFAULT_RPS)
+    p_run.add_argument("--rps", type=float, default=DEFAULT_RPS,
+                       help="request rate to start at")
+    p_run.add_argument("--max-rps", type=float, default=DEFAULT_MAX_RPS,
+                       help="ceiling the request rate climbs to while Dropbox allows it")
     p_run.add_argument("--split-depth", type=int, default=DEFAULT_SPLIT_DEPTH,
                        help="max levels a shard may be split into children (bound, "
                             "not a target: splitting only happens when workers starve)")
@@ -1930,7 +1937,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_idx.add_argument("--archive", required=True)
     p_idx.add_argument("--remote", default="dropbox")
     p_idx.add_argument("--workers", type=int, default=ARCHIVE_WORKERS)
-    p_idx.add_argument("--rps", type=float, default=DEFAULT_RPS)
+    p_idx.add_argument("--rps", type=float, default=DEFAULT_RPS,
+                       help="request rate to start at")
+    p_idx.add_argument("--max-rps", type=float, default=DEFAULT_MAX_RPS,
+                       help="ceiling the request rate climbs to while Dropbox allows it")
     # Measured in Task 1: a request costs 1.60 s + 0.044 s/MiB, so the cap is generous
     # and the floor is small because it is paid on every jump.
     p_idx.add_argument("--window-min", type=int, default=WINDOW_MIN)

@@ -83,10 +83,13 @@ for credentials and for `verify`.
 
 ### Tuning
 
-- **If 429s (rate-limit responses) climb,** as `status` shows for the last hour,
-  lower `--workers`, then `--rps` (default 5 requests/s). Each 429 pauses every
-  worker for the full `Retry-After` and drops concurrency by one. Sustained 429s
-  usually mean another job is using the same account's API quota.
+- **The request rate finds its own level.** It starts at `--rps` (default 5
+  requests/s) and, after every five minutes in which it held requests back without
+  a 429, rises by 0.5/s, up to `--max-rps` (default 20). Each 429 (rate-limit
+  response) pauses every worker for the full `Retry-After`, halves the rate and
+  drops one worker. The log records each change. If 429s keep coming, as `status`
+  shows for the last hour, another job is probably using the same account's API
+  quota: lower `--max-rps` or `--workers`.
 - **Leave `--queue-target` alone.** Late in a crawl, a few large subtrees can leave
   most workers idle. Splitting harder looks like the fix, but measured far slower:
   a recursive call on a big subtree returns 2,000 entries, while one on a small

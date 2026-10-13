@@ -9,13 +9,22 @@ brief stall into a long outage.
 
 Concurrency follows additive-increase/additive-decrease: one worker off per 429, one
 back after a clean interval.
+
+The request rate follows additive-increase/multiplicative-decrease, as TCP does. It
+starts at ``rps``, the rate measured safe, and rises by ``rate_step`` after each clean
+interval in which it held requests back, up to ``max_rps``; a 429 halves it, never below
+``min_rps``. It climbs only while it is the bottleneck, so it cannot drift up unused and
+then burst, and it climbs slowly because a 429 can cost every worker five minutes.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from contextlib import contextmanager
+
+log = logging.getLogger("dbaudit.limiter")
 
 
 class AdaptiveLimiter:
@@ -28,8 +37,15 @@ class AdaptiveLimiter:
         burst: float = 1.0,
         clock=time.monotonic,
         sleep=time.sleep,
+        max_rps: float | None = None,
+        min_rps: float = 1.0,
+        rate_step: float = 0.5,
     ):
         self.rps = float(rps)
+        # Without a ceiling above the starting rate, the rate stays fixed.
+        self.max_rps = max(self.rps, float(max_rps)) if max_rps is not None else self.rps
+        self.min_rps = min(float(min_rps), self.rps)
+        self.rate_step = float(rate_step)
         self.max_concurrency = int(max_concurrency)
         self.min_concurrency = int(min_concurrency)
         self.recover_after = float(recover_after)
@@ -44,6 +60,8 @@ class AdaptiveLimiter:
         self._last_refill = clock()
         self._paused_until = 0.0
         self._last_429 = float("-inf")
+        self._held_back = False         # the rate made a request wait since it last changed
+        self._rate_changed_at = clock()
         self.rate_limit_events = 0
 
     # ---- observable state ---------------------------------------------
@@ -81,6 +99,7 @@ class AdaptiveLimiter:
             if self._in_flight >= self._concurrency:
                 return 0.05  # a peer will finish; poll rather than sleep on a condvar
             if self._tokens < 1.0:
+                self._held_back = True
                 return max((1.0 - self._tokens) / self.rps, 0.001)
             self._tokens -= 1.0
             self._in_flight += 1
@@ -108,17 +127,36 @@ class AdaptiveLimiter:
     def on_rate_limited(self, retry_after: float) -> None:
         with self._lock:
             now = self.clock()
+            # Requests in flight when Dropbox objects all come back 429 together: one
+            # overload, so the rate is halved once per pause rather than once per reply.
+            halve = now >= self._paused_until
             self._paused_until = max(self._paused_until, now + float(retry_after))
             self._last_429 = now
             self._concurrency = max(self.min_concurrency, self._concurrency - 1)
             self.rate_limit_events += 1
+            if halve:
+                self.rps = max(self.min_rps, self.rps / 2)
+            self._rate_changed_at = now
+            self._held_back = False
+            rate = self.rps
+        if halve:
+            log.warning("rate limited by Dropbox: request rate down to %.2f/s", rate)
 
     def on_success(self) -> None:
+        raised = None
         with self._lock:
-            if self._concurrency >= self.max_concurrency:
-                return
-            if self.clock() - self._last_429 > self.recover_after:
+            now = self.clock()
+            if (self._held_back and self.rps < self.max_rps
+                    and now - self._rate_changed_at > self.recover_after):
+                self.rps = min(self.max_rps, self.rps + self.rate_step)
+                self._rate_changed_at = now
+                self._held_back = False
+                raised = self.rps
+            if (self._concurrency < self.max_concurrency
+                    and now - self._last_429 > self.recover_after):
                 self._concurrency += 1
                 # Restart the clean-interval window so we step up gradually rather
                 # than jumping straight back to full concurrency.
-                self._last_429 = self.clock()
+                self._last_429 = now
+        if raised is not None:
+            log.info("request rate up to %.2f/s", raised)

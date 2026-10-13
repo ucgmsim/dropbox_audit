@@ -119,3 +119,74 @@ def test_concurrency_cap_is_enforced_across_threads():
     for t in threads:
         t.join()
     assert peak <= 3
+
+
+def hold_back(clock, lim, n=4):
+    """Take n slots back to back, so the token bucket makes callers wait."""
+    for _ in range(n):
+        with lim.slot():
+            pass
+
+
+def test_the_rate_climbs_while_it_holds_requests_back_and_stops_at_the_ceiling():
+    clock, lim = make(rps=2.0, max_rps=2.8, recover_after=10)
+    seen = []
+    for _ in range(3):
+        hold_back(clock, lim)
+        clock.t += 11
+        lim.on_success()
+        seen.append(lim.rps)
+    assert seen == [2.5, 2.8, 2.8]
+
+
+def test_the_rate_does_not_climb_unless_it_held_requests_back():
+    clock, lim = make(rps=2.0, max_rps=10.0, recover_after=10)
+    for _ in range(30):
+        clock.t += 1.0          # slower than the rate allows: never waits on a token
+        with lim.slot():
+            pass
+        lim.on_success()
+    assert lim.rps == 2.0
+
+
+def test_a_429_halves_the_rate_but_not_below_the_minimum():
+    clock, lim = make(rps=8.0, max_rps=20.0, min_rps=1.5)
+    rates = []
+    for _ in range(4):
+        lim.on_rate_limited(1)
+        rates.append(lim.rps)
+        clock.t += 2             # past the pause, so each 429 counts
+    assert rates == [4.0, 2.0, 1.5, 1.5]
+
+
+def test_429s_during_one_pause_halve_the_rate_once():
+    """Several requests in flight can all come back 429 for the same overload."""
+    _, lim = make(rps=8.0, max_rps=20.0)
+    for _ in range(5):
+        lim.on_rate_limited(60)
+    assert lim.rps == 4.0
+
+
+def test_after_a_429_the_rate_waits_a_clean_interval_before_climbing():
+    clock, lim = make(rps=4.0, max_rps=20.0, recover_after=10)
+    clock.t += 100             # long after the limiter started, so only the 429 restarts it
+    lim.on_rate_limited(1)
+    assert lim.rps == 2.0
+    hold_back(clock, lim)
+    clock.t += 5
+    lim.on_success()
+    assert lim.rps == 2.0
+    hold_back(clock, lim)
+    clock.t += 11
+    lim.on_success()
+    assert lim.rps == 2.5
+
+
+def test_waiting_out_a_pause_does_not_count_as_the_rate_holding_requests_back():
+    clock, lim = make(rps=4.0, max_rps=20.0, recover_after=10)
+    lim.on_rate_limited(30)
+    with lim.slot():            # waits for the pause to end, never for a token
+        pass
+    clock.t += 50
+    lim.on_success()
+    assert lim.rps == 2.0
