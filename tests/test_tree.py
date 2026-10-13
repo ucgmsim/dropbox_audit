@@ -152,3 +152,73 @@ def test_on_a_subtree_page_a_copy_outside_frees_every_copy_inside(tmp_path):
     store = listing(tmp_path, file("/R/A/f", 100, "X"), file("/R/B/g", 100, "X"),
                     file("/R/A/h", 7, "Y"), file("/R/A/i", 7, "Y"))
     assert measured(store, page="/R/A").reclaimable == 100 + 7
+
+
+# ---- layout -----------------------------------------------------------------
+
+
+def sample(tmp_path):
+    return listing(tmp_path, file("/R/big/f1", 50), file("/R/big/f2", 30),
+                   file("/R/big/small/s", 4), file("/R/mid/m", 20), file("/R/t1", 1),
+                   file("/R/t2", 2))
+
+
+def shape(row):
+    """(kind, name or entries, size, children) for every row, to compare layouts whole."""
+    label = row.entries if row.kind == "fold" else row.name
+    return (row.kind, label, row.size, [shape(c) for c in row.children])
+
+
+def test_small_entries_fold_into_one_row_per_folder(tmp_path):
+    store = sample(tmp_path)
+    page = tree.layout(store, measured(store), 10, 1000)
+    assert shape(page.root) == (
+        "dir", "R", 107, [
+            ("dir", "big", 84, [("file", "f1", 50, []), ("file", "f2", 30, []),
+                                ("fold", 1, 4, [])]),
+            ("dir", "mid", 20, [("file", "m", 20, [])]),
+            ("fold", 2, 3, []),
+        ])
+    assert page.rows == 8 and page.threshold == 10
+
+
+def test_fold_rows_and_shown_rows_add_up_to_each_folder(tmp_path):
+    store = sample(tmp_path)
+    page = tree.layout(store, measured(store), 10, 1000)
+
+    def check(row):
+        assert sum(c.size for c in row.children) == row.size
+        assert sum(c.files for c in row.children) == row.files
+        assert sum(c.folders + (c.kind == "dir") for c in row.children) == row.folders
+        for c in row.children:
+            if c.kind == "dir":
+                check(c)
+
+    check(page.root)
+
+
+def test_a_larger_threshold_folds_more(tmp_path):
+    store = sample(tmp_path)
+    page = tree.layout(store, measured(store), 25, 1000)
+    assert [shape(c)[:3] for c in page.root.children] == [("dir", "big", 84), ("fold", 3, 23)]
+
+
+def test_a_subtree_page_starts_at_that_folder(tmp_path):
+    store = sample(tmp_path)
+    page = tree.layout(store, measured(store, page="/R/big"), 10, 1000)
+    assert (page.root.name, page.root.path, page.root.size) == ("big", "big", 84)
+    assert [c.path for c in page.root.children] == ["big/f1", "big/f2", "big"]
+
+
+def test_too_many_rows_doubles_the_threshold(tmp_path):
+    store = sample(tmp_path)
+    page = tree.layout(store, measured(store), 10, 5)
+    assert (page.threshold, page.rows) == (40, 5)
+    assert [shape(c)[:3] for c in page.root.children] == [("dir", "big", 84), ("fold", 3, 23)]
+
+
+def test_file_rows_carry_their_copy_count(tmp_path):
+    store = listing(tmp_path, file("/R/a/f", 50, "X"), file("/R/b/g", 50, "X"))
+    page = tree.layout(store, measured(store, min_size=10), 10, 1000)
+    rows = [c for folder in page.root.children for c in folder.children]
+    assert [(r.name, r.copies) for r in rows] == [("f", 2), ("g", 2)]

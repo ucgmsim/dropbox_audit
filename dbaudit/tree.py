@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from array import array
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 YEAR = 365.25 * 86400
@@ -166,3 +167,122 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
         if on:
             f.reclaimable += sum(on) - (max(on) if len(on) == len(group) else 0)
     return f
+
+
+# ---- layout: which entries get a row ----------------------------------------
+
+
+def is_tiny(figures: Figures, d: int) -> bool:
+    return (figures.files[d] >= TINY_FILES
+            and figures.size[d] <= figures.files[d] * TINY_MEAN)
+
+
+@dataclass
+class Row:
+    kind: str                 # "dir", "file" or "fold"
+    name: str
+    path: str                 # below the crawl root; a fold row carries its folder's
+    size: int
+    files: int = 0
+    folders: int = 0
+    date: int = 0             # a folder's newest file, or a file's own date
+    dir_id: int = 0
+    copies: int = 1           # a file's content: copies in the listing, this one included
+    held: int = 0
+    cold: int = 0
+    tiny: bool = False
+    entries: int = 0          # a fold row: the folder's direct children folded into it
+    children: list = field(default_factory=list)
+
+
+@dataclass
+class Page:
+    root: Row
+    threshold: int            # entries below this fold
+    rows: int
+    shown: set                # dir ids with a row of their own
+
+
+def below(path: str, crawl_root: str) -> str:
+    """`path` relative to the crawl root, as `data-path` carries it."""
+    root = crawl_root.rstrip("/")
+    if path.lower() == root.lower():
+        return ""
+    if root and path.lower().startswith(root.lower() + "/"):
+        return path[len(root) + 1:]
+    return path.lstrip("/")
+
+
+def dir_names(conn, ids) -> dict[int, tuple[str, str]]:
+    """{dir id: (name, path_display)}, looked up a chunk at a time."""
+    ids, out = list(ids), {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        out.update((d, (name, path)) for d, name, path in conn.execute(
+            f"SELECT id, name, path_display FROM dirs WHERE id IN ({','.join('?' * len(chunk))})",
+            chunk))
+    return out
+
+
+def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
+    return Row("dir", name, path, f.size[d], files=f.files[d], folders=f.folders[d],
+               date=f.newest[d], dir_id=d, held=f.held[d], cold=f.cold[d],
+               tiny=is_tiny(f, d))
+
+
+def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
+    f, root = figures, figures.page_root
+    conn = store.connect()
+    top = len(f.size)
+    folders = [d for d in range(1, top) if f.on_page[d] and d != root and f.size[d] >= threshold]
+    files = [row for row in conn.execute(
+                 "SELECT rowid, dir_id, name, size, client_modified FROM files WHERE size >= ?",
+                 (threshold,))
+             if 0 < row[1] < top and f.on_page[row[1]]]
+
+    def rows_at(t):
+        shown = [d for d in folders if f.size[d] >= t]
+        subfolders = Counter(f.parent[d] for d in shown)
+        own = Counter(row[1] for row in files if row[3] >= t)
+        folds = sum(1 for d in [root, *shown]
+                    if f.kids[d] > subfolders[d] or f.own_files[d] > own[d])
+        return 1 + len(shown) + sum(own.values()) + folds
+
+    rows = rows_at(threshold)
+    while rows > max_rows and threshold <= f.size[root]:
+        threshold = max(threshold * 2, 1)
+        rows = rows_at(threshold)
+
+    shown = {d for d in folders if f.size[d] >= threshold}
+    names = dir_names(conn, shown | {root})
+    crawl_root = store.get_meta("root") or ""
+    inside = defaultdict(list)
+    for d in shown:
+        name, path = names[d]
+        inside[f.parent[d]].append(folder_row(f, d, name, below(path, crawl_root)))
+    for rowid, dir_id, name, size, modified in files:
+        if size >= threshold:
+            folder = below(names[dir_id][1], crawl_root)
+            inside[dir_id].append(Row("file", name, f"{folder}/{name}" if folder else name,
+                                      size, files=1, date=modified or 0,
+                                      copies=f.copies.get(rowid, 1)))
+
+    def assemble(row):
+        children = sorted(inside.get(row.dir_id, ()), key=lambda r: (-r.size, r.name))
+        for child in children:
+            if child.kind == "dir":
+                assemble(child)
+        subfolders = [c for c in children if c.kind == "dir"]
+        entries = (f.kids[row.dir_id] - len(subfolders)
+                   + f.own_files[row.dir_id] - (len(children) - len(subfolders)))
+        if entries:
+            children.append(Row("fold", "", row.path, row.size - sum(c.size for c in children),
+                                files=row.files - sum(c.files for c in children),
+                                folders=row.folders - sum(c.folders + 1 for c in subfolders),
+                                entries=entries))
+        row.children = children
+
+    name, path = names[root]
+    page_row = folder_row(f, root, name, below(path, crawl_root))
+    assemble(page_row)
+    return Page(page_row, threshold, rows, shown | {root})
