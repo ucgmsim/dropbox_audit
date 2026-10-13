@@ -384,3 +384,61 @@ def test_an_empty_listing_is_a_page_of_zeros(tmp_path):
     store.set_meta("root", "/R")
     outline = Outline(page_text(store))
     assert outline.open == 0 and "d0" in outline.ids
+
+
+# ---- the command ------------------------------------------------------------
+
+
+def test_the_command_writes_the_page_and_says_so(tmp_path, capsys):
+    from dbaudit.cli import main
+
+    sample(tmp_path)
+    out = tmp_path / "tree.html"
+    assert main(["tree", "--db", str(tmp_path / "audit.db"), "--out", str(out),
+                 "--min-size", "10"]) == 0
+    assert "8 rows" in capsys.readouterr().out
+    assert Outline(out.read_text(encoding="utf-8")).open == 0
+    assert not list(tmp_path.glob(".tree-*"))
+
+
+def test_the_command_refuses_a_missing_database_or_folder(tmp_path, capsys):
+    from dbaudit.cli import main
+
+    out = tmp_path / "tree.html"
+    assert main(["tree", "--db", str(tmp_path / "none.db"), "--out", str(out)]) == 2
+    assert "not initialised" in capsys.readouterr().err
+    sample(tmp_path)
+    assert main(["tree", "--db", str(tmp_path / "audit.db"), "--out", str(out),
+                 "--subtree", "/R/nowhere"]) == 2
+    assert "/R/nowhere is not in" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_sizes_are_read_in_binary_units():
+    from dbaudit.cli import parse_size
+
+    assert [parse_size(s) for s in ("1GiB", "100MiB", "512kib", "2048", "1.5KiB", "7B")] \
+        == [1 << 30, 100 << 20, 512 << 10, 2048, 1536, 7]
+
+
+def test_a_size_that_cannot_be_read_is_refused(capsys):
+    import pytest
+
+    from dbaudit.cli import main
+
+    with pytest.raises(SystemExit) as stopped:
+        main(["tree", "--db", "a.db", "--out", "t.html", "--min-size", "1GB"])
+    assert stopped.value.code == 2
+    assert "is not a size" in capsys.readouterr().err
+
+
+def test_the_command_will_not_overwrite_the_database_or_write_nowhere(tmp_path, capsys):
+    from dbaudit.cli import main
+
+    sample(tmp_path)
+    db = str(tmp_path / "audit.db")
+    assert main(["tree", "--db", db, "--out", db]) == 2
+    assert "names the database itself" in capsys.readouterr().err
+    assert main(["tree", "--db", db, "--out", str(tmp_path / "no" / "t.html")]) == 2
+    assert "is not a folder" in capsys.readouterr().err
+    assert tree.find_dir(Store(db), "/R/big") is not None  # the database is untouched

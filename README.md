@@ -57,6 +57,24 @@ The report covers:
   content.
 - **Largest directories, small-file hotspots and bytes by file type.**
 
+### A browsable page
+
+```bash
+python -m dbaudit tree --db audit.db --out tree.html
+```
+
+`tree` writes one self-contained HTML page, in the style of a `du` tree: every folder
+with its size, its share and a bar, biggest first. Folders and files under 1 GiB fold into
+one row per folder. Badges mark folders whose bytes are mostly stored elsewhere too
+(`dup`), last modified two or more years before the listing (`cold`), or made of 100,000
+or more small files (`tiny`). Tables after the tree list the biggest duplicated folders,
+the coldest big folders, folders made of tiny files, and bytes by file type and by year.
+
+- `--subtree PATH` covers one folder; duplicates are still found across the whole listing.
+- `--min-size 100MiB` shows more of the tree. `--max-rows N` (default 100,000) doubles
+  the threshold until the page fits.
+- The page holds real folder names, so share it as carefully as the database.
+
 Anything else is one SQL query away. Directories are stored once, so full paths
 take one join:
 

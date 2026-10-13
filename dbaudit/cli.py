@@ -21,6 +21,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import signal
 import socket
 import sqlite3
@@ -49,6 +50,7 @@ from .lock import InstanceLock, LockHeld
 from .store import Store
 from .verify import verify_subtree
 from . import report as reports
+from . import tree
 
 log = logging.getLogger("dbaudit")
 
@@ -110,6 +112,10 @@ DEFAULT_SPLIT_DEPTH = 6
 # leaves the other workers idle; low enough that per-shard API calls stay a rounding
 # error. 17,908 shards on one subtree was far too many; a few hundred is right.
 DEFAULT_QUEUE_TARGET = None  # => 2 x workers; see Crawler._should_split
+# `tree`: at 1 GiB the October 2026 listing made a page of about 51k rows, and 100,000
+# rows keeps a page to roughly 50 MB.
+DEFAULT_TREE_MIN_SIZE = 1 << 30
+DEFAULT_TREE_MAX_ROWS = 100_000
 
 
 def free_bytes(path: str) -> int:
@@ -129,6 +135,20 @@ def human_bytes(n: float) -> str:
             return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n)} B"
         n /= 1024
     return f"{n} B"
+
+
+SIZE_UNITS = {"": 1, "b": 1, "kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30, "tib": 1 << 40}
+
+
+def parse_size(text: str) -> int:
+    """'1GiB', '100MiB' or a plain byte count, for argparse."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGT]iB|B)?\s*", text, re.IGNORECASE)
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a size: give a byte count or a number with B, KiB, MiB, GiB "
+            "or TiB")
+    number, unit = match.groups()
+    return int(float(number) * SIZE_UNITS[(unit or "").lower()])
 
 
 def human_duration(seconds: float) -> str:
@@ -498,6 +518,42 @@ def cmd_export(args) -> int:
         return 2
     for path in reports.export_csv(store, args.out):
         print(f"wrote {path}")
+    return 0
+
+
+def cmd_tree(args) -> int:
+    store = Store(args.db)
+    if not store.is_initialised():
+        print(f"error: {args.db} is not initialised", file=sys.stderr)
+        return 2
+    if args.subtree and tree.find_dir(store, args.subtree) is None:
+        print(f"error: {args.subtree} is not in {args.db}", file=sys.stderr)
+        return 2
+    if os.path.realpath(args.out) == os.path.realpath(args.db):
+        print("error: --out names the database itself", file=sys.stderr)
+        return 2
+    folder = os.path.dirname(os.path.abspath(args.out))
+    if not os.path.isdir(folder):
+        print(f"error: {folder} is not a folder", file=sys.stderr)
+        return 2
+    started = time.time()
+    page, summary, chosen = tree.build(store, args.subtree or store.get_meta("root") or "/",
+                                       args.min_size, args.max_rows, os.path.basename(args.db))
+    # Written beside the target and renamed into place, so a failed run never leaves
+    # half a page behind.
+    fd, partial = tempfile.mkstemp(dir=folder, prefix=".tree-", suffix=".html")
+    try:
+        with open(fd, "w", encoding="utf-8") as out:
+            tree.render(out, page, summary, chosen)
+        os.chmod(partial, 0o644)
+        os.replace(partial, args.out)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(partial)
+        raise
+    print(f"wrote {args.out}: {page.rows:,} rows, {human_bytes(os.path.getsize(args.out))}, "
+          f"entries under {human_bytes(page.threshold)} folded "
+          f"({human_duration(time.time() - started)})")
     return 0
 
 
@@ -1918,6 +1974,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_index = sub.add_parser("index", help="build analysis indexes")
     p_index.add_argument("--db", required=True)
     p_index.set_defaults(func=cmd_index)
+
+    p_tree = sub.add_parser("tree", help="write a browsable HTML page of where the space goes")
+    p_tree.add_argument("--db", required=True)
+    p_tree.add_argument("--out", required=True, help="the HTML file to write")
+    p_tree.add_argument("--subtree", help="cover this folder instead of the whole crawl root")
+    p_tree.add_argument("--min-size", type=parse_size, default=DEFAULT_TREE_MIN_SIZE,
+                        help="fold entries smaller than this, e.g. 100MiB (default 1GiB)")
+    p_tree.add_argument("--max-rows", type=int, default=DEFAULT_TREE_MAX_ROWS,
+                        help="double --min-size until the page has at most this many rows")
+    p_tree.set_defaults(func=cmd_tree)
 
     p_archive = sub.add_parser("archive", help="index what is inside tar archives")
     asub = p_archive.add_subparsers(dest="archive_cmd", required=True)

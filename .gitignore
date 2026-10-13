@@ -9,6 +9,8 @@ __pycache__/
 .venv/
 exports/
 *.out
+# `dbaudit tree` pages are full of real folder names
+*.html
 
 # Claude Code design notes (specs, plans) are not kept on this branch
 docs/superpowers/
