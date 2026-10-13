@@ -7,14 +7,16 @@ the response to a 429 is to park *every* worker for the full ``Retry-After`` --
 letting the other workers keep firing during a five-minute penalty is what turns a
 brief stall into a long outage.
 
-Concurrency follows additive-increase/additive-decrease: one worker off per 429, one
+Concurrency follows additive-increase/additive-decrease: one worker off per pause, one
 back after a clean interval.
 
 The request rate follows additive-increase/multiplicative-decrease, as TCP does. It
-starts at ``rps``, the rate measured safe, and rises by ``rate_step`` after each clean
-interval in which it held requests back, up to ``max_rps``; a 429 halves it, never below
-``min_rps``. It climbs only while it is the bottleneck, so it cannot drift up unused and
-then burst, and it climbs slowly because a 429 can cost every worker five minutes.
+starts at ``rps``, the rate measured safe. After each clean interval in which requests
+went out at no less than 90% of the rate -- so the rate, not latency or the number of
+workers, was what held them back -- it rises by 0.5/s, up to ``max_rps``. A 429 halves
+it, once per pause, never below 1/s. Clean intervals are counted from the end of a pause:
+waiting one out says nothing about what Dropbox will take. The rate climbs slowly
+because a 429 can cost every worker five minutes.
 """
 
 from __future__ import annotations
@@ -25,6 +27,10 @@ import time
 from contextlib import contextmanager
 
 log = logging.getLogger("dbaudit.limiter")
+
+RATE_STEP = 0.5       # requests/s added after an interval the rate was the bottleneck of
+MIN_RPS = 1.0         # a 429 never halves the rate below this
+SATURATED = 0.9       # share of the rate an interval's requests must reach to count
 
 
 class AdaptiveLimiter:
@@ -38,14 +44,12 @@ class AdaptiveLimiter:
         clock=time.monotonic,
         sleep=time.sleep,
         max_rps: float | None = None,
-        min_rps: float = 1.0,
-        rate_step: float = 0.5,
     ):
-        self.rps = float(rps)
-        # Without a ceiling above the starting rate, the rate stays fixed.
-        self.max_rps = max(self.rps, float(max_rps)) if max_rps is not None else self.rps
-        self.min_rps = min(float(min_rps), self.rps)
-        self.rate_step = float(rate_step)
+        # Without a ceiling above the starting rate, the rate never climbs past where
+        # it started; a 429 still halves it.
+        self.max_rps = float(max_rps) if max_rps is not None else float(rps)
+        self.rps = min(float(rps), self.max_rps)
+        self.min_rps = min(MIN_RPS, self.rps)
         self.max_concurrency = int(max_concurrency)
         self.min_concurrency = int(min_concurrency)
         self.recover_after = float(recover_after)
@@ -60,8 +64,8 @@ class AdaptiveLimiter:
         self._last_refill = clock()
         self._paused_until = 0.0
         self._last_429 = float("-inf")
-        self._held_back = False         # the rate made a request wait since it last changed
-        self._rate_changed_at = clock()
+        self._interval_start = clock()  # the clean interval the rate is judged over
+        self._granted = 0               # requests let through since it began
         self.rate_limit_events = 0
 
     # ---- observable state ---------------------------------------------
@@ -99,10 +103,10 @@ class AdaptiveLimiter:
             if self._in_flight >= self._concurrency:
                 return 0.05  # a peer will finish; poll rather than sleep on a condvar
             if self._tokens < 1.0:
-                self._held_back = True
                 return max((1.0 - self._tokens) / self.rps, 0.001)
             self._tokens -= 1.0
             self._in_flight += 1
+            self._granted += 1
             return 0.0
 
     def _release(self) -> None:
@@ -128,30 +132,30 @@ class AdaptiveLimiter:
         with self._lock:
             now = self.clock()
             # Requests in flight when Dropbox objects all come back 429 together: one
-            # overload, so the rate is halved once per pause rather than once per reply.
-            halve = now >= self._paused_until
+            # overload, so one halving of the rate and one worker fewer per pause.
+            first = now >= self._paused_until
             self._paused_until = max(self._paused_until, now + float(retry_after))
-            self._last_429 = now
-            self._concurrency = max(self.min_concurrency, self._concurrency - 1)
             self.rate_limit_events += 1
-            if halve:
+            if first:
                 self.rps = max(self.min_rps, self.rps / 2)
-            self._rate_changed_at = now
-            self._held_back = False
+                self._concurrency = max(self.min_concurrency, self._concurrency - 1)
+            self._last_429 = self._interval_start = self._paused_until
+            self._granted = 0
             rate = self.rps
-        if halve:
+        if first:
             log.warning("rate limited by Dropbox: request rate down to %.2f/s", rate)
 
     def on_success(self) -> None:
         raised = None
         with self._lock:
             now = self.clock()
-            if (self._held_back and self.rps < self.max_rps
-                    and now - self._rate_changed_at > self.recover_after):
-                self.rps = min(self.max_rps, self.rps + self.rate_step)
-                self._rate_changed_at = now
-                self._held_back = False
-                raised = self.rps
+            elapsed = now - self._interval_start
+            if elapsed > self.recover_after:
+                if (self.rps < self.max_rps
+                        and self._granted >= SATURATED * self.rps * elapsed):
+                    self.rps = min(self.max_rps, self.rps + RATE_STEP)
+                    raised = self.rps
+                self._interval_start, self._granted = now, 0
             if (self._concurrency < self.max_concurrency
                     and now - self._last_429 > self.recover_after):
                 self._concurrency += 1

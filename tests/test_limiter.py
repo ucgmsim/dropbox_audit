@@ -35,25 +35,28 @@ def test_rate_limit_pauses_globally_for_retry_after():
 
 
 def test_rate_limit_reduces_concurrency():
-    _, lim = make(max_concurrency=8)
+    clock, lim = make(max_concurrency=8)
     lim.on_rate_limited(5)
     assert lim.concurrency == 7
+    clock.t += 6
     lim.on_rate_limited(5)
     assert lim.concurrency == 6
 
 
 def test_concurrency_never_below_minimum():
-    _, lim = make(max_concurrency=2, min_concurrency=1)
+    clock, lim = make(max_concurrency=2, min_concurrency=1)
     for _ in range(5):
         lim.on_rate_limited(1)
+        clock.t += 2
     assert lim.concurrency == 1
 
 
 def test_concurrency_recovers_after_clean_interval():
+    """The interval is counted from the end of the 1 s pause."""
     clock, lim = make(max_concurrency=8, recover_after=300)
     lim.on_rate_limited(1)
     assert lim.concurrency == 7
-    clock.t += 301
+    clock.t += 302
     lim.on_success()
     assert lim.concurrency == 8
 
@@ -121,72 +124,64 @@ def test_concurrency_cap_is_enforced_across_threads():
     assert peak <= 3
 
 
-def hold_back(clock, lim, n=4):
-    """Take n slots back to back, so the token bucket makes callers wait."""
-    for _ in range(n):
+def saturate(clock, lim, seconds):
+    """Requests back to back for `seconds`: as many as the rate allows."""
+    end = clock.t + seconds
+    while clock.t < end:
         with lim.slot():
             pass
+        lim.on_success()
 
 
-def test_the_rate_climbs_while_it_holds_requests_back_and_stops_at_the_ceiling():
+def test_the_rate_climbs_once_per_interval_it_was_the_bottleneck_and_stops_at_the_ceiling():
     clock, lim = make(rps=2.0, max_rps=2.8, recover_after=10)
     seen = []
     for _ in range(3):
-        hold_back(clock, lim)
-        clock.t += 11
-        lim.on_success()
+        saturate(clock, lim, 11)
         seen.append(lim.rps)
     assert seen == [2.5, 2.8, 2.8]
 
 
-def test_the_rate_does_not_climb_unless_it_held_requests_back():
-    clock, lim = make(rps=2.0, max_rps=10.0, recover_after=10)
-    for _ in range(30):
-        clock.t += 1.0          # slower than the rate allows: never waits on a token
-        with lim.slot():
-            pass
-        lim.on_success()
+def test_the_rate_does_not_climb_when_requests_go_out_slower_than_it_allows():
+    """Pairs of requests 2 s apart: the bucket holds back the second of each pair, but
+    1 request/s on average is the workers' pace, not the rate's."""
+    clock, lim = make(rps=2.0, max_rps=20.0, recover_after=10)
+    for _ in range(40):
+        for _ in range(2):
+            with lim.slot():
+                pass
+            lim.on_success()
+        clock.t += 2
     assert lim.rps == 2.0
 
 
-def test_a_429_halves_the_rate_but_not_below_the_minimum():
-    clock, lim = make(rps=8.0, max_rps=20.0, min_rps=1.5)
-    rates = []
-    for _ in range(4):
-        lim.on_rate_limited(1)
-        rates.append(lim.rps)
-        clock.t += 2             # past the pause, so each 429 counts
-    assert rates == [4.0, 2.0, 1.5, 1.5]
-
-
-def test_429s_during_one_pause_halve_the_rate_once():
-    """Several requests in flight can all come back 429 for the same overload."""
-    _, lim = make(rps=8.0, max_rps=20.0)
-    for _ in range(5):
-        lim.on_rate_limited(60)
-    assert lim.rps == 4.0
-
-
-def test_after_a_429_the_rate_waits_a_clean_interval_before_climbing():
+def test_a_clean_interval_starts_only_when_the_pause_is_over():
     clock, lim = make(rps=4.0, max_rps=20.0, recover_after=10)
-    clock.t += 100             # long after the limiter started, so only the 429 restarts it
-    lim.on_rate_limited(1)
+    lim.on_rate_limited(30)             # rate 2.0; everything waits until t=30
+    saturate(clock, lim, 35)            # the pause, then 5 s at the full rate
     assert lim.rps == 2.0
-    hold_back(clock, lim)
-    clock.t += 5
-    lim.on_success()
-    assert lim.rps == 2.0
-    hold_back(clock, lim)
-    clock.t += 11
-    lim.on_success()
+    saturate(clock, lim, 7)             # now a whole clean interval
     assert lim.rps == 2.5
 
 
-def test_waiting_out_a_pause_does_not_count_as_the_rate_holding_requests_back():
-    clock, lim = make(rps=4.0, max_rps=20.0, recover_after=10)
-    lim.on_rate_limited(30)
-    with lim.slot():            # waits for the pause to end, never for a token
-        pass
-    clock.t += 50
-    lim.on_success()
-    assert lim.rps == 2.0
+def test_429s_during_one_pause_halve_the_rate_and_drop_a_worker_once():
+    """Several requests in flight can all come back 429 for the same overload."""
+    _, lim = make(rps=8.0, max_rps=20.0, max_concurrency=8)
+    for _ in range(5):
+        lim.on_rate_limited(60)
+    assert (lim.rps, lim.concurrency) == (4.0, 7)
+
+
+def test_a_429_halves_the_rate_but_not_below_one_request_a_second():
+    clock, lim = make(rps=8.0, max_rps=20.0)
+    rates = []
+    for _ in range(5):
+        lim.on_rate_limited(1)
+        rates.append(lim.rps)
+        clock.t += 2             # past the pause, so each 429 counts
+    assert rates == [4.0, 2.0, 1.0, 1.0, 1.0]
+
+
+def test_a_ceiling_below_the_starting_rate_lowers_the_start():
+    _, lim = make(rps=5.0, max_rps=3.0)
+    assert lim.rps == 3.0
