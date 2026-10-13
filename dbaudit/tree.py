@@ -8,6 +8,7 @@ and `tables` picks the folders worth a closer look. `render` writes the HTML.
 
 from __future__ import annotations
 
+import heapq
 import html
 import time
 from array import array
@@ -49,7 +50,7 @@ class Figures:
     held: array           # bytes whose content also exists outside the folder
     on_page: bytearray    # 1 for the page root and everything below it
     page_root: int
-    copies: dict = field(default_factory=dict)  # files.rowid -> copies of its content
+    copies: array = field(default_factory=lambda: array("I"))  # by files.rowid: copies, or 0
     reclaimable: int = 0  # page bytes deletable while one copy of everything stays
 
 
@@ -113,6 +114,7 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
     # Bound the snapshot before reading it: folders created while a crawl runs get
     # higher ids, and a folder's parent is always created before the folder.
     top = conn.execute("SELECT COALESCE(MAX(id), 0) FROM dirs").fetchone()[0] + 1
+    rowids = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] + 1
 
     def zeros():
         return array("q", [0]) * top
@@ -120,7 +122,7 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
     f = Figures(parent=zeros(), depth=zeros(), order=array("q"), kids=zeros(),
                 own_files=zeros(), files=zeros(), folders=zeros(), size=zeros(),
                 newest=zeros(), cold=zeros(), held=zeros(), on_page=bytearray(top),
-                page_root=page_root)
+                page_root=page_root, copies=array("I", [0]) * rowids)
     for dir_id, parent_id, depth in conn.execute(
             "SELECT id, parent_id, depth FROM dirs WHERE id < ? ORDER BY depth DESC", (top,)):
         f.parent[dir_id] = parent_id or 0
@@ -155,7 +157,7 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
 
     for group in duplicate_groups(conn, top):
         for _, size, rowid in group:
-            if size >= min_size:
+            if size >= min_size and rowid < rowids:
                 f.copies[rowid] = len(group)
         dirs = [d for d, _, _ in group]
         if min(dirs) != max(dirs):
@@ -216,15 +218,25 @@ def below(path: str, crawl_root: str) -> str:
     return path.lstrip("/")
 
 
-def dir_names(conn, ids) -> dict[int, tuple[str, str]]:
-    """{dir id: (name, path_display)}, looked up a chunk at a time."""
-    ids, out = list(ids), {}
+def chunked(conn, query: str, ids):
+    """The rows `query` finds for `ids`, a chunk at a time; it ends in `IN ({})`."""
+    ids = list(ids)
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
-        out.update((d, (name, path)) for d, name, path in conn.execute(
-            f"SELECT id, name, path_display FROM dirs WHERE id IN ({','.join('?' * len(chunk))})",
-            chunk))
-    return out
+        yield from conn.execute(query.format(",".join("?" * len(chunk))), chunk)
+
+
+def dir_names(conn, ids) -> dict[int, tuple[str, str]]:
+    """{dir id: (name, path_display)}."""
+    return {d: (name, path) for d, name, path in
+            chunked(conn, "SELECT id, name, path_display FROM dirs WHERE id IN ({})", ids)}
+
+
+def past(threshold: int, size: int) -> int:
+    """The first threshold, doubling from `threshold`, that is above `size`."""
+    while threshold <= size:
+        threshold = max(threshold * 2, 1)
+    return threshold
 
 
 def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
@@ -237,16 +249,24 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
     f, root = figures, figures.page_root
     conn = store.connect()
     top = len(f.size)
-    folders = [d for d in range(1, top) if f.on_page[d] and d != root and f.size[d] >= threshold]
-    files = [row for row in conn.execute(
-                 "SELECT rowid, dir_id, name, size, client_modified FROM files WHERE size >= ?",
-                 (threshold,))
-             if 0 < row[1] < top and f.on_page[row[1]]]
+    # Each folder and file at or above the threshold gets a row, so while more than
+    # max_rows of either qualify the page cannot fit: start past the (max_rows + 1)-th
+    # largest. Memory then follows --max-rows, whatever --min-size is.
+    folders = heapq.nlargest(max_rows + 1, (d for d in range(1, top) if f.on_page[d]
+                                            and d != root and f.size[d] >= threshold),
+                             key=lambda d: f.size[d])
+    if len(folders) > max_rows:
+        threshold = past(threshold, f.size[folders[-1]])
+    files = heapq.nlargest(max_rows + 1, (row for row in conn.execute(
+                               "SELECT rowid, dir_id, size FROM files WHERE size >= ?", (threshold,))
+                           if 0 < row[1] < top and f.on_page[row[1]]), key=lambda row: row[2])
+    if len(files) > max_rows:
+        threshold = past(threshold, files[-1][2])
 
     def rows_at(t):
         shown = [d for d in folders if f.size[d] >= t]
         subfolders = Counter(f.parent[d] for d in shown)
-        own = Counter(row[1] for row in files if row[3] >= t)
+        own = Counter(row[1] for row in files if row[2] >= t)
         folds = sum(1 for d in [root, *shown]
                     if f.kids[d] > subfolders[d] or f.own_files[d] > own[d])
         return 1 + len(shown) + sum(own.values()) + folds
@@ -258,17 +278,21 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
 
     shown = {d for d in folders if f.size[d] >= threshold}
     names = dir_names(conn, shown | {root})
+    details = {rowid: (name, modified) for rowid, name, modified in chunked(
+        conn, "SELECT rowid, name, client_modified FROM files WHERE rowid IN ({})",
+        [row[0] for row in files if row[2] >= threshold])}
     crawl_root = store.get_meta("root") or ""
     inside = defaultdict(list)
     for d in shown:
         name, path = names[d]
         inside[f.parent[d]].append(folder_row(f, d, name, below(path, crawl_root)))
-    for rowid, dir_id, name, size, modified in files:
+    for rowid, dir_id, size in files:
         if size >= threshold:
+            name, modified = details[rowid]
             folder = below(names[dir_id][1], crawl_root)
+            copies = f.copies[rowid] if rowid < len(f.copies) else 0
             inside[dir_id].append(Row("file", name, f"{folder}/{name}" if folder else name,
-                                      size, files=1, date=modified or 0,
-                                      copies=f.copies.get(rowid, 1)))
+                                      size, files=1, date=modified or 0, copies=copies or 1))
 
     def assemble(row):
         children = sorted(inside.get(row.dir_id, ()), key=lambda r: (-r.size, r.name))

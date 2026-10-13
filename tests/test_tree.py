@@ -133,14 +133,14 @@ def test_a_copy_in_a_subfolder_counts_only_there(tmp_path):
 def test_empty_files_are_never_duplicates(tmp_path):
     store = listing(tmp_path, file("/R/A/f", 0, "E"), file("/R/B/g", 0, "E"))
     f = measured(store)
-    assert f.held[at(store, "/R/A")] == 0 and f.copies == {} and f.reclaimable == 0
+    assert f.held[at(store, "/R/A")] == 0 and not any(f.copies) and f.reclaimable == 0
 
 
 def test_copies_are_counted_for_files_that_can_get_a_row(tmp_path):
     store = listing(tmp_path, file("/R/a", 100, "X"), file("/R/b", 100, "X"),
                     file("/R/c", 100, "X"), file("/R/d", 5, "Y"), file("/R/e", 5, "Y"))
     f = measured(store, min_size=50)
-    assert sorted(f.copies.values()) == [3, 3, 3]
+    assert sorted(c for c in f.copies if c) == [3, 3, 3]
 
 
 def test_reclaimable_on_the_whole_listing_matches_the_report(tmp_path):
@@ -154,6 +154,22 @@ def test_on_a_subtree_page_a_copy_outside_frees_every_copy_inside(tmp_path):
     store = listing(tmp_path, file("/R/A/f", 100, "X"), file("/R/B/g", 100, "X"),
                     file("/R/A/h", 7, "Y"), file("/R/A/i", 7, "Y"))
     assert measured(store, page="/R/A").reclaimable == 100 + 7
+
+
+def test_copy_counts_stay_compact_at_any_min_size(tmp_path):
+    """A count is kept for every duplicated file the page could show; at a small
+    --min-size that is most of the listing, so it must cost bytes per file, not objects."""
+    import tracemalloc
+
+    store = listing(tmp_path, *(file(f"/R/{side}/{i:05}", 10, f"c{i}")
+                                for side in "ab" for i in range(3000)))
+    page_root = at(store, "/R")
+    tracemalloc.start()
+    figures = tree.measure(store, LISTED, 0, page_root)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert sum(1 for c in figures.copies if c) == 6000
+    assert peak < 250_000, peak
 
 
 # ---- layout -----------------------------------------------------------------
@@ -224,6 +240,21 @@ def test_file_rows_carry_their_copy_count(tmp_path):
     page = tree.layout(store, measured(store, min_size=10), 10, 1000)
     rows = [c for folder in page.root.children for c in folder.children]
     assert [(r.name, r.copies) for r in rows] == [("f", 2), ("g", 2)]
+
+
+def test_layout_holds_only_as_many_files_as_the_page_can_show(tmp_path):
+    """Memory follows --max-rows, not --min-size: while the threshold is chosen no more
+    than max_rows + 1 files are held, and names are read only for the files shown."""
+    import tracemalloc
+
+    store = listing(tmp_path, *(file(f"/R/many/{i:05}", 1) for i in range(5000)))
+    figures = measured(store)
+    tracemalloc.start()
+    page = tree.layout(store, figures, 1, 5)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert (page.threshold, page.rows) == (2, 3)
+    assert peak < 300_000, peak
 
 
 # ---- tables -----------------------------------------------------------------
