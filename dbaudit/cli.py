@@ -424,11 +424,12 @@ def cmd_report(args) -> int:
         return 2
 
     prog = store.progress()
-    pending = store.pending_count() + store.running_count()
+    unfinished = store.pending_count() + store.running_count() + prog["shards_error"]
     root = store.get_meta("root")
     print(f"# Storage audit of {root}")
-    if pending:
-        print(f"\n  WARNING: the crawl is incomplete -- {pending} shard(s) outstanding.")
+    if unfinished:
+        print(f"\n  WARNING: the crawl is incomplete -- {unfinished} shard(s) unfinished "
+              f"or failed.")
         print("  Every figure below is a lower bound.")
     print(f"\n{prog['files']:,} files, {prog['dirs']:,} directories, "
           f"{human_bytes(prog['bytes'])} of live data\n")

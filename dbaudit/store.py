@@ -271,15 +271,16 @@ class Store:
         Resuming would repeat the request that kept failing; starting over lets the
         crawler split a subtree that was too much for one listing.
         """
-        failed = [row[0] for row in self.connect().execute(
-            "SELECT id FROM shards WHERE state='error'").fetchall()]
-        for shard_id in failed:
+        # A shard that never committed a page has no rows to drop and no cursor, so it
+        # is spared clear_cursor's scan of `files`, which has no index on shard_id.
+        listed = [row[0] for row in self.connect().execute(
+            "SELECT id FROM shards WHERE state='error' AND pages > 0").fetchall()]
+        for shard_id in listed:
             self.clear_cursor(shard_id)
-        self.connect().execute(
+        return self.connect().execute(
             "UPDATE shards SET state='pending', owner=NULL, error=NULL, finished_at=NULL "
             "WHERE state='error'"
-        )
-        return len(failed)
+        ).rowcount
 
     def pending_count(self) -> int:
         return self.connect().execute(

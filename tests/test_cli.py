@@ -76,3 +76,16 @@ def test_human_bytes(value, expected):
 )
 def test_human_duration(value, expected):
     assert human_duration(value) == expected
+
+
+def test_report_calls_a_crawl_with_failed_shards_incomplete(tmp_path, capsys, monkeypatch):
+    """Nothing is pending or running, but /R/b failed: its files are missing."""
+    db, store = seeded_db(tmp_path)
+    store.fail_shard(2, "transient failures exhausted")
+
+    def offline(remote):
+        raise RuntimeError("no network in tests")
+
+    monkeypatch.setattr("dbaudit.cli._space_usage", offline)
+    main(["report", "--db", str(db)])
+    assert "incomplete" in capsys.readouterr().out
