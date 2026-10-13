@@ -386,6 +386,23 @@ def test_an_empty_listing_is_a_page_of_zeros(tmp_path):
     assert outline.open == 0 and "d0" in outline.ids
 
 
+def test_a_crawl_writing_while_the_page_is_built_cannot_reach_it(tmp_path, monkeypatch):
+    """Every query reads one snapshot. Read separately, a big file committed after
+    measuring lands in a folder measured as small, which has no row to hold it."""
+    store = listing(tmp_path, file("/R/a/x", 5), file("/R/b/y", 50))
+    crawler = Store(tmp_path / "audit.db")
+    measure = tree.measure
+
+    def measure_then_crawl(*args):
+        figures = measure(*args)
+        crawler.commit_page(1, [file("/R/a/late", 1000)], cursor=None, has_more=False)
+        return figures
+
+    monkeypatch.setattr(tree, "measure", measure_then_crawl)
+    page, _, _ = tree.build(store, "/R", 10, 1000, "audit.db")
+    assert (page.root.size, page.rows) == (55, 4)
+
+
 # ---- the command ------------------------------------------------------------
 
 

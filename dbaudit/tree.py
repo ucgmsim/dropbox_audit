@@ -423,27 +423,35 @@ class Summary:
 
 def build(store, page_path: str, min_size: int, max_rows: int, db_name: str):
     """(page, summary, tables) for the folder at `page_path`."""
-    listed, finished = crawl_time(store)
-    crawl_root = store.get_meta("root") or ""
-    found = find_dir(store, page_path)
-    if found is None:  # nothing listed yet
-        page, chosen, reclaimable = (Page(Row("dir", page_path, "", 0), min_size, 1, {0}),
-                                     {"dup": [], "cold": [], "tiny": []}, 0)
-    else:
-        figures = measure(store, listed, min_size, found[0])
-        page = layout(store, figures, min_size, max_rows)
-        chosen = tables(store, figures, page)
-        reclaimable = figures.reclaimable
-    whole = page_path.rstrip("/").lower() == crawl_root.rstrip("/").lower()
-    under = None if whole else page_path
-    summary = Summary(
-        title=found[1] if found else page_path, db_name=db_name, listed=listed,
-        finished=finished, generated=time.time(), reclaimable=reclaimable,
-        pending=store.pending_count(), running=store.running_count(),
-        failed=store.progress()["shards_error"], min_size=min_size,
-        types=report.extension_profile(store, limit=TYPE_ROWS, under=under),
-        years=report.cold_bytes(store, under=under))
-    return page, summary, chosen
+    conn = store.connect()
+    # One read transaction for every query below: read separately, a crawl still writing
+    # could show measure one listing and layout another.
+    conn.execute("BEGIN")
+    try:
+        listed, finished = crawl_time(store)
+        crawl_root = store.get_meta("root") or ""
+        found = find_dir(store, page_path)
+        if found is None:  # nothing listed yet
+            page, chosen, reclaimable = (Page(Row("dir", page_path, "", 0), min_size, 1, {0}),
+                                         {"dup": [], "cold": [], "tiny": []}, 0)
+        else:
+            figures = measure(store, listed, min_size, found[0])
+            page = layout(store, figures, min_size, max_rows)
+            chosen = tables(store, figures, page)
+            reclaimable = figures.reclaimable
+        whole = page_path.rstrip("/").lower() == crawl_root.rstrip("/").lower()
+        under = None if whole else page_path
+        summary = Summary(
+            title=found[1] if found else page_path, db_name=db_name, listed=listed,
+            finished=finished, generated=time.time(), reclaimable=reclaimable,
+            pending=store.pending_count(), running=store.running_count(),
+            failed=store.progress()["shards_error"], min_size=min_size,
+            types=report.extension_profile(store, limit=TYPE_ROWS, under=under),
+            years=report.cold_bytes(store, under=under))
+        return page, summary, chosen
+    finally:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
 
 
 # ---- render: the HTML -------------------------------------------------------
