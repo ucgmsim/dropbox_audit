@@ -1,7 +1,7 @@
 import calendar
 import hashlib
 
-from dbaudit import tree
+from dbaudit import report, tree
 from dbaudit.store import Store
 
 LISTED = calendar.timegm((2026, 10, 1, 0, 0, 0, 0, 0, 0))
@@ -92,3 +92,63 @@ def test_the_listing_time_is_when_a_pass_finished_or_else_began(tmp_path):
     assert tree.crawl_time(store) == (1000.0, False)
     store.set_meta("last_pass_completed_at", 2000.0)
     assert tree.crawl_time(store) == (2000.0, True)
+
+
+# ---- duplicates -------------------------------------------------------------
+
+
+def test_files_in_folders_newer_than_the_snapshot_are_left_out(tmp_path):
+    """A page can be made while a crawl is still writing: rows that arrive mid-read
+    reference folders the snapshot never saw."""
+    store = listing(tmp_path, file("/R/a/x", 5, "X"))
+    store.connect().execute(
+        "INSERT INTO files(dbx_id, dir_id, name, size, content_hash) "
+        "VALUES('id:late', 9999, 'late', 3, ?)", (hashlib.sha256(b"X").digest(),))
+    f = measured(store)
+    assert f.size[at(store, "/R")] == 5 and f.held[at(store, "/R/a")] == 0
+
+
+def test_a_copy_elsewhere_counts_in_both_folders_and_not_their_parent(tmp_path):
+    store = listing(tmp_path, file("/R/P/A/x/f", 100, "X"), file("/R/P/B/x/g", 100, "X"))
+    f = measured(store)
+    for path in ("/R/P/A", "/R/P/A/x", "/R/P/B", "/R/P/B/x"):
+        assert f.held[at(store, path)] == 100, path
+    assert f.held[at(store, "/R/P")] == 0 and f.held[at(store, "/R")] == 0
+
+
+def test_two_copies_in_one_folder_count_nowhere(tmp_path):
+    store = listing(tmp_path, file("/R/P/A/f", 100, "X"), file("/R/P/A/g", 100, "X"))
+    f = measured(store)
+    assert f.held[at(store, "/R/P/A")] == 0 and f.held[at(store, "/R/P")] == 0
+
+
+def test_a_copy_in_a_subfolder_counts_only_there(tmp_path):
+    store = listing(tmp_path, file("/R/A/f", 100, "X"), file("/R/A/sub/g", 100, "X"))
+    f = measured(store)
+    assert f.held[at(store, "/R/A/sub")] == 100 and f.held[at(store, "/R/A")] == 0
+
+
+def test_empty_files_are_never_duplicates(tmp_path):
+    store = listing(tmp_path, file("/R/A/f", 0, "E"), file("/R/B/g", 0, "E"))
+    f = measured(store)
+    assert f.held[at(store, "/R/A")] == 0 and f.copies == {} and f.reclaimable == 0
+
+
+def test_copies_are_counted_for_files_that_can_get_a_row(tmp_path):
+    store = listing(tmp_path, file("/R/a", 100, "X"), file("/R/b", 100, "X"),
+                    file("/R/c", 100, "X"), file("/R/d", 5, "Y"), file("/R/e", 5, "Y"))
+    f = measured(store, min_size=50)
+    assert sorted(f.copies.values()) == [3, 3, 3]
+
+
+def test_reclaimable_on_the_whole_listing_matches_the_report(tmp_path):
+    store = listing(tmp_path, file("/R/A/f", 100, "X"), file("/R/B/g", 100, "X"),
+                    file("/R/B/h", 100, "X"), file("/R/C/i", 7, "Y"), file("/R/C/j", 7, "Y"),
+                    file("/R/D/k", 50))
+    assert measured(store).reclaimable == report.total_reclaimable_duplicates(store) == 207
+
+
+def test_on_a_subtree_page_a_copy_outside_frees_every_copy_inside(tmp_path):
+    store = listing(tmp_path, file("/R/A/f", 100, "X"), file("/R/B/g", 100, "X"),
+                    file("/R/A/h", 7, "Y"), file("/R/A/i", 7, "Y"))
+    assert measured(store, page="/R/A").reclaimable == 100 + 7

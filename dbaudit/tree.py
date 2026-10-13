@@ -64,6 +64,45 @@ def crawl_time(store) -> tuple[float, bool]:
     return float(store.get_meta("created_at") or time.time()), False
 
 
+# Every content stored more than once, copy by copy, in content order. Empty files
+# are left out: they all share one hash and hold no bytes.
+DUPLICATES = (
+    "SELECT content_hash, dir_id, size, rowid FROM files "
+    "WHERE size > 0 AND content_hash IN ("
+    "  SELECT content_hash FROM files WHERE size > 0 AND content_hash IS NOT NULL "
+    "  GROUP BY content_hash HAVING COUNT(*) > 1) "
+    "ORDER BY content_hash"
+)
+
+
+def duplicate_groups(conn, top: int):
+    """Yield each duplicated content's copies as (dir_id, size, rowid), one content at a
+    time, so memory stays flat however many duplicates there are."""
+    group, last = [], None
+    for digest, dir_id, size, rowid in conn.execute(DUPLICATES):
+        if digest != last:
+            if len(group) > 1:
+                yield group
+            group, last = [], digest
+        if 0 < dir_id < top:
+            group.append((dir_id, size, rowid))
+    if len(group) > 1:
+        yield group
+
+
+def common_folder(dirs: list[int], parent, depth) -> int:
+    """The deepest folder holding every one of `dirs`: their lowest common ancestor."""
+    meet = dirs[0]
+    for other in dirs[1:]:
+        while depth[meet] > depth[other]:
+            meet = parent[meet]
+        while depth[other] > depth[meet]:
+            other = parent[other]
+        while meet != other:
+            meet, other = parent[meet], parent[other]
+    return meet
+
+
 def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
     """Figures for every folder, as of `listed`, the time the listing was taken."""
     conn = store.connect()
@@ -110,4 +149,20 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
         if f.on_page[f.parent[dir_id]]:
             f.on_page[dir_id] = 1
 
+    for group in duplicate_groups(conn, top):
+        for _, size, rowid in group:
+            if size >= min_size:
+                f.copies[rowid] = len(group)
+        dirs = [d for d, _, _ in group]
+        if min(dirs) != max(dirs):
+            # A copy's bytes are held elsewhere from each folder on its path below the
+            # deepest folder holding every copy; that folder and those above hold them all.
+            meet = common_folder(dirs, f.parent, f.depth)
+            for d, size, _ in group:
+                while d != meet:
+                    f.held[d] += size
+                    d = f.parent[d]
+        on = [size for d, size, _ in group if f.on_page[d]]
+        if on:
+            f.reclaimable += sum(on) - (max(on) if len(on) == len(group) else 0)
     return f
