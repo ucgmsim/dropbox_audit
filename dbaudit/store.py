@@ -238,14 +238,15 @@ class Store:
 
         Directory rows are deliberately left alone. A directory may have been created
         as an ancestor of another shard's files, and deleting it here would orphan
-        their dir_id. Re-listing upserts directories anyway.
+        their dir_id. Re-listing upserts directories anyway -- and inserts none of
+        these, so `n_dirs` keeps counting them.
         """
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM files WHERE shard_id=?", (shard_id,))
             conn.execute(
-                "UPDATE shards SET cursor=NULL, pages=0, entries=0, n_files=0, n_dirs=0, "
+                "UPDATE shards SET cursor=NULL, pages=0, entries=0, n_files=0, "
                 "bytes=0 WHERE id=?",
                 (shard_id,),
             )

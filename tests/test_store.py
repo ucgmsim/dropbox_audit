@@ -141,6 +141,18 @@ def test_clear_cursor_removes_rows_from_that_shard_only(tmp_path):
     assert store.get_shard(keep).cursor == "c"
 
 
+def test_relisting_after_clear_cursor_keeps_the_folder_count(tmp_path):
+    """clear_cursor keeps a shard's folder rows, so listing again inserts none of them:
+    the count must keep them too, or `status` and `report` come out low."""
+    store = new_store(tmp_path)
+    sid = store.add_shard("/TeamSpace/x", depth=2, mode="recursive")
+    store.claim_shard("w1")
+    store.commit_page(sid, [FOLDER, FILE], cursor="c1", has_more=False)
+    store.clear_cursor(sid)
+    store.commit_page(sid, [FOLDER, FILE], cursor="c2", has_more=False)
+    assert store.progress()["dirs"] == store.stats()["dirs"] == 2
+
+
 def test_content_hash_stored_as_blob(tmp_path):
     store = new_store(tmp_path)
     sid = store.add_shard("/a", 1, "recursive")
