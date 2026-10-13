@@ -134,12 +134,13 @@ def saturate(clock, lim, seconds):
 
 
 def test_the_rate_climbs_once_per_interval_it_was_the_bottleneck_and_stops_at_the_ceiling():
+    """Climbs at about t=10.5; not again until a whole interval later, about t=21."""
     clock, lim = make(rps=2.0, max_rps=2.8, recover_after=10)
     seen = []
-    for _ in range(3):
-        saturate(clock, lim, 11)
+    for seconds in (11, 7, 4, 11):
+        saturate(clock, lim, seconds)
         seen.append(lim.rps)
-    assert seen == [2.5, 2.8, 2.8]
+    assert seen == [2.5, 2.5, 2.8, 2.8]
 
 
 def test_the_rate_does_not_climb_when_requests_go_out_slower_than_it_allows():
@@ -155,13 +156,21 @@ def test_the_rate_does_not_climb_when_requests_go_out_slower_than_it_allows():
     assert lim.rps == 2.0
 
 
-def test_a_clean_interval_starts_only_when_the_pause_is_over():
+def test_a_clean_interval_starts_when_the_pause_ends():
     clock, lim = make(rps=4.0, max_rps=20.0, recover_after=10)
-    lim.on_rate_limited(30)             # rate 2.0; everything waits until t=30
-    saturate(clock, lim, 35)            # the pause, then 5 s at the full rate
+    lim.on_rate_limited(5)              # rate 2.0; everything waits until t=5
+    saturate(clock, lim, 14)            # the pause, then 9 s at the full rate
     assert lim.rps == 2.0
-    saturate(clock, lim, 7)             # now a whole clean interval
+    saturate(clock, lim, 2)             # a whole clean interval since the pause ended
     assert lim.rps == 2.5
+
+
+def test_concurrency_does_not_recover_as_a_pause_ends():
+    clock, lim = make(max_concurrency=8, recover_after=300)
+    lim.on_rate_limited(300)
+    clock.t += 301                      # the pause is just over: no clean interval yet
+    lim.on_success()
+    assert lim.concurrency == 7
 
 
 def test_429s_during_one_pause_halve_the_rate_and_drop_a_worker_once():
