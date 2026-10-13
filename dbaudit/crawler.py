@@ -80,14 +80,15 @@ class Crawler:
         self.max_page_attempts = int(max_page_attempts)
         self.backoff_base = float(backoff_base)
         self.idle_poll = float(idle_poll)
-        # How many of a folder's subfolders must turn out to hold no folders of their
-        # own before the rest are listed one level at a time; see _one_level_by_siblings.
+        # How many of a folder's subfolders must have been listed, with no more than one
+        # in ten holding folders of their own, before the rest are listed one level at a
+        # time; see _one_level_by_siblings.
         self.one_level_after = int(one_level_after)
 
         self._page_counter = itertools.count(1)
         self._counter_lock = threading.Lock()
         self._errors = 0
-        self._siblings = {}             # parent path -> (subfolders listed, any had folders)
+        self._siblings = {}             # parent path -> (subfolders listed, how many had folders)
         self._siblings_lock = threading.Lock()
 
     # ---- seeding --------------------------------------------------------
@@ -157,29 +158,34 @@ class Crawler:
         several requests over a recursive listing of even a few files (about three for
         nine files, measured on 260k such siblings in October 2026). Whether a folder
         has subfolders is only known once it is listed, so the crawler predicts it from
-        the folder's siblings: once `one_level_after` of them have turned out to hold
-        no folders, the rest are listed one level. One that does hold folders turns
-        this off for its parent. The guess costs requests either way, never entries:
-        a one-level listing queues any subfolders it finds as shards of their own.
+        the folder's siblings: once `one_level_after` of them have been listed and no
+        more than one in ten held folders, the rest are listed one level -- until more
+        than one in ten do. The guess costs requests either way, never entries: a
+        one-level listing queues any subfolders it finds as shards of their own.
         """
         parent = path.rstrip("/").rsplit("/", 1)[0]
         with self._siblings_lock:
-            listed, had_folders = self._siblings.get(parent, (0, False))
-        return listed >= self.one_level_after and not had_folders
+            listed, with_folders = self._siblings.get(parent, (0, 0))
+        return self._leafy(listed, with_folders)
+
+    def _leafy(self, listed, with_folders) -> bool:
+        return listed >= self.one_level_after and with_folders * 10 <= listed
 
     def _record_listed(self, path, had_folders) -> None:
         parent = path.rstrip("/").rsplit("/", 1)[0]
         with self._siblings_lock:
-            listed, any_folders = self._siblings.get(parent, (0, False))
-            before = listed >= self.one_level_after and not any_folders
-            listed, any_folders = listed + 1, any_folders or had_folders
-            self._siblings[parent] = (listed, any_folders)
-            after = listed >= self.one_level_after and not any_folders
+            listed, with_folders = self._siblings.get(parent, (0, 0))
+            before = self._leafy(listed, with_folders)
+            listed, with_folders = listed + 1, with_folders + bool(had_folders)
+            self._siblings[parent] = (listed, with_folders)
+            after = self._leafy(listed, with_folders)
         if after and not before:
-            self.store.log_event("one_level_on", f"{parent}: {listed} subfolders held "
-                                                 f"no folders; listing the rest one level")
+            self.store.log_event("one_level_on", f"{parent}: {with_folders} of {listed} "
+                                                 f"subfolders held folders; listing the rest "
+                                                 f"one level")
         elif before and not after:
-            self.store.log_event("one_level_off", f"{parent}: {path} holds folders")
+            self.store.log_event("one_level_off", f"{parent}: {with_folders} of {listed} "
+                                                  f"subfolders hold folders")
 
     # ---- per-shard work -------------------------------------------------
 

@@ -412,11 +412,12 @@ def test_siblings_with_subfolders_are_all_listed_in_full(tmp_path):
     assert files_in(store) == files_of(tree)
 
 
-def test_a_sibling_found_to_have_subfolders_turns_one_level_listing_off(tmp_path):
-    tree = wide_tree(with_subfolder={20})
+def test_more_than_one_in_ten_siblings_with_folders_turns_one_level_listing_off(tmp_path):
+    """c20 and c21 hold folders and leave it on (1 in 21, 2 in 22); c22 makes 3 in 23."""
+    tree = wide_tree(with_subfolder={20, 21, 22})
     store, full, one_level = crawl_wide(tmp_path, tree)
-    assert one_level == ["/R/wide/c20"]
-    assert full == [f"/R/wide/c{i:02}" for i in range(30) if i != 20]
+    assert one_level == ["/R/wide/c20", "/R/wide/c21", "/R/wide/c22"]
+    assert full == [f"/R/wide/c{i:02}" for i in range(30) if i not in (20, 21, 22)]
     assert files_in(store) == files_of(tree)
 
 
@@ -434,6 +435,8 @@ def test_a_listing_resumed_from_a_cursor_does_not_count_as_having_no_folders(tmp
     crawler.run(stop_event=stop, _after_page=lambda n: stop.set() if n >= 10 else None)
     assert store.query("SELECT state, cursor IS NOT NULL FROM shards "
                        "WHERE path='/R/wide/c00'") == [("pending", 1)]
+    assert store.query("SELECT COUNT(*) FROM dirs WHERE path_lower='/r/wide/c00/sub'") \
+        == [(1,)]                               # the stop came after `sub` was seen
 
     lister = FakeLister(tree, page_size=1)
     Crawler(Store(tmp_path / "a.db"), lister, limiter(), workers=1, split_depth=2,
