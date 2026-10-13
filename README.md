@@ -52,7 +52,9 @@ The report covers:
 - **Reconciliation:** crawled bytes against Dropbox's own usage figure. The gap is
   version history, deleted-but-retained data and anything outside the root.
 - **Reclaimable duplicates,** grouped by Dropbox's `content_hash`.
-- **Cold data:** bytes by year last modified.
+- **Cold data:** bytes by year last modified, going by each file's own date
+  (`client_modified`). Dropbox's `server_modified` can be years newer than the
+  content.
 - **Largest directories, small-file hotspots and bytes by file type.**
 
 Anything else is one SQL query away. Directories are stored once, so full paths

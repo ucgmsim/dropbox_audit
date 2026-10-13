@@ -96,21 +96,45 @@ def total_reclaimable_duplicates(store) -> int:
     )[0][0]
 
 
-def cold_bytes(store) -> list[YearRow]:
+def _subtree(under: str) -> tuple[str, list]:
+    """A condition keeping only the files at or below the folder `under`, and its values.
+
+    Every path below `p` sorts between `p + "/"` and `p + "0"`, because "0" is the
+    character after "/", so this is one range scan of the path index.
+    """
+    low = under.rstrip("/").lower()
+    return ("dir_id IN (SELECT id FROM dirs WHERE path_lower = ? "
+            "OR (path_lower >= ? AND path_lower < ?))", [low, low + "/", low + "0"])
+
+
+def cold_bytes(store, under: str | None = None) -> list[YearRow]:
+    """Bytes by the year each file was last modified, going by the file's own date.
+
+    That is `client_modified`, sent by whatever uploaded the file. Dropbox's own
+    `server_modified` can be years newer than the content: every file in one 10 TiB
+    folder had a 2026 `server_modified` while 77% of its bytes had a `client_modified`
+    more than two years older (measured 2026-10-13).
+    """
+    conditions, values = ["client_modified IS NOT NULL"], []
+    if under is not None:
+        condition, values = _subtree(under)
+        conditions.append(condition)
     rows = store.query(
-        "SELECT CAST(strftime('%Y', server_modified, 'unixepoch') AS INTEGER) AS y, "
+        "SELECT CAST(strftime('%Y', client_modified, 'unixepoch') AS INTEGER) AS y, "
         "       COUNT(*), COALESCE(SUM(size), 0) "
-        "FROM files WHERE server_modified IS NOT NULL GROUP BY y ORDER BY y"
+        f"FROM files WHERE {' AND '.join(conditions)} GROUP BY y ORDER BY y",
+        values,
     )
     return [YearRow(*row) for row in rows]
 
 
 def bytes_older_than(store, years: float, now: float | None = None) -> tuple[int, int]:
+    """Files last modified more than `years` before `now`, by their own date."""
     import time
 
     cutoff = (now if now is not None else time.time()) - years * 365.25 * 86400
     row = store.query(
-        "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE server_modified < ?",
+        "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE client_modified < ?",
         (cutoff,),
     )[0]
     return row[0], row[1]
@@ -171,11 +195,15 @@ def small_file_hotspots(store, min_files: int = 100_000, max_mean_size: int = 65
     return [HotspotRow(*row) for row in rows]
 
 
-def extension_profile(store, limit: int = 40) -> list[ExtRow]:
+def extension_profile(store, limit: int = 40, under: str | None = None) -> list[ExtRow]:
+    where, values = "", []
+    if under is not None:
+        condition, values = _subtree(under)
+        where = f"WHERE {condition} "
     rows = store.query(
         "SELECT COALESCE(NULLIF(ext, ''), '(none)'), COUNT(*), COALESCE(SUM(size), 0) AS b "
-        "FROM files GROUP BY 1 ORDER BY b DESC LIMIT ?",
-        (limit,),
+        f"FROM files {where}GROUP BY 1 ORDER BY b DESC LIMIT ?",
+        (*values, limit),
     )
     return [ExtRow(*row) for row in rows]
 

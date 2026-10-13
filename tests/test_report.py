@@ -155,3 +155,27 @@ def test_top_dirs_ignores_parent_ids_beyond_the_snapshot(tmp_path):
         "VALUES(500, 9999, 'orphan', '/R/orphan', '/r/orphan', 2)"
     )
     assert top_dirs(store, limit=10)  # must not raise
+
+
+def test_cold_figures_go_by_the_files_own_date(tmp_path):
+    """Dropbox's server_modified can be years newer than the content; it is not used."""
+    import calendar
+
+    moved = dict(mk("moved", 10, "a", "2015-06-01T00:00:00Z"),
+                 server_modified="2026-01-01T00:00:00Z")
+    store = seed(tmp_path, [moved, mk("fresh", 20, "b", "2026-01-01T00:00:00Z")])
+    now = calendar.timegm((2026, 6, 1, 0, 0, 0, 0, 0, 0))
+    assert bytes_older_than(store, years=5, now=now) == (1, 10)
+    assert {r.year: r.bytes for r in cold_bytes(store)} == {2015: 10, 2026: 20}
+
+
+def test_cold_bytes_and_file_types_can_cover_one_subtree(tmp_path):
+    store = seed(tmp_path, [
+        mk("a.tar", 100, "a", "2015-06-01T00:00:00Z", d="/R/Keep"),
+        mk("b.tar", 7, "b", "2016-06-01T00:00:00Z", d="/R/Keep/deeper"),
+        mk("c.nc", 50, "c", "2017-06-01T00:00:00Z", d="/R/Keeper"),
+        mk("d.nc", 9, "d", "2018-06-01T00:00:00Z"),
+    ])
+    assert {r.year: r.bytes for r in cold_bytes(store, under="/R/keep")} == {2015: 100, 2016: 7}
+    rows = extension_profile(store, under="/R/Keep/")
+    assert [(r.ext, r.files, r.bytes) for r in rows] == [("tar", 2, 107)]
