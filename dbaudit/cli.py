@@ -201,8 +201,7 @@ def cmd_init(args) -> int:
     store.set_meta("team", (account.get("team") or {}).get("name", ""))
     store.set_meta("created_at", time.time())
 
-    crawler = Crawler(store, lister, AdaptiveLimiter(), split_depth=args.split_depth)
-    crawler.seed(root)
+    store.add_shard(root, depth=0)
 
     print(f"initialised {args.db}")
     print(f"  root      : {root} ({len(page.entries)}+ entries at the top level)")
@@ -329,7 +328,7 @@ def cmd_run(args) -> int:
                         "retry them from scratch", summary.errors)
             return 1
         if remaining == 0:
-            store.set_meta("last_full_pass_completed_at", time.time())
+            store.set_meta("last_pass_completed_at", time.time())
             if not args.no_index:
                 log.info("crawl complete; building analysis indexes")
                 store.build_indexes()
@@ -366,7 +365,7 @@ def cmd_status(args) -> int:
     print(f"pages     : {prog['pages']:,}")
     print(f"429s (1h) : {recent_429}")
 
-    completed = store.get_meta("last_full_pass_completed_at")
+    completed = store.get_meta("last_pass_completed_at")
     if completed:
         age = time.time() - float(completed)
         print(f"last pass : completed {human_duration(age)} ago")
@@ -1059,8 +1058,7 @@ def _run_index(args, store, row) -> int:
         # One provider and one limiter for the whole command: Dropbox limits per
         # account, and the provider caches its token behind a lock.
         tokens = TokenProvider(remote=args.remote)
-        limiter = AdaptiveLimiter(rps=args.rps, max_rps=args.max_rps,
-                                  max_concurrency=workers)
+        limiter = AdaptiveLimiter(rps=args.rps, max_concurrency=workers)
 
     store.start_walk(archive_id)
     stop = threading.Event()
@@ -1870,7 +1868,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--db", required=True)
     p_init.add_argument("--root", required=True, help="e.g. /TeamSpace")
     p_init.add_argument("--remote", default="dropbox", help="rclone remote to borrow credentials from")
-    p_init.add_argument("--split-depth", type=int, default=DEFAULT_SPLIT_DEPTH)
     p_init.add_argument("--min-free-gb", type=float, default=30.0)
     p_init.set_defaults(func=cmd_init)
 
@@ -1882,8 +1879,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--max-rps", type=float, default=DEFAULT_MAX_RPS,
                        help="ceiling the request rate climbs to while Dropbox allows it")
     p_run.add_argument("--split-depth", type=int, default=DEFAULT_SPLIT_DEPTH,
-                       help="max levels a shard may be split into children (bound, "
-                            "not a target: splitting only happens when workers starve)")
+                       help="max levels a shard may be split into children to keep "
+                            "workers busy (a bound, not a target; a listing Dropbox "
+                            "keeps failing is split regardless)")
     p_run.add_argument("--queue-target", type=int, default=DEFAULT_QUEUE_TARGET,
                        help="shards to keep pending (default: 2 x workers). Raising "
                             "this splits more aggressively and measured much slower")
@@ -1940,8 +1938,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_idx.add_argument("--workers", type=int, default=ARCHIVE_WORKERS)
     p_idx.add_argument("--rps", type=float, default=DEFAULT_RPS,
                        help="request rate to start at")
-    p_idx.add_argument("--max-rps", type=float, default=DEFAULT_MAX_RPS,
-                       help="ceiling the request rate climbs to while Dropbox allows it")
     # Measured in Task 1: a request costs 1.60 s + 0.044 s/MiB, so the cap is generous
     # and the floor is small because it is paid on every jump.
     p_idx.add_argument("--window-min", type=int, default=WINDOW_MIN)

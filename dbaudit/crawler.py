@@ -10,7 +10,8 @@ most the page in flight.
 main way this crawl wastes time -- in TeamSpace, `Public` alone holds 17,906
 directories at depth 3. A worker can therefore spend one API call splitting a shard
 into its children instead of listing it recursively. The choice is always made
-*before* a cursor exists, so splitting never throws away work.
+*before* a cursor exists, so splitting to keep workers busy never throws away work.
+(Splitting a listing Dropbox keeps failing, in `_process`, can drop pages it got.)
 
 The rule is **keep just `queue_target` shards pending** (default: twice the worker
 count): a worker splits what it claims while the queue is below target, and lists

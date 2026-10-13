@@ -15,8 +15,7 @@ CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
     started_at  REAL,
     finished_at REAL,
-    host        TEXT,
-    notes       TEXT
+    host        TEXT
 );
 
 -- A shard is a subtree listed under its own cursor. `cursor` is the resume point:

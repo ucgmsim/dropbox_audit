@@ -9,8 +9,7 @@ Only two calls matter for an audit:
     directory.
 
 ``files/list_folder/continue``
-    Resumes from a cursor. The cursor is what makes the crawl restartable, and it
-    stays valid after the crawl finishes, so a later pass returns only changes.
+    Resumes from a cursor. The cursor is what makes the crawl restartable.
 
 Everything here classifies failures into the small set of outcomes the crawler
 knows how to act on; no retrying or sleeping happens at this layer.

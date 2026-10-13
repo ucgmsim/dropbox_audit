@@ -22,7 +22,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 DIR_CACHE_LIMIT = 200_000
 TIME_CACHE_LIMIT = 50_000
 
-# Built after the first full pass, never during it: a random-order index over 100M
+# Built once a pass completes, never during it: a random-order index over 100M
 # rows would slow the crawl for no benefit while it runs.
 ANALYSIS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS files_dir ON files(dir_id)",
