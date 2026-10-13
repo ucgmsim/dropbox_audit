@@ -1,6 +1,7 @@
 import calendar
 import hashlib
 import io
+import os
 from html.parser import HTMLParser
 
 from dbaudit import report, tree
@@ -490,3 +491,15 @@ def test_the_command_will_not_overwrite_the_database_or_write_nowhere(tmp_path, 
     assert main(["tree", "--db", db, "--out", str(tmp_path / "no" / "t.html")]) == 2
     assert "is not a folder" in capsys.readouterr().err
     assert tree.find_dir(Store(db), "/R/big") is not None  # the database is untouched
+
+
+def test_the_command_will_not_write_over_the_database_by_another_name(tmp_path, capsys):
+    """On a case-insensitive disk AUDIT.DB is audit.db. A hard link is likewise one file
+    under two names, and the command must see through either."""
+    from dbaudit.cli import main
+
+    sample(tmp_path)
+    db = tmp_path / "audit.db"
+    os.link(db, tmp_path / "AUDIT.DB")
+    assert main(["tree", "--db", str(db), "--out", str(tmp_path / "AUDIT.DB")]) == 2
+    assert "names the database itself" in capsys.readouterr().err

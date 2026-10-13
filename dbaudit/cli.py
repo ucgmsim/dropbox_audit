@@ -529,7 +529,10 @@ def cmd_tree(args) -> int:
     if args.subtree and tree.find_dir(store, args.subtree) is None:
         print(f"error: {args.subtree} is not in {args.db}", file=sys.stderr)
         return 2
-    if os.path.realpath(args.out) == os.path.realpath(args.db):
+    # samefile also catches another name for the same file, e.g. AUDIT.DB for audit.db
+    # on a case-insensitive disk, which realpath leaves alone.
+    if os.path.realpath(args.out) == os.path.realpath(args.db) or (
+            os.path.exists(args.out) and os.path.samefile(args.out, args.db)):
         print("error: --out names the database itself", file=sys.stderr)
         return 2
     folder = os.path.dirname(os.path.abspath(args.out))
