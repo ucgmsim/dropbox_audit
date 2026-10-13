@@ -62,7 +62,7 @@ DEFAULT_MAX_RPS = 20.0
 # `files/list_folder`, a different endpoint class, and conflating the two is a mistake
 # this project has already made once and corrected. The closest measured analogue for
 # scattered, latency-bound `files/download` reads is a sibling project's commit
-# fccd755, where 8 concurrent streams ran clean. the owner fixed this at 8 on 2026-09-18:
+# fccd755, where 8 concurrent streams ran clean. The owner fixed this at 8 on 2026-09-18:
 # nothing here raises it or adapts it upward.
 ARCHIVE_WORKERS = 8
 # Dropbox's own content hash: SHA-256 over the concatenated SHA-256 digests of 4 MiB

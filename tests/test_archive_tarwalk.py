@@ -51,7 +51,7 @@ def test_the_manifest_does_not_depend_on_where_the_parts_divide(tmp_path):
 
 
 def test_gnu_long_names_survive_but_pax_is_refused(tmp_path):
-    """The plan asked for both formats to walk. the owner ruled on 2026-09-23 that pax is out
+    """The plan asked for both formats to walk. The owner ruled on 2026-09-23 that pax is out
     of scope and should fail loudly instead: in pax, names and sizes can live outside the
     checksummed header, and a size misread there moves every later header while a retry
     re-reads only the wrong place. GNU long names keep the size in the header, so a
