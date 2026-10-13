@@ -216,30 +216,72 @@ class FullListingsFail(FakeLister):
         return super().list_folder(path, recursive)
 
 
-def test_a_full_listing_that_fails_is_split_instead_of_retried(tmp_path):
+def test_a_full_listing_that_keeps_failing_is_split_at_its_second_failure(tmp_path):
     """split_depth=0 asks for full listings everywhere; /R and /R/a fail as one."""
     lister = FullListingsFail(TREE, {"/R", "/R/a"})
     store, crawler = build(tmp_path, lister, workers=1, split_depth=0, backoff_base=0.01)
     crawler.seed("/R")
     assert crawler.run().errors == 0
     assert files_in(store) == ALL_FILES
-    assert lister.calls.count(("list", "/R", True)) == 1
+    assert lister.calls.count(("list", "/R", True)) == 2
     assert store.query("SELECT COUNT(*) FROM api_events WHERE kind='split_after_failure'") \
         == [(2,)]
 
 
-def test_a_full_listing_failing_after_its_first_page_is_split_after_two_failures(tmp_path):
-    """The first page holds /R/top.txt; the split drops it and lists it again, once."""
+class FailsOnce(FakeLister):
+    """A momentary failure: the first full listing of `path` fails, then all is well."""
+
+    def __init__(self, tree, path, **kw):
+        super().__init__(tree, **kw)
+        self.path, self.failed = path, False
+
+    def list_folder(self, path, recursive):
+        if recursive and path == self.path and not self.failed:
+            from dbaudit.api import TransientError
+
+            self.failed = True
+            raise TransientError("connection reset")
+        return super().list_folder(path, recursive)
+
+
+def test_one_failure_of_a_full_listing_is_retried_not_split(tmp_path):
+    store, crawler = build(tmp_path, FailsOnce(TREE, "/R"), workers=1, split_depth=0,
+                           backoff_base=0.01)
+    crawler.seed("/R")
+    assert crawler.run().errors == 0
+    assert files_in(store) == ALL_FILES
+    assert store.query("SELECT mode FROM shards WHERE path='/R'") == [("recursive",)]
+
+
+def test_a_full_listing_failing_after_its_first_page_is_split_only_when_retries_run_out(tmp_path):
+    """Splitting drops the pages it holds, so a blip must not do it: only where the shard
+    would otherwise fail. The first page holds /R/top.txt; the split lists it again, once."""
     lister = StallsAfterOnePage(TREE, "/R", page_size=4)
-    store, crawler = build(tmp_path, lister, workers=1, split_depth=0, backoff_base=0.01)
+    store, crawler = build(tmp_path, lister, workers=1, split_depth=0, max_page_attempts=3,
+                           backoff_base=0.01)
     crawler.seed("/R")
     summary = crawler.run()
     assert summary.errors == 0
     assert summary.files == len(ALL_FILES)      # what `status` reports, from shard counters
+    assert summary.dirs == store.stats()["dirs"]
     assert files_in(store) == ALL_FILES
-    assert store.query("SELECT COUNT(*) FROM files") == [(len(ALL_FILES),)]
     assert sum(1 for call in lister.calls if call[0] == "cont" and call[1].startswith("/R|1|")) \
-        == 2
+        == 3
+
+
+def test_a_split_interrupted_mid_listing_resumes_as_a_split(tmp_path):
+    """Its cursor is now a one-level cursor; resuming it as a full listing would stop
+    queueing the subfolders on its later pages, and whole subtrees would go missing."""
+    store, crawler = build(tmp_path, FullListingsFail(TREE, {"/R"}, page_size=1), workers=1,
+                           split_depth=0, backoff_base=0.01)
+    crawler.seed("/R")
+    stop = threading.Event()
+    crawler.run(stop_event=stop, _after_page=lambda n: stop.set())
+    assert store.query("SELECT mode, cursor IS NOT NULL FROM shards WHERE path='/R'") \
+        == [("split", 1)]
+    Crawler(Store(tmp_path / "a.db"), FakeLister(TREE, page_size=1), limiter(), workers=1,
+            split_depth=0).run()
+    assert files_in(store) == ALL_FILES
 
 
 def test_a_failing_full_listing_is_not_split_past_max_shards(tmp_path):
