@@ -286,3 +286,114 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
     page_row = folder_row(f, root, name, below(path, crawl_root))
     assemble(page_row)
     return Page(page_row, threshold, rows, shown | {root})
+
+
+# ---- tables: the folders worth a closer look --------------------------------
+
+
+def ancestors(d: int, parent):
+    d = parent[d]
+    while d:
+        yield d
+        d = parent[d]
+
+
+@dataclass
+class Entry:
+    dir_id: int
+    path: str
+    target: int               # the row its link opens: itself, or its nearest shown ancestor
+    size: int
+    files: int
+    held: int
+    cold: int
+    newest: int
+    place: str = ""           # where most of its held-elsewhere bytes have their copies
+    place_share: float = 0.0
+
+
+def choose(ranked, parent, limit: int = TABLE_ROWS) -> list[int]:
+    """Take folders in ranking order, skipping any inside or above one already taken."""
+    taken, above, out = set(), set(), []
+    for d in ranked:
+        chain = list(ancestors(d, parent))
+        if d in above or any(a in taken for a in chain):
+            continue
+        out.append(d)
+        taken.add(d)
+        above.update(chain)
+        if len(out) == limit:
+            break
+    return out
+
+
+def place(d: int, near: set, parent, depth, floor: int) -> int:
+    """Where a copy in folder `d` lies, seen from a folder whose ancestry is `near`.
+
+    The copy's ancestor one level below where the two paths part, never shallower than
+    `floor`; a copy shallower than that is its own place.
+    """
+    chain = [d]
+    while chain[-1] and chain[-1] not in near:
+        chain.append(parent[chain[-1]])
+    level = max(depth[chain[-1]] + 1, floor)
+    for step in chain:
+        if depth[step] <= level:
+            return step
+    return d
+
+
+def counterparts(conn, figures: Figures, folders: list[int], floor: int) -> dict:
+    """{folder: (place, bytes)}: the place holding copies of the most of each folder's
+    held-elsewhere bytes. A second pass over the duplicates, for these folders only."""
+    if not folders:
+        return {}
+    f, wanted = figures, set(folders)
+    owner = array("q", [0]) * len(f.size)
+    for d in reversed(f.order):
+        owner[d] = d if d in wanted else owner[f.parent[d]]
+    near = {d: {d, *ancestors(d, f.parent)} for d in folders}
+    credit = {d: defaultdict(int) for d in folders}
+    for group in duplicate_groups(conn, len(f.size)):
+        for mine in {owner[d] for d, _, _ in group} - {0}:
+            inside = sum(size for d, size, _ in group if owner[d] == mine)
+            for spot in {place(d, near[mine], f.parent, f.depth, floor)
+                         for d, _, _ in group if owner[d] != mine}:
+                credit[mine][spot] += inside
+    out = {}
+    for d in folders:
+        if credit[d]:
+            spot = max(credit[d], key=lambda p: (credit[d][p], -p))
+            out[d] = (spot, credit[d][spot])
+    return out
+
+
+def tables(store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
+    f, root = figures, figures.page_root
+    below_root = [d for d in range(1, len(f.size)) if f.on_page[d] and d != root]
+    big = [d for d in below_root if f.size[d] >= page.threshold]
+    dup = choose(sorted((d for d in big if f.held[d] and f.held[d] >= DUP_TABLE_SHARE * f.size[d]),
+                        key=lambda d: (-f.held[d], d)), f.parent)
+    cold = choose(sorted((d for d in big if f.cold[d] and f.cold[d] >= COLD_TABLE_SHARE * f.size[d]),
+                         key=lambda d: (-f.cold[d], d)), f.parent)
+    tiny = choose(sorted((d for d in below_root if is_tiny(f, d)),
+                         key=lambda d: (-f.files[d], d)), f.parent)
+
+    conn = store.connect()
+    crawl_root = store.get_meta("root") or ""
+    spots = counterparts(conn, f, dup, crawl_root.rstrip("/").count("/") + 2)
+    names = dir_names(conn, {*dup, *cold, *tiny, *(spot for spot, _ in spots.values())})
+
+    def entry(d):
+        target = d
+        while target not in page.shown:
+            target = f.parent[target]
+        e = Entry(d, below(names[d][1], crawl_root), target, f.size[d], f.files[d],
+                  f.held[d], f.cold[d], f.newest[d])
+        if d in spots:
+            spot, credit = spots[d]
+            e.place, e.place_share = below(names[spot][1], crawl_root), credit / f.held[d]
+        return e
+
+    return {"dup": [entry(d) for d in dup], "cold": [entry(d) for d in cold],
+            "tiny": [entry(d) for d in tiny]}

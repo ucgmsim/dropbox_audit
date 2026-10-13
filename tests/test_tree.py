@@ -222,3 +222,58 @@ def test_file_rows_carry_their_copy_count(tmp_path):
     page = tree.layout(store, measured(store, min_size=10), 10, 1000)
     rows = [c for folder in page.root.children for c in folder.children]
     assert [(r.name, r.copies) for r in rows] == [("f", 2), ("g", 2)]
+
+
+# ---- tables -----------------------------------------------------------------
+
+
+def chosen(store, threshold=1, page="/R"):
+    f = measured(store, page=page)
+    return tree.tables(store, f, tree.layout(store, f, threshold, 1000))
+
+
+def test_listed_folders_never_overlap(tmp_path):
+    store = listing(tmp_path,
+                    # D holds 15 bytes held elsewhere: X outside A, Y elsewhere in A. A holds
+                    # only X's 10, yet qualifies: so D is taken first and A, above it, skipped.
+                    file("/R/A/D/f1", 10, "X"), file("/R/Z/z1", 10, "X"),
+                    file("/R/A/D/f2", 5, "Y"), file("/R/A/E/e1", 5, "Y"),
+                    file("/R/C/old", 9, modified="2001-01-01T00:00:00Z"),
+                    file("/R/C/sub/old", 9, modified="2001-01-01T00:00:00Z"))
+    lists = chosen(store)
+    assert [e.path for e in lists["dup"]] == ["A/D", "Z", "A/E"]
+    assert [e.path for e in lists["cold"]] == ["C"]
+
+
+def test_the_tiny_rule(tmp_path, monkeypatch):
+    monkeypatch.setattr(tree, "TINY_FILES", 3)
+    monkeypatch.setattr(tree, "TINY_MEAN", 10)
+    store = listing(tmp_path, *(file(f"/R/T/{i}", 10) for i in range(3)),
+                    file("/R/U/0", 10), file("/R/U/1", 10), file("/R/U/2", 11),
+                    file("/R/V/0", 1), file("/R/V/1", 1))
+    assert [e.path for e in chosen(store)["tiny"]] == ["T"]
+    rows = {c.name: c.tiny for c in tree.layout(store, measured(store), 1, 1000).root.children}
+    assert rows == {"T": True, "U": False, "V": False}
+
+
+def test_the_counterpart_is_where_the_other_copies_mostly_are(tmp_path):
+    store = listing(tmp_path,
+                    file("/R/P/A/f", 30, "X"), file("/R/P/B/x/f", 30, "X"),
+                    file("/R/P/A/g", 10, "Y"), file("/R/Q/g", 10, "Y"))
+    (entry,) = [e for e in chosen(store)["dup"] if e.path == "P/A"]
+    assert (entry.place, entry.place_share) == ("P/B", 0.75)
+
+
+def test_the_counterpart_is_never_shallower_than_two_below_the_root(tmp_path):
+    store = listing(tmp_path, file("/R/S/sub/f", 30, "X"), file("/R/T/deep/x/f", 30, "X"))
+    (entry,) = [e for e in chosen(store)["dup"] if e.path == "S"]
+    assert (entry.place, entry.place_share) == ("T/deep", 1.0)
+
+
+def test_a_folded_folder_links_to_its_nearest_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(tree, "TINY_FILES", 3)
+    monkeypatch.setattr(tree, "TINY_MEAN", 10)  # big averages 25 bytes, so only big/t is tiny
+    store = listing(tmp_path, file("/R/big/f", 100), *(file(f"/R/big/t/{i}", 1) for i in range(3)))
+    (entry,) = chosen(store, threshold=50)["tiny"]
+    assert (entry.path, entry.dir_id, entry.target) == ("big/t", at(store, "/R/big/t"),
+                                                        at(store, "/R/big"))
