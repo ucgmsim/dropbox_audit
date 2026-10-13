@@ -324,3 +324,77 @@ def test_queue_target_respects_the_depth_bound(tmp_path):
     crawler.run()
     assert store.query("SELECT COUNT(*) FROM shards")[0][0] == 1  # never split
     assert files_in(store) == ALL_FILES
+
+
+def wide_tree(children=30, with_subfolder=()):
+    """/R/wide holds subfolders c00, c01, ..., each with two files; the ones numbered in
+    `with_subfolder` also hold a folder `sub` with one file."""
+    tree = {"/R": ["wide/"], "/R/wide": [f"c{i:02}/" for i in range(children)]}
+    for i in range(children):
+        path = f"/R/wide/c{i:02}"
+        tree[path] = ["x.txt", "y.txt"] + (["sub/"] if i in with_subfolder else [])
+        if i in with_subfolder:
+            tree[path + "/sub"] = ["z.txt"]
+    return tree
+
+
+def crawl_wide(tmp_path, tree):
+    """split_depth=2 splits /R and /R/wide, never the c-folders; with one worker they are
+    listed in order. A full listing of a c-folder takes 3 requests at page_size=1."""
+    lister = FakeLister(tree, page_size=1)
+    store, crawler = build(tmp_path, lister, workers=1, split_depth=2)
+    crawler.seed("/R")
+    assert crawler.run().errors == 0
+    full = [c[1] for c in lister.calls if c[0] == "list" and c[1].count("/") == 3 and c[2]]
+    one_level = [c[1] for c in lister.calls if c[0] == "list" and c[1].count("/") == 3 and not c[2]]
+    return store, full, one_level
+
+
+def files_of(tree):
+    return {f"{path}/{name}" for path, names in tree.items() for name in names
+            if not name.endswith("/")}
+
+
+def test_once_20_siblings_had_no_subfolders_the_rest_are_listed_one_level(tmp_path):
+    tree = wide_tree()
+    store, full, one_level = crawl_wide(tmp_path, tree)
+    assert full == [f"/R/wide/c{i:02}" for i in range(20)]
+    assert one_level == [f"/R/wide/c{i:02}" for i in range(20, 30)]
+    assert files_in(store) == files_of(tree)
+
+
+def test_siblings_with_subfolders_are_all_listed_in_full(tmp_path):
+    tree = wide_tree(with_subfolder=range(30))
+    store, full, one_level = crawl_wide(tmp_path, tree)
+    assert len(full) == 30 and one_level == []
+    assert files_in(store) == files_of(tree)
+
+
+def test_a_sibling_found_to_have_subfolders_turns_one_level_listing_off(tmp_path):
+    tree = wide_tree(with_subfolder={20})
+    store, full, one_level = crawl_wide(tmp_path, tree)
+    assert one_level == ["/R/wide/c20"]
+    assert full == [f"/R/wide/c{i:02}" for i in range(30) if i != 20]
+    assert files_in(store) == files_of(tree)
+
+
+def test_a_listing_resumed_from_a_cursor_does_not_count_as_having_no_folders(tmp_path):
+    """c00's full listing is stopped just after the page showing its folder `sub`
+    (pages 1-6 split /R and /R/wide; c00's are 7-11, `sub` on page 10). Resumed in a
+    new process, its remaining page shows no folder -- which must not make c00 count
+    as folder-free, so with one_level_after=1 its sibling c01 still gets a full
+    listing."""
+    tree = wide_tree(children=5, with_subfolder={0})
+    store, crawler = build(tmp_path, FakeLister(tree, page_size=1), workers=1, split_depth=2,
+                           one_level_after=1)
+    crawler.seed("/R")
+    stop = threading.Event()
+    crawler.run(stop_event=stop, _after_page=lambda n: stop.set() if n >= 10 else None)
+    assert store.query("SELECT state, cursor IS NOT NULL FROM shards "
+                       "WHERE path='/R/wide/c00'") == [("pending", 1)]
+
+    lister = FakeLister(tree, page_size=1)
+    Crawler(Store(tmp_path / "a.db"), lister, limiter(), workers=1, split_depth=2,
+            one_level_after=1).run()
+    assert ("list", "/R/wide/c01", True) in lister.calls
+    assert files_in(store) == files_of(tree)

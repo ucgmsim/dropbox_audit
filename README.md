@@ -38,8 +38,10 @@ python -m dbaudit report --db audit.db     # or `export --db audit.db --out DIR`
 - **A subtree too big for Dropbox to list in one go is split on the spot.** Dropbox
   answers a recursive listing of a big enough subtree with an HTTP 500 after about
   three minutes, so the crawler lists that folder one level down instead and tries
-  each child on its own. Running `run` again retries anything that still failed, from
-  scratch.
+  each child on its own. Once 20 of a folder's children have turned out to hold no
+  folders, the rest are listed one level too: one request each, where a recursive
+  listing of a few files can take several. Running `run` again retries anything that
+  still failed, from scratch.
 - **Each database is one snapshot.** To audit again, crawl into a new database;
   keeping the old one makes before-and-after comparisons a join between the two.
 - `verify --db audit.db [subtree]` re-walks a subtree with rclone and diffs it

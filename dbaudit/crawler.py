@@ -66,6 +66,7 @@ class Crawler:
         max_page_attempts: int = 8,
         backoff_base: float = 2.0,
         idle_poll: float = 0.2,
+        one_level_after: int = 20,
     ):
         self.store = store
         self.lister = lister
@@ -79,10 +80,15 @@ class Crawler:
         self.max_page_attempts = int(max_page_attempts)
         self.backoff_base = float(backoff_base)
         self.idle_poll = float(idle_poll)
+        # How many of a folder's subfolders must turn out to hold no folders of their
+        # own before the rest are listed one level at a time; see _one_level_by_siblings.
+        self.one_level_after = int(one_level_after)
 
         self._page_counter = itertools.count(1)
         self._counter_lock = threading.Lock()
         self._errors = 0
+        self._siblings = {}             # parent path -> (subfolders listed, any had folders)
+        self._siblings_lock = threading.Lock()
 
     # ---- seeding --------------------------------------------------------
 
@@ -108,6 +114,8 @@ class Crawler:
             return True
         if shard.cursor is not None:
             return False  # a recursive cursor is already open
+        if self._one_level_by_siblings(shard.path):
+            return True
         if shard.depth >= self.split_depth:
             return False
 
@@ -139,6 +147,40 @@ class Crawler:
         # rare occasions we are actually about to split.
         return self.store.shard_count() < self.max_shards
 
+    # ---- learning from siblings -----------------------------------------
+
+    def _one_level_by_siblings(self, path) -> bool:
+        """Whether to list this folder one level at a time, judging by its siblings.
+
+        For a folder with no subfolders, a one-level listing returns everything a
+        recursive one would, in one request per 2000 entries -- while Dropbox can take
+        several requests over a recursive listing of even a few files (about three for
+        nine files, measured on 260k such siblings in October 2026). Whether a folder
+        has subfolders is only known once it is listed, so the crawler predicts it from
+        the folder's siblings: once `one_level_after` of them have turned out to hold
+        no folders, the rest are listed one level. One that does hold folders turns
+        this off for its parent. The guess costs requests either way, never entries:
+        a one-level listing queues any subfolders it finds as shards of their own.
+        """
+        parent = path.rstrip("/").rsplit("/", 1)[0]
+        with self._siblings_lock:
+            listed, had_folders = self._siblings.get(parent, (0, False))
+        return listed >= self.one_level_after and not had_folders
+
+    def _record_listed(self, path, had_folders) -> None:
+        parent = path.rstrip("/").rsplit("/", 1)[0]
+        with self._siblings_lock:
+            listed, any_folders = self._siblings.get(parent, (0, False))
+            before = listed >= self.one_level_after and not any_folders
+            listed, any_folders = listed + 1, any_folders or had_folders
+            self._siblings[parent] = (listed, any_folders)
+            after = listed >= self.one_level_after and not any_folders
+        if after and not before:
+            self.store.log_event("one_level_on", f"{parent}: {listed} subfolders held "
+                                                 f"no folders; listing the rest one level")
+        elif before and not after:
+            self.store.log_event("one_level_off", f"{parent}: {path} holds folders")
+
     # ---- per-shard work -------------------------------------------------
 
     def _process(self, shard, stop: threading.Event, after_page) -> None:
@@ -148,6 +190,10 @@ class Crawler:
 
         cursor = shard.cursor
         attempts = 0
+        # What the listing shows about the folder, for _one_level_by_siblings. "No
+        # folders" is only known from a listing begun in this process.
+        listed_from_start = cursor is None
+        had_folders = False
 
         while not stop.is_set():
             try:
@@ -211,17 +257,19 @@ class Crawler:
             attempts = 0
             self.limiter.on_success()
 
-            # A non-recursive listing does not return the folder itself, but guard
-            # anyway: enqueueing the shard's own path would spawn a shard that
-            # re-lists the same directory forever.
+            # A recursive listing returns the folder itself first. A non-recursive one
+            # does not, but guard anyway: enqueueing the shard's own path would spawn a
+            # shard that re-lists the same directory forever.
+            subfolders = [
+                entry["path_display"]
+                for entry in page.entries
+                if entry.get(".tag") == "folder"
+                and entry.get("path_display")
+                and entry["path_display"].rstrip("/").lower() != shard.path.rstrip("/").lower()
+            ]
+            had_folders = had_folders or bool(subfolders)
             children = (
-                [
-                    (entry["path_display"], shard.depth + 1, "recursive")
-                    for entry in page.entries
-                    if entry.get(".tag") == "folder"
-                    and entry.get("path_display")
-                    and entry["path_display"].rstrip("/").lower() != shard.path.rstrip("/").lower()
-                ]
+                [(sub, shard.depth + 1, "recursive") for sub in subfolders]
                 if mode == "split"
                 else ()
             )
@@ -242,6 +290,8 @@ class Crawler:
                 after_page(n)
 
             if not page.has_more:
+                if had_folders or listed_from_start:
+                    self._record_listed(shard.path, had_folders)
                 return
 
         # Interrupted: hand the shard back with its cursor intact.
