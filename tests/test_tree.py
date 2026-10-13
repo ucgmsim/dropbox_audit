@@ -503,3 +503,17 @@ def test_the_command_will_not_write_over_the_database_by_another_name(tmp_path, 
     os.link(db, tmp_path / "AUDIT.DB")
     assert main(["tree", "--db", str(db), "--out", str(tmp_path / "AUDIT.DB")]) == 2
     assert "names the database itself" in capsys.readouterr().err
+
+
+def test_the_page_gets_the_permissions_the_umask_allows(tmp_path):
+    """The page is full of real folder names: under umask 077 it must stay private."""
+    from dbaudit.cli import main
+
+    sample(tmp_path)
+    out = tmp_path / "tree.html"
+    umask = os.umask(0o077)
+    try:
+        assert main(["tree", "--db", str(tmp_path / "audit.db"), "--out", str(out)]) == 0
+    finally:
+        os.umask(umask)
+    assert oct(out.stat().st_mode & 0o777) == oct(0o600)

@@ -548,7 +548,10 @@ def cmd_tree(args) -> int:
     try:
         with open(fd, "w", encoding="utf-8") as out:
             tree.render(out, page, summary, chosen)
-        os.chmod(partial, 0o644)
+        # mkstemp makes the file 0600; give it what any new file would get under the umask.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(partial, 0o666 & ~umask)
         os.replace(partial, args.out)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
