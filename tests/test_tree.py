@@ -1,5 +1,7 @@
 import calendar
 import hashlib
+import io
+from html.parser import HTMLParser
 
 from dbaudit import report, tree
 from dbaudit.store import Store
@@ -277,3 +279,108 @@ def test_a_folded_folder_links_to_its_nearest_row(tmp_path, monkeypatch):
     (entry,) = chosen(store, threshold=50)["tiny"]
     assert (entry.path, entry.dir_id, entry.target) == ("big/t", at(store, "/R/big/t"),
                                                         at(store, "/R/big"))
+
+
+# ---- the page ---------------------------------------------------------------
+
+
+class Outline(HTMLParser):
+    """What a page is made of: nesting, ids, in-page links, section headings."""
+
+    def __init__(self, text):
+        super().__init__()
+        self.open = self.deepest = 0
+        self.ids, self.links, self.headings = set(), [], []
+        self._heading = None
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "details":
+            self.open += 1
+            self.deepest = max(self.deepest, self.open)
+        if "id" in attrs:
+            self.ids.add(attrs["id"])
+        if tag == "a" and attrs.get("href", "").startswith("#"):
+            self.links.append(attrs["href"][1:])
+        if tag == "h2":
+            self._heading = ""
+
+    def handle_endtag(self, tag):
+        if tag == "details":
+            self.open -= 1
+            assert self.open >= 0, "a </details> without its <details>"
+        if tag == "h2":
+            self.headings.append(self._heading)
+            self._heading = None
+
+    def handle_data(self, data):
+        if self._heading is not None:
+            self._heading += data
+
+
+def page_text(store, page="/R", min_size=1, max_rows=1000):
+    out = io.StringIO()
+    tree.render(out, *tree.build(store, page, min_size, max_rows, "audit.db"))
+    return out.getvalue()
+
+
+def test_sizes_are_shown_compactly():
+    assert [tree.compact(n) for n in (0, 999, 1024, 85.9 * 1024, 341 * 2**30, 111.4 * 2**40)] \
+        == ["0B", "999B", "1.0K", "85.9K", "341G", "111T"]
+
+
+def test_bars_fill_in_eighths():
+    assert tree.bar(0) == "" and tree.bar(1) == "█" * tree.BAR_WIDTH
+    assert tree.bar(1 / tree.BAR_WIDTH + 3 / 8 / tree.BAR_WIDTH) == "█▍"
+
+
+def test_names_are_escaped(tmp_path):
+    store = listing(tmp_path, file('/R/a<b&"c/a<b&"c', 5))
+    text = page_text(store)
+    assert 'a<b&"c' not in text
+    assert '>a&lt;b&amp;&quot;c</span>' in text and 'data-path="a&lt;b&amp;&quot;c/' in text
+
+
+def test_the_page_holds_together(tmp_path):
+    store = listing(tmp_path, file("/R/A/f", 100, "X"), file("/R/B/g", 100, "X"),
+                    file("/R/C/old", 50, modified="2001-01-01T00:00:00Z"))
+    outline = Outline(page_text(store))
+    assert outline.open == 0 and outline.deepest == 2
+    assert outline.links and all(link in outline.ids for link in outline.links)
+    assert outline.headings == [
+        "Biggest duplicated folders", "Coldest big folders", "Folders made of tiny files",
+        "Where the bytes are, by file type", "Bytes by year last modified", "Reading this"]
+
+
+def test_an_incomplete_listing_says_so(tmp_path):
+    store = listing(tmp_path, file("/R/A/f", 5))
+    assert "The listing is incomplete" not in page_text(store)
+    store.add_shard("/R/later", 2)
+    assert "The listing is incomplete: 1 pending" in page_text(store)
+
+
+def test_a_raised_threshold_is_stated(tmp_path):
+    store = sample(tmp_path)
+    assert "entries under 40B are folded" in page_text(store, min_size=10, max_rows=5)
+    assert "are folded.</div>" not in page_text(store, min_size=10)
+
+
+def test_names_beyond_ascii_come_through_intact(tmp_path):
+    store = listing(tmp_path, file("/R/Ngā kōrero/日本 é.txt", 5))
+    text = page_text(store)
+    assert ">Ngā kōrero</span>" in text and 'data-path="Ngā kōrero/日本 é.txt"' in text
+
+
+def test_a_page_of_empty_files_divides_by_nothing(tmp_path):
+    store = listing(tmp_path, file("/R/a/x", 0), file("/R/b/y", 0))
+    text = page_text(store, min_size=0)
+    assert Outline(text).open == 0 and '<span class="pct">0.0%</span>' in text
+
+
+def test_an_empty_listing_is_a_page_of_zeros(tmp_path):
+    store = Store(tmp_path / "audit.db")
+    store.init_schema()
+    store.set_meta("root", "/R")
+    outline = Outline(page_text(store))
+    assert outline.open == 0 and "d0" in outline.ids

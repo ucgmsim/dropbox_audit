@@ -8,10 +8,13 @@ and `tables` picks the folders worth a closer look. `render` writes the HTML.
 
 from __future__ import annotations
 
+import html
 import time
 from array import array
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+
+from . import report
 
 YEAR = 365.25 * 86400
 COLD_YEARS = 2
@@ -397,3 +400,374 @@ def tables(store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
 
     return {"dup": [entry(d) for d in dup], "cold": [entry(d) for d in cold],
             "tiny": [entry(d) for d in tiny]}
+
+
+# ---- build: everything the page shows ---------------------------------------
+
+
+@dataclass
+class Summary:
+    title: str                # the page root's path
+    db_name: str
+    listed: float             # when the listing was taken
+    finished: bool            # a pass over the listing finished
+    generated: float
+    reclaimable: int
+    pending: int
+    running: int
+    failed: int
+    min_size: int
+    types: list               # report.ExtRow
+    years: list               # report.YearRow
+
+
+def build(store, page_path: str, min_size: int, max_rows: int, db_name: str):
+    """(page, summary, tables) for the folder at `page_path`."""
+    listed, finished = crawl_time(store)
+    crawl_root = store.get_meta("root") or ""
+    found = find_dir(store, page_path)
+    if found is None:  # nothing listed yet
+        page, chosen, reclaimable = (Page(Row("dir", page_path, "", 0), min_size, 1, {0}),
+                                     {"dup": [], "cold": [], "tiny": []}, 0)
+    else:
+        figures = measure(store, listed, min_size, found[0])
+        page = layout(store, figures, min_size, max_rows)
+        chosen = tables(store, figures, page)
+        reclaimable = figures.reclaimable
+    whole = page_path.rstrip("/").lower() == crawl_root.rstrip("/").lower()
+    under = None if whole else page_path
+    summary = Summary(
+        title=found[1] if found else page_path, db_name=db_name, listed=listed,
+        finished=finished, generated=time.time(), reclaimable=reclaimable,
+        pending=store.pending_count(), running=store.running_count(),
+        failed=store.progress()["shards_error"], min_size=min_size,
+        types=report.extension_profile(store, limit=TYPE_ROWS, under=under),
+        years=report.cold_bytes(store, under=under))
+    return page, summary, chosen
+
+
+# ---- render: the HTML -------------------------------------------------------
+
+
+MID, LAST = "├─ ", "└─ "
+BLOCKS = " ▏▎▍▌▋▊▉"
+
+
+def esc(text: str) -> str:
+    return html.escape(text, quote=True)
+
+
+def compact(n: float) -> str:
+    """A size in at most four characters, the way the reference page shows them."""
+    for unit in "BKMGTP":
+        if n < 1024 or unit == "P":
+            break
+        n /= 1024
+    if unit == "B":
+        return f"{int(n)}B"
+    return f"{n:.1f}{unit}" if n < 100 else f"{n:.0f}{unit}"
+
+
+def bar(share: float) -> str:
+    eighths = round(max(0.0, min(share, 1.0)) * BAR_WIDTH * 8)
+    full, part = divmod(eighths, 8)
+    return "█" * full + (BLOCKS[part] if part else "")
+
+
+def day(t: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(t)) if t else ""
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n:,} {word}{'' if n == 1 else 's'}"
+
+
+def _counts(row: Row) -> str:
+    text = plural(row.files, "file")
+    return text + (", " + plural(row.folders, "folder") if row.folders else "")
+
+
+def _cells(size: int, total: int, tree: str) -> str:
+    share = size / total if total else 0.0
+    return (f'<span class="size">{compact(size)}</span><span class="pct">{share:.1%}</span>'
+            f'<span class="bar">{bar(share)}</span><span class="tree">{tree}</span>'
+            '<span class="caret"></span>')
+
+
+def _badges(row: Row) -> str:
+    out = ""
+    if row.size and row.held / row.size >= DUP_BADGE:
+        out += f'<span class="badge dup">dup {row.held / row.size:.0%}</span>'
+    if row.size and row.cold / row.size >= COLD_BADGE:
+        out += f'<span class="badge cold">cold {row.cold / row.size:.0%}</span>'
+    if row.tiny:
+        out += '<span class="badge tiny">tiny</span>'
+    return out
+
+
+def _folder(out, row: Row, total: int, lines: str, twig: str) -> None:
+    """Write a folder's row and, inside it, everything below it."""
+    top = twig == ""
+    meta = _counts(row) + (f" &middot; newest {day(row.date)}" if row.date else "")
+    out.write(f'<details class="dir" id="d{row.dir_id}" data-path="{esc(row.path)}"'
+              f'{" open" if top else ""}><summary class="row">{_cells(row.size, total, lines + twig)}'
+              f'<span class="name">{esc(row.name)}</span><span class="meta">{meta}</span>'
+              f'{_badges(row)}</summary>\n')
+    inner = lines if top else lines + ("   " if twig == LAST else "│  ")
+    for i, child in enumerate(row.children):
+        branch = LAST if i == len(row.children) - 1 else MID
+        cells = _cells(child.size, total, inner + branch)
+        if child.kind == "dir":
+            _folder(out, child, total, inner, branch)
+        elif child.kind == "file":
+            copies = f'<span class="badge copies">×{child.copies}</span>' if child.copies > 1 else ""
+            out.write(f'<div class="row file" data-path="{esc(child.path)}">{cells}'
+                      f'<span class="name">{esc(child.name)}</span>'
+                      f'<span class="meta">{day(child.date)}</span>{copies}</div>\n')
+        else:
+            word = "entry" if child.entries == 1 else "entries"
+            out.write(f'<div class="row fold" data-path="{esc(child.path)}">{cells}'
+                      f'<span class="name">… {child.entries:,} more {word}</span>'
+                      f'<span class="meta">{_counts(child)}</span></div>\n')
+    out.write("</details>\n")
+
+
+def _header(out, page: Page, summary: Summary) -> None:
+    root = page.root
+    made = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(summary.generated))
+    when = "listed" if summary.finished else "listing begun"
+    out.write(f'<header>\n<h1>{esc(summary.title)}</h1>\n<div class="sub">{esc(summary.db_name)} '
+              f'&middot; {when} {day(summary.listed)} &middot; page made {made}</div>\n')
+    if summary.pending or summary.running or summary.failed:
+        out.write(f'<div class="banner">The listing is incomplete: {summary.pending:,} pending, '
+                  f'{summary.running:,} running and {summary.failed:,} failed pieces. '
+                  'Every figure is a lower bound.</div>\n')
+    if page.threshold > summary.min_size:
+        out.write(f'<div class="banner">The page would have too many rows at {compact(summary.min_size)}, '
+                  f'so entries under {compact(page.threshold)} are folded.</div>\n')
+    cold = root.cold / root.size if root.size else 0.0
+    tiles = [(compact(root.size), "total"), (f"{root.files:,}", "files"),
+             (f"{root.folders:,}", "folders"), (compact(summary.reclaimable), "reclaimable duplicates"),
+             (f"{compact(root.cold)} ({cold:.0%})", "cold")]
+    out.write('<div class="stats">' + "".join(
+        f'<div class="stat"><b>{value}</b><span>{label}</span></div>' for value, label in tiles)
+        + '</div>\n<div class="tools"><input type="search" id="q" placeholder="filter by path…" '
+          'autocomplete="off"><button data-all="open">expand all</button>'
+          '<button data-all="close">collapse all</button><span class="meta" id="count"></span>'
+          '</div>\n</header>\n')
+
+
+def _table(out, headings: list[str], rows: list[list[str]], left=(0,)) -> None:
+    if not rows:
+        out.write('<p class="note">None.</p>\n')
+        return
+
+    def cell(tag, i, text):
+        return f'<{tag} class="left">{text}</{tag}>' if i in left else f"<{tag}>{text}</{tag}>"
+
+    out.write("<table>\n<tr>" + "".join(cell("th", i, h) for i, h in enumerate(headings))
+              + "</tr>\n")
+    for row in rows:
+        out.write("<tr>" + "".join(cell("td", i, c) for i, c in enumerate(row)) + "</tr>\n")
+    out.write("</table>\n")
+
+
+def _link(e: Entry) -> str:
+    folded = " (folded)" if e.target != e.dir_id else ""
+    return f'<a href="#d{e.target}">{esc(e.path or "/")}</a>{folded}'
+
+
+def _tables(out, page: Page, summary: Summary, chosen: dict) -> None:
+    total = page.root.size
+
+    def share(n):
+        return f"{n / total:.1%}" if total else "0.0%"
+
+    out.write('<h2>Biggest duplicated folders</h2>\n<p class="note">Folders with at least half '
+              'their bytes also stored elsewhere, the most held elsewhere first. Two folders that '
+              'name each other are copies of each other: delete at most one. These figures '
+              'overlap; the reclaimable figure at the top is what deleting duplicates can '
+              'actually free.</p>\n')
+    _table(out, ["folder", "size", "held elsewhere", "share", "held mostly in"],
+           [[_link(e), compact(e.size), compact(e.held), f"{e.held / e.size:.0%}",
+             f"{esc(e.place or '/')} ({e.place_share:.0%})" if e.place_share else ""]
+            for e in chosen["dup"]], left=(0, 4))
+    out.write(f'<h2>Coldest big folders</h2>\n<p class="note">Folders with at least '
+              f'{COLD_TABLE_SHARE:.0%} of their bytes last modified more than {COLD_YEARS} years '
+              'before the listing, the most cold bytes first.</p>\n')
+    _table(out, ["folder", "size", "cold", "newest"],
+           [[_link(e), compact(e.size), f"{e.cold / e.size:.0%}", day(e.newest)]
+            for e in chosen["cold"]])
+    out.write(f'<h2>Folders made of tiny files</h2>\n<p class="note">Folders of '
+              f'{TINY_FILES:,} files or more averaging {TINY_MEAN >> 20} MiB or less, the most '
+              'files first.</p>\n')
+    _table(out, ["folder", "files", "size", "mean file"],
+           [[_link(e), f"{e.files:,}", compact(e.size), compact(e.size / e.files)]
+            for e in chosen["tiny"]])
+    out.write("<h2>Where the bytes are, by file type</h2>\n")
+    _table(out, ["type", "size", "share", "files"],
+           [["(no extension)" if r.ext == "(none)" else esc("." + r.ext), compact(r.bytes),
+             share(r.bytes), f"{r.files:,}"] for r in summary.types])
+    out.write("<h2>Bytes by year last modified</h2>\n")
+    _table(out, ["year", "size", "share", "files"],
+           [[str(r.year), compact(r.bytes), share(r.bytes), f"{r.files:,}"]
+            for r in summary.years])
+
+
+def _reading(out, page: Page) -> None:
+    out.write(f"""<h2>Reading this</h2>
+<p class="note">Folder sizes are rolled up from the files listed below them: Dropbox reports
+no folder sizes. Percentages and bars are shares of this page's {compact(page.root.size)}.
+Entries under {compact(page.threshold)} are folded into one "&hellip; more entries" row in
+their folder.</p>
+<p class="note">Dates are each file's own last-modified date, Dropbox's
+<code>client_modified</code>. Dropbox's <code>server_modified</code> can be years newer than
+the content.</p>
+<p class="note"><b>dup N%</b>, shown from {DUP_BADGE:.0%}: the share of a folder's bytes whose
+content is also stored outside it, anywhere in the listing, so deleting that folder alone would
+lose none of them. <b>cold N%</b>, shown from {COLD_BADGE:.0%}: the share last modified more
+than {COLD_YEARS} years before the listing. <b>tiny</b>: {TINY_FILES:,} files or more,
+averaging {TINY_MEAN >> 20} MiB or less. <b>&times;N</b>: the file's content is stored N times
+in the listing, this copy included.</p>
+<p class="note"><b>Reclaimable duplicates</b> is what deleting duplicates could free on this
+page while one copy of everything stays somewhere in the listing. In the folder tables, a folder
+inside or above one already listed is skipped, so no two listed folders overlap.</p>
+""")
+
+
+def render(out, page: Page, summary: Summary, chosen: dict) -> None:
+    """Write the whole page to the text file `out`."""
+    out.write(HEAD.replace("{title}", esc(summary.title)))
+    _header(out, page, summary)
+    out.write('<main>\n<div id="tree">\n')
+    _folder(out, page.root, page.root.size, "", "")
+    out.write("</div>\n")
+    _tables(out, page, summary, chosen)
+    _reading(out, page)
+    out.write(f"</main>\n<script>\n{SCRIPT}</script>\n</body>\n</html>\n")
+
+
+HEAD = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+:root {
+  --bg: #12141a; --fg: #d7dae0; --dim: #6f7683; --line: #262a33; --dir: #6fb3ff;
+  --file: #cfd4dc; --fold: #6f7683; --bar-dir: #3d6ea8; --bar-file: #4c5563;
+  --accent: #79d17d; --warn: #e5c07b; --dup: #d9a35b; --cold: #7fb7d9; --tiny: #c38fd6;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fbfbfa; --fg: #24262b; --dim: #767b86; --line: #e4e5e9; --dir: #1f6bc0;
+    --file: #3b3f47; --fold: #8a8f99; --bar-dir: #a8c8ee; --bar-file: #d3d6dc;
+    --accent: #237a37; --warn: #8a6100; --dup: #9a5b12; --cold: #1f6f9a; --tiny: #7d3d99;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 13px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg);
+         padding: 18px 24px 12px; border-bottom: 1px solid var(--line); }
+h1 { margin: 0 0 4px; font-size: 15px; }
+.sub { color: var(--dim); font-size: 12px; }
+.banner { margin-top: 8px; color: var(--warn); }
+.stats { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px; }
+.stat b { display: block; font-size: 15px; color: var(--accent); }
+.stat span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+input, button { font: inherit; color: var(--fg); background: transparent;
+                border: 1px solid var(--line); border-radius: 5px; padding: 4px 9px; }
+input { min-width: 240px; }
+button { cursor: pointer; }
+main { padding: 12px 0 60px; overflow-x: auto; }
+#tree { min-width: 980px; }
+.row { display: flex; align-items: baseline; gap: 10px; padding: 0 24px;
+       white-space: pre; list-style: none; }
+summary.row { cursor: pointer; }
+summary.row::-webkit-details-marker { display: none; }
+.row:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.size, .pct { flex: none; width: 6ch; text-align: right; }
+.pct, .meta { color: var(--dim); }
+.bar { flex: none; width: 28ch; overflow: hidden; color: var(--bar-file); letter-spacing: -.5px; }
+.dir > summary > .bar { color: var(--bar-dir); }
+.tree { flex: none; color: var(--line); }
+.caret { flex: none; width: 1ch; color: var(--dim); }
+details[open] > summary .caret::before { content: "\\2500"; }
+details:not([open]) > summary .caret::before { content: "+"; }
+.name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dir > summary > .name { color: var(--dir); font-weight: 600; }
+.file > .name { color: var(--file); }
+.fold > .name { color: var(--fold); font-style: italic; }
+.meta { flex: none; font-size: 11px; }
+.badge { flex: none; font-size: 11px; padding: 0 5px; border: 1px solid; border-radius: 3px; }
+.badge.dup, .badge.copies { color: var(--dup); }
+.badge.cold { color: var(--cold); }
+.badge.tiny { color: var(--tiny); }
+.hidden { display: none !important; }
+.flash > summary, .row.flash { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+h2 { font-size: 13px; margin: 34px 24px 4px; padding-top: 18px; border-top: 1px solid var(--line); }
+.note { color: var(--dim); margin: 4px 24px; max-width: 92ch; }
+table { border-collapse: collapse; margin: 8px 24px 0; }
+th, td { text-align: right; padding: 2px 14px 2px 0; white-space: nowrap; }
+th { color: var(--dim); font-weight: 500; }
+.left { text-align: left; }
+a { color: var(--dir); }
+</style>
+</head>
+<body>
+"""
+
+SCRIPT = """const tree = document.getElementById('tree');
+const q = document.getElementById('q');
+const count = document.getElementById('count');
+const nodes = [...tree.querySelectorAll('[data-path]')];
+
+document.querySelectorAll('[data-all]').forEach(button => button.onclick = () => {
+  const open = button.dataset.all === 'open';
+  tree.querySelectorAll('details').forEach(d => d.open = open);
+});
+
+let timer;
+q.oninput = () => { clearTimeout(timer); timer = setTimeout(filter, 150); };
+
+function filter() {
+  const term = q.value.trim().toLowerCase();
+  let hits = 0;
+  for (const n of nodes) {
+    const hit = !term || n.dataset.path.toLowerCase().includes(term);
+    n.classList.toggle('hidden', !hit);
+    if (hit && term) hits++;
+  }
+  if (term) {
+    // Reveal and open every match's folders, so each match can be reached.
+    for (const n of nodes) {
+      if (n.classList.contains('hidden')) continue;
+      for (let p = n.parentElement; p && p !== tree; p = p.parentElement) {
+        if (p.tagName === 'DETAILS') { p.classList.remove('hidden'); p.open = true; }
+      }
+    }
+  }
+  count.textContent = term ? hits + (hits === 1 ? ' match' : ' matches') : '';
+}
+
+function reveal(id) {
+  const target = document.getElementById(id);
+  if (!target) return;
+  for (let p = target.parentElement; p && p !== tree; p = p.parentElement) {
+    if (p.tagName === 'DETAILS') p.open = true;
+  }
+  target.scrollIntoView({block: 'center'});
+  target.classList.add('flash');
+  setTimeout(() => target.classList.remove('flash'), 1600);
+}
+
+document.querySelectorAll('a[href^="#d"]').forEach(a => a.onclick = event => {
+  event.preventDefault();
+  history.replaceState(null, '', a.hash);
+  reveal(a.hash.slice(1));
+});
+if (location.hash) reveal(location.hash.slice(1));
+"""
