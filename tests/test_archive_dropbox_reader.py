@@ -189,11 +189,12 @@ def dropbox_like(data):
 
 
 def test_a_range_starting_on_the_last_byte_of_a_block_still_reads_true():
-    data = (bytes(range(251)) * (BLOCK // 251 + 64))[:BLOCK + 4096]
+    data = (bytes(range(251)) * (2 * BLOCK // 251 + 64))[:2 * BLOCK + 4096]
     _, reader, session = dropbox_like(data)
-    assert reader.read_range(0, BLOCK - 1, 1024) == data[BLOCK - 1:BLOCK - 1 + 1024]
+    for offset in (BLOCK - 1, 2 * BLOCK - 1):    # every block's last byte, not just the first's
+        assert reader.read_range(0, offset, 1024) == data[offset:offset + 1024]
     # Anywhere else, the range asked for is exactly the one wanted.
-    for offset in (0, BLOCK - 2, BLOCK):
+    for offset in (0, BLOCK - 2, BLOCK, 2 * BLOCK - 2):
         session.ranges.clear()
         assert reader.read_range(0, offset, 1024) == data[offset:offset + 1024]
         assert session.ranges == [(offset, offset + 1023)]
