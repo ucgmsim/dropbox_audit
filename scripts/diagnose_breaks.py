@@ -136,8 +136,7 @@ def main() -> int:
     ap.add_argument("--archive", default="v01p0_incomplete.tar")
     ap.add_argument("--remote", default="dropbox")
     ap.add_argument("--members-db", help="where to look members up (default: --db). The "
-                    "live DB keeps only the proven chain; the pre-join backup has them all. "
-                    "Rows are matched by the archive's id in --db, so it must be a copy of it.")
+                    "live DB keeps only the proven chain; the pre-join backup has them all.")
     ap.add_argument("--local-dir", help="read parts from this directory instead of Dropbox")
     ap.add_argument("--break", dest="breaks", action="append", metavar="DEAD:ALIVE",
                     help="a chain's last offset and the next offset a chain was seen alive")
@@ -197,11 +196,19 @@ def main() -> int:
     print("\n=== 1b. control: what phase does a KNOWN-GOOD member read at? ===", flush=True)
     mcon = sqlite3.connect(f"file:{args.members_db or args.db}?mode=ro", uri=True)
     mcon.row_factory = sqlite3.Row
+    # The same archive by content, whatever id it has there: an id that names nothing
+    # would make every check below read nothing and report it all clear.
+    found = mcon.execute("SELECT id FROM archives WHERE set_hash=?",
+                         (row["set_hash"],)).fetchone()
+    if found is None:
+        sys.exit(f"error: {args.members_db or args.db} has no archive with "
+                 f"{args.archive}'s parts")
+    members_id = found["id"]
     picks, seen = [], set()
     for order in ("hdr_offset ASC", "hdr_offset DESC", "size DESC"):
         r = mcon.execute("SELECT data_offset,size,name FROM members WHERE archive_id=? "
                          f"AND type='0' AND size > 200000 ORDER BY {order} LIMIT 1",
-                         (row["id"],)).fetchone()
+                         (members_id,)).fetchone()
         if r and r["data_offset"] not in seen:
             seen.add(r["data_offset"]); picks.append(r)
     for c in picks:
@@ -252,7 +259,7 @@ def main() -> int:
         print(f"\n=== 3. re-reading {args.verify_sample} recorded member headers ===", flush=True)
         picks = mcon.execute(
             "SELECT hdr_offset,name,size FROM members WHERE archive_id=? "
-            "ORDER BY RANDOM() LIMIT ?", (row["id"], args.verify_sample)).fetchall()
+            "ORDER BY RANDOM() LIMIT ?", (members_id, args.verify_sample)).fetchall()
         bad, checked = [], 0
 
         # One ConcatFile per thread. Sharing them is exactly the interleaved-seek race
