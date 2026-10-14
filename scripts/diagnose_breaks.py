@@ -136,7 +136,8 @@ def main() -> int:
     ap.add_argument("--archive", default="v01p0_incomplete.tar")
     ap.add_argument("--remote", default="dropbox")
     ap.add_argument("--members-db", help="where to look members up (default: --db). The "
-                    "live DB keeps only the proven chain; the pre-join backup has them all.")
+                    "live DB keeps only the proven chain; the pre-join backup has them all. "
+                    "Rows are matched by the archive's id in --db, so it must be a copy of it.")
     ap.add_argument("--local-dir", help="read parts from this directory instead of Dropbox")
     ap.add_argument("--break", dest="breaks", action="append", metavar="DEAD:ALIVE",
                     help="a chain's last offset and the next offset a chain was seen alive")
@@ -198,8 +199,9 @@ def main() -> int:
     mcon.row_factory = sqlite3.Row
     picks, seen = [], set()
     for order in ("hdr_offset ASC", "hdr_offset DESC", "size DESC"):
-        r = mcon.execute("SELECT data_offset,size,name FROM members WHERE type='0' "
-                         f"AND size > 200000 ORDER BY {order} LIMIT 1").fetchone()
+        r = mcon.execute("SELECT data_offset,size,name FROM members WHERE archive_id=? "
+                         f"AND type='0' AND size > 200000 ORDER BY {order} LIMIT 1",
+                         (row["id"],)).fetchone()
         if r and r["data_offset"] not in seen:
             seen.add(r["data_offset"]); picks.append(r)
     for c in picks:
@@ -249,8 +251,8 @@ def main() -> int:
     if args.verify_sample:
         print(f"\n=== 3. re-reading {args.verify_sample} recorded member headers ===", flush=True)
         picks = mcon.execute(
-            "SELECT hdr_offset,name,size FROM members ORDER BY RANDOM() LIMIT ?",
-            (args.verify_sample,)).fetchall()
+            "SELECT hdr_offset,name,size FROM members WHERE archive_id=? "
+            "ORDER BY RANDOM() LIMIT ?", (row["id"], args.verify_sample)).fetchall()
         bad, checked = [], 0
 
         # One ConcatFile per thread. Sharing them is exactly the interleaved-seek race
