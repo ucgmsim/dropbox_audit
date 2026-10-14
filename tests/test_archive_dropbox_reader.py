@@ -3,9 +3,11 @@ import json
 import pytest
 
 from dbaudit.archive.parts import ArchiveSet
-from dbaudit.archive.reader import (ALLOWED_URLS, DOWNLOAD_URL, DropboxRangeReader,
-                                    ReaderError)
+from dbaudit.archive.reader import (ALLOWED_URLS, DOWNLOAD_URL, ConcatFile,
+                                    DropboxRangeReader, ReaderError)
+from dbaudit.archive.tarwalk import walk
 from dbaudit.limiter import AdaptiveLimiter
+from tests.archive_fakes import build_tar
 
 
 class FakeResponse:
@@ -151,3 +153,61 @@ def test_transient_failures_are_retried_and_then_give_up():
     with pytest.raises(ReaderError):
         reader.read_range(0, 0, 512)
     assert len(session.calls) == 3
+
+
+#: Dropbox stores a file in blocks of this size.
+BLOCK = 4 << 20
+
+
+class DropboxLikeSession:
+    """Serves one part's bytes as Dropbox does, including its one known wrong answer: a
+    range that starts on the last byte of a 4 MiB block comes back as that block from its
+    start, under a 206 with the asked-for Content-Range and length. Measured live on
+    2026-10-15, and the same every time it was asked.
+    """
+
+    def __init__(self, data):
+        self.data = data
+        self.ranges = []
+
+    def post(self, url, headers=None, timeout=None):
+        first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+        self.ranges.append((first, last))
+        start = first - first % BLOCK if first % BLOCK == BLOCK - 1 else first
+        return FakeResponse(206, self.data[start:start + last - first + 1],
+                            {"Content-Range": f"bytes {first}-{last}/{len(self.data)}"})
+
+
+def dropbox_like(data):
+    archive = ArchiveSet.from_entries(
+        [{"name": "a.tar.aa", "size": len(data), "path_display": "/d/a.tar.aa",
+          "id": "id:aa", "rev": "r", "content_hash": "ab" * 32}], "a.tar")
+    session = DropboxLikeSession(data)
+    reader = DropboxRangeReader(archive, FakeTokens(), AdaptiveLimiter(rps=1000.0),
+                                session=session, sleep=lambda _s: None)
+    return archive, reader, session
+
+
+def test_a_range_starting_on_the_last_byte_of_a_block_still_reads_true():
+    data = (bytes(range(251)) * (BLOCK // 251 + 64))[:BLOCK + 4096]
+    _, reader, session = dropbox_like(data)
+    assert reader.read_range(0, BLOCK - 1, 1024) == data[BLOCK - 1:BLOCK - 1 + 1024]
+    # Anywhere else, the range asked for is exactly the one wanted.
+    for offset in (0, BLOCK - 2, BLOCK):
+        session.ranges.clear()
+        assert reader.read_range(0, offset, 1024) == data[offset:offset + 1024]
+        assert session.ranges == [(offset, offset + 1023)]
+
+
+def test_a_walk_reaches_a_header_that_starts_a_block():
+    """What broke the October inventory. tarfile reads the byte before each header it
+    seeks to, so a header that starts a 4 MiB block was fetched from the block before's
+    last byte, came back as that block's start, and the walk called the archive corrupt
+    there -- twice, since the confirming read asked the same way."""
+    tar = build_tar([("first.bin", b"\x5a" * (BLOCK - 512)), ("second.bin", b"x" * 1000)])
+    archive, reader, _ = dropbox_like(tar)
+    members = []
+    result = walk(ConcatFile(archive, reader), 0, lambda batch, _next: members.extend(batch))
+    assert result.state == "complete"
+    assert [(m.name, m.hdr_offset) for m in members] == [("first.bin", 0),
+                                                         ("second.bin", BLOCK)]

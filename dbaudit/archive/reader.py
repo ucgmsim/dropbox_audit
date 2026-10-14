@@ -33,6 +33,13 @@ ALLOWED_URLS = frozenset({DOWNLOAD_URL})
 
 DEFAULT_TIMEOUT = 180
 
+#: Dropbox stores a file in blocks of this size, and answers a range that starts on a
+#: block's last byte with that block from its start: a 206 with the asked-for
+#: Content-Range and length, and the wrong bytes. Measured on 2026-10-15, the same every
+#: time it was asked, so reading again does not catch it. tarfile walks straight into
+#: it: it reads the byte before every header it seeks to.
+DROPBOX_BLOCK = 4 << 20
+
 
 class ReaderError(RuntimeError):
     """A range read could not be satisfied as asked."""
@@ -201,6 +208,12 @@ class DropboxRangeReader:
         }
 
     def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
+        if offset % DROPBOX_BLOCK == DROPBOX_BLOCK - 1:
+            # Asked from one byte earlier, which Dropbox answers truly (DROPBOX_BLOCK).
+            return self._read_range(part_idx, offset - 1, length + 1)[1:]
+        return self._read_range(part_idx, offset, length)
+
+    def _read_range(self, part_idx: int, offset: int, length: int) -> bytes:
         part = self.archive.parts[part_idx]
         target = part.dbx_id or part.path_display
         last = None
