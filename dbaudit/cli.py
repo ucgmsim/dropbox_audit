@@ -1111,10 +1111,22 @@ COMPRESSION = (("gzip", b"\x1f\x8b"), ("bzip2", b"BZh"), ("xz", b"\xfd7zXZ\x00")
 
 
 def _compression(row, archive_set, tokens, limiter) -> str | None:
-    """The compression format the archive's first bytes announce, or None."""
-    first = archive_set.parts[0]
-    head = _reader_for(row, archive_set, tokens, limiter).read_range(0, 0, min(6, first.size))
-    return next((name for name, magic in COMPRESSION if head.startswith(magic)), None)
+    """The compression format the archive's first bytes announce, or None.
+
+    A format is named only once two readings agree, as every verdict is: the second asks
+    for a whole window, so its request ends tens of kilobytes from the first's.
+    """
+    size = archive_set.parts[0].size
+    if size == 0:
+        return None                 # Dropbox cannot answer a range of no bytes
+    reader = _reader_for(row, archive_set, tokens, limiter)
+    head = reader.read_range(0, 0, min(6, size))
+    found = next((name for name, magic in COMPRESSION if head.startswith(magic)), None)
+    if found and not reader.read_range(0, 0, min(WINDOW_MIN, size)).startswith(head):
+        log.warning("%s: two readings of its first bytes disagree; not naming it %s",
+                    row["name"], found)
+        return None
+    return found
 
 
 @dataclass
@@ -1253,7 +1265,7 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
                 # reason, so the walk's own bookkeeping cannot erase it.
                 store.mark_stale(archive_id, stale)
 
-    compressed = None
+    compressed = unchecked = None
     if run.unsupported:
         store.mark_unsupported(archive_id, run.unsupported)
     elif audit_failed is not None:
@@ -1262,8 +1274,15 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
     elif outcome is not None:
         if outcome.state in ("corrupt", "truncated") and outcome.end_offset == 0:
             # No header at the very start: perhaps no tar at all.
-            compressed = _compression(row, archive_set, tokens, limiter)
-        if compressed:
+            try:
+                compressed = _compression(row, archive_set, tokens, limiter)
+            except Exception as exc:
+                unchecked = (f"could not read its first bytes to check for compression: "
+                             f"{type(exc).__name__}: {exc}")
+        if unchecked:
+            # Every chain is walked, so the retry this invites goes straight to this check.
+            store.fail(archive_id, unchecked)
+        elif compressed:
             store.mark_unsupported(archive_id, f"{compressed}-compressed: not a tar, so it "
                                                f"cannot be walked header by header")
         else:
@@ -1286,6 +1305,9 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
     if audit_failed is not None:
         return _Walked(state, 1, [f"error: the walk finished, but the audit {audit_failed}; "
                                   f"run `index` again to retry it"])
+    if unchecked:
+        return _Walked(state, 1, [f"error: the walk finished, but it {unchecked}; run "
+                                  f"`index` again to retry it"])
     if run.failed:
         return _Walked(state, 1, ["error: a chain stopped on an unexpected failure; see "
                                   "the log and `archive status`"], bug=True)

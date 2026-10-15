@@ -1586,6 +1586,69 @@ def test_a_compressed_file_too_short_to_hold_a_tar_is_unsupported_not_truncated(
     assert ArchiveStore(db).get("a.tar")["state"] == "unsupported"
 
 
+def test_index_says_so_when_the_read_that_checks_for_compression_fails(tmp_path, monkeypatch,
+                                                                       capsys):
+    """That read meets Dropbox's passing failures like any other: the archive is left in
+    `error`, to be asked again."""
+    source = local_archive(tmp_path, _compressed("gzip", build_tar(RANDOM_MEMBERS)),
+                           part_size=1 << 20)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    class Failing(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if length <= 6:                     # only the compression check asks so little
+                raise ReaderError("a.tar: rate limited")
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: Failing(row["folder"], archive_set))
+    capsys.readouterr()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert ArchiveStore(db).get("a.tar")["state"] == "error"
+    assert "could not read its first bytes" in capsys.readouterr().err
+
+
+def test_a_compression_format_is_named_only_once_two_readings_agree(tmp_path, monkeypatch):
+    """As every verdict stands only once two readings agree: one reading that shows a gzip
+    signature at the start of junk does not make it gzip."""
+    source = local_archive(tmp_path, b"PK\x03\x04" + b"z" * 5000, part_size=1 << 20)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+
+    class Misread(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            data = super().read_range(part_idx, offset, length)
+            return b"\x1f\x8b" + data[2:] if (offset, length) == (0, 6) else data
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: Misread(row["folder"], archive_set))
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert ArchiveStore(db).get("a.tar")["state"] == "corrupt"
+
+
+def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(tmp_path, monkeypatch):
+    """Dropbox cannot answer a range of no bytes with a 206, so such a read would fail
+    every time it was asked."""
+    source = tmp_path / "parts"
+    source.mkdir()
+    (source / "a.tar").write_bytes(b"")
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    asked = []
+
+    class Recording(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            asked.append(length)
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: Recording(row["folder"], archive_set))
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+    assert ArchiveStore(db).get("a.tar")["state"] == "truncated"
+    assert 0 not in asked
+
+
 def test_status_without_an_archive_summarises_the_database(tmp_path, capsys):
     """With thousands of archives, one line per state and a line per walk in progress;
     one archive's full status is `--archive`."""

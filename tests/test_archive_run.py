@@ -22,7 +22,7 @@ import pytest
 
 from dbaudit import cli
 from dbaudit.api import RateLimited, TransientError
-from dbaudit.archive.reader import LocalRangeReader
+from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.auth import AuthError
 from dbaudit.cli import LISTING_ATTEMPTS, _run_limiter, main
@@ -144,6 +144,34 @@ def test_a_pax_archive_is_refused_and_every_other_walk_goes_on(tmp_path, monkeyp
     states = {f: r["state"] for f, r in rows(db).items()}
     assert states.pop("/R/p") == "unsupported"
     assert states == {f"/R/s{i}": "complete" for i in range(5)}
+
+
+def test_a_failed_compression_check_leaves_its_archive_in_error_and_the_run_goes_on(
+        tmp_path, monkeypatch):
+    """Gzip files named .tar were 7% of a sample, and the read that recognises one meets
+    Dropbox's passing failures like any other read: three must not stop the run as bugs."""
+    world = World(tmp_path)
+    for i in range(3):
+        world.add(f"/R/g{i}", f"g{i}.tar", gzip.compress(build_tar(members(5, i)), mtime=0))
+        world.add(f"/R/t{i}", f"t{i}.tar", build_tar(members(3, 20 + i)))
+    world.install(monkeypatch)
+
+    class Failing(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if length <= 6:                     # only the compression check asks so little
+                raise ReaderError("rate limited")
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: Failing(world.local[row["folder"]], archive_set))
+    db = str(tmp_path / "archives.db")
+    assert run(db, world.audit_db()) == 0
+    found = {f: (r["state"], r["error"] or "") for f, r in rows(db).items()}
+    assert {f: s for f, (s, _) in found.items() if f.startswith("/R/t")} == {
+        f"/R/t{i}": "complete" for i in range(3)}
+    for i in range(3):
+        state, error = found[f"/R/g{i}"]
+        assert state == "error" and "could not read its first bytes" in error
 
 
 def test_an_archive_that_moved_since_registration_is_walked_once_where_it_is_now(
