@@ -4,8 +4,9 @@ Opt-in and slow: `DBAUDIT_FUZZ=300 pytest tests/test_confirming_reads_fuzz.py` r
 seeds, each its own test, replayable by its id. Each builds a tar -- GNU long names, small
 stored tarballs, one part or several -- and walks it through one of three faulty servers:
 
-- ``request``: the first request to cover a chosen header is answered with another
-  member's header there, and so is every request asked exactly like it;
+- ``request``: the first request to bring a chosen header to the walk -- not one that
+  covers it only in the bytes it throws away -- is answered with another member's header
+  there, and so is every request asked exactly like it;
 - ``class``: every request that starts where that first one did, modulo 64 KiB or 1 MiB,
   is answered with bytes from further back;
 - ``block``: Dropbox's own, every request that starts on a block's last byte answered with
@@ -106,6 +107,7 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
             state["bad"] = (part_idx, offset, length)
         if (part_idx, offset, length) != state["bad"]:
             return true
+        state["answered"] = True
         cut = at - start
         return true[:cut] + donor[:length - cut] + true[cut + 512:]
 
@@ -151,13 +153,30 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
     else:
         fault = edge
         shape = 0                                    # the first pass asks from the byte before
+    class Kept(ConcatFile):
+        """Notes whether a bad answer reached the bytes a fill keeps. One that fell where
+        the fill throws bytes away was never read, so the fault waits for the next request
+        to cover the header."""
+
+        def _fill(self, pos, need):
+            super()._fill(pos, need)
+            start, end = self.cached()
+            if state.pop("answered", False):
+                if start <= at < end:
+                    state["landed"] = True
+                elif not state.get("landed"):
+                    state["bad"] = None
+
     windows = rng.choice([(4096, 4096), (4096, 65536), (16384, 16384)])
     rows = {}
     try:
-        result = walk(ConcatFile(archive, _Server(chunks, fault), window_min=windows[0],
-                                 window_max=windows[1], shape=shape), 0,
+        result = walk(Kept(archive, _Server(chunks, fault), window_min=windows[0],
+                           window_max=windows[1], shape=shape), 0,
                       lambda batch, _next: rows.update((m.hdr_offset, m) for m in batch))
     except UnsettledRead:
-        return                                       # stopped: never a false verdict
-    assert result.state == "complete", f"{kind}: {result}"
-    assert rows == truth, f"{kind}: rows differ"
+        result = None                                # stopped: never a false verdict
+    if kind == "request":
+        assert state.get("landed"), "the bad answer never reached bytes the walk kept"
+    if result is not None:
+        assert result.state == "complete", f"{kind}: {result}"
+        assert rows == truth, f"{kind}: rows differ"
