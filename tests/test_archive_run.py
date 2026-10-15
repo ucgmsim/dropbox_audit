@@ -621,6 +621,52 @@ def test_a_copy_is_walked_when_the_archive_standing_for_it_has_gone_or_lost_a_pa
                for kind, detail in events)
 
 
+def test_a_run_goes_on_with_a_walk_from_its_cursors_not_from_the_start(tmp_path, monkeypatch):
+    """What the switch rests on: a walk half done in the database goes on from where it
+    stopped. A walk from scratch would read the first header again."""
+    world = World(tmp_path)
+    world.add("/R/a", "a.tar", build_tar(members(120, 8)))
+    world.install(monkeypatch)
+    audit = world.audit_db()
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--folder", "/R/a", "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar", "--batch", "10",
+          "--max-batches", "3"])
+    asked = []
+
+    class Recording(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            asked.append(offset)
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: Recording(world.local[row["folder"]], archive_set))
+    assert run(db, audit) == 0
+    assert (rows(db)["/R/a"]["state"], rows(db)["/R/a"]["n_members"]) == ("complete", 120)
+    assert asked and min(asked) > 0
+
+
+def test_several_archives_in_one_folder_are_each_walked(tmp_path, monkeypatch):
+    """The usual shape: one folder holds many archives, plain and split, side by side."""
+    world = World(tmp_path)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    for name, data, part_size in (("a.tar", build_tar(members(5, 1)), None),
+                                  ("b.tar", build_tar(members(30, 2)), 40_000),
+                                  ("c.tar", build_tar(members(8, 3)), None)):
+        for path in list(world.add("/R/x", name, data, part_size).iterdir()):
+            path.rename(shared / path.name)
+    world.local["/R/x"] = shared
+    world.install(monkeypatch)
+    db = str(tmp_path / "archives.db")
+    assert run(db, world.audit_db()) == 0
+    found = ArchiveStore(db).connect().execute(
+        "SELECT name, state, n_members, n_parts > 1 FROM archives ORDER BY name").fetchall()
+    assert [tuple(r) for r in found] == [("a.tar", "complete", 5, 0),
+                                         ("b.tar", "complete", 30, 1),
+                                         ("c.tar", "complete", 8, 0)]
+
+
 def test_every_walk_and_listing_takes_its_turn_at_one_limiter(tmp_path, monkeypatch):
     """So one walk's rate-limit response slows every walk: the limiter pauses every
     request it gates."""
