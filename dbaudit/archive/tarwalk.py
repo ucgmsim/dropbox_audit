@@ -133,8 +133,9 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     before it is a change, whether it reaches another verdict or a tie-break takes it off
     that one's path; a confirmed pax header raises UnsupportedArchive. A first reading
     that `_settled` catches wrong mid-walk proves its fetch bad, and the headers that
-    fetch served before it are read again the same way; more than REREAD_LIMIT passes in
-    a row cut short like that, with nothing more committed, raise UnsettledRead too.
+    fetch served before it are read again, as a verdict's are; more than REREAD_LIMIT
+    passes in a row cut short like that, with nothing more committed, raise UnsettledRead
+    too.
 
     ``commit`` is expected to write the members and the cursor in one transaction, so
     that an interrupted walk resumes from exactly the last committed offset. The cursor
