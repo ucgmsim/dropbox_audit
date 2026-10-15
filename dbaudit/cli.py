@@ -814,6 +814,30 @@ class _Run:
                     self.halt.set()
 
 
+def _chain_start(run, segment, concat):
+    """Where a chain with no start yet begins: where the chain before it crossed into this
+    part, which is exactly where the join would start it, or else the first header a scan
+    finds -- None if there is none. The scan gives way between reads to that crossing, and
+    to a stop, which raises `_Stopped`."""
+    def crossed():
+        if segment["idx"] == 0:
+            return None
+        before = run.store.segments(run.archive_id)[segment["idx"] - 1]
+        return before["exit_offset"] if before["state"] == "crossed" else None
+
+    start = crossed()
+    if start is not None:
+        return start
+    try:
+        return find_chain_start(concat, segment["scan_from"],
+                                should_stop=lambda: run.stopping() or crossed() is not None)
+    except ScanStopped:
+        start = crossed()
+        if start is None:
+            raise _Stopped("stopped while scanning for the chain's first header") from None
+        return start
+
+
 def _walk_segment(run, segment) -> None:
     """One chain: find where it starts if it has none, then walk to its boundary."""
     args = run.args
@@ -842,11 +866,7 @@ def _walk_segment(run, segment) -> None:
     try:
         start = segment["first_header"]
         if start is None:
-            try:
-                start = find_chain_start(concat, segment["scan_from"],
-                                         should_stop=run.stopping)
-            except ScanStopped:
-                raise _Stopped("stopped while scanning for the chain's first header") from None
+            start = _chain_start(run, segment, concat)
             if start is None:
                 # Not a failure in itself -- the join resets such a segment to its
                 # predecessor's exit like any other disagreement.

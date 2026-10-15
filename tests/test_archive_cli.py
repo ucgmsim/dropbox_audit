@@ -193,6 +193,25 @@ def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path):
     assert manifests[1] == manifests[4]
 
 
+@pytest.mark.parametrize("seed", range(10))
+def test_chains_find_every_member_wherever_the_parts_divide(tmp_path, seed):
+    """Against tarfile's own listing: members from a few bytes to many times a part, parts
+    cut anywhere, one chain or many -- each starting where its scan found a header, or
+    where the chain before it crossed into its part."""
+    rng = random.Random(seed)
+    sizes = [rng.choice([10, 700, 5000, 70_000, 400_000]) for _ in range(rng.randint(5, 40))]
+    data = build_tar([(f"run/m{i:03d}.bin", rng.randbytes(n)) for i, n in enumerate(sizes)])
+    source = local_archive(tmp_path, data, part_size=max(4096, len(data) // rng.randint(2, 12)))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers",
+                 str(rng.choice([1, 2, 4, 8]))]) == 0
+    store = ArchiveStore(db)
+    got = [(r["hdr_offset"], r["size"]) for r in store.query_members(store.get("a.tar")["id"])]
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        assert got == [(m.offset, m.size) for m in tar]
+
+
 def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path):
     """A scan starting mid-member can land on an inner tar's header. The join must see
     that the chains do not meet, drop that segment's members and re-walk it."""
@@ -388,6 +407,56 @@ def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(tmp_path, mo
     monkeypatch.undo()
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert ArchiveStore(db).get("a.tar")["n_members"] == 4
+
+
+def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(tmp_path,
+                                                                          monkeypatch):
+    """Where the chain before crossed into this part is exactly where the join would start
+    this chain, so once it has crossed, a scan for that header is requests wasted -- a
+    part inside a large member can take hundreds of them."""
+    db, scanning = _deep_second_part(tmp_path)
+    scans = []
+
+    class Recording(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if part_idx == 1 and offset < scanning:
+                scans.append(offset)
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: Recording(row["folder"], s))
+    # One worker walks segment 0, which crosses, before it claims segment 1.
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert ArchiveStore(db).get("a.tar")["n_members"] == 4
+    assert scans == []
+
+
+def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(tmp_path, monkeypatch):
+    db, scanning = _deep_second_part(tmp_path)
+    started, crossed, scans = threading.Event(), threading.Event(), []
+    real_finish = ArchiveStore.finish_segment
+
+    def finish_segment(self, segment_id, result, *rest, **kwargs):
+        real_finish(self, segment_id, result, *rest, **kwargs)
+        if result.state == "crossed":
+            crossed.set()
+
+    class Ordered(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if part_idx == 0:
+                started.wait(10)                # segment 1 is scanning before 0 crosses
+            elif offset < scanning:
+                scans.append(offset)
+                started.set()
+                crossed.wait(10)                # its first read comes back after the crossing
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr(ArchiveStore, "finish_segment", finish_segment)
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: Ordered(row["folder"], s))
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "2"]) == 0
+    assert ArchiveStore(db).get("a.tar")["n_members"] == 4
+    assert len(scans) == 1
 
 
 def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypatch):
