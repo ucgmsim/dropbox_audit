@@ -19,11 +19,12 @@ import threading
 
 import pytest
 
-from dbaudit.api import Page
+from dbaudit.api import Page, RateLimited, TransientError
 from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
-from dbaudit.cli import main
+from dbaudit import cli
+from dbaudit.cli import LISTING_ATTEMPTS, main
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import build_tar, write_parts
 
@@ -54,19 +55,22 @@ def dropbox_entries(archive_set, override=None):
 
 
 def fake_build_lister(pages):
-    """A `build_lister` whose nth listing returns `pages[n]` (the last one repeats)."""
+    """A `build_lister` whose nth listing returns `pages[n]`, or raises it if it is an
+    exception (the last one repeats)."""
     calls = {"n": 0}
 
     class Lister:
         def list_folder(self, path, recursive=False):
             entries = pages[min(calls["n"], len(pages) - 1)]
             calls["n"] += 1
+            if isinstance(entries, Exception):
+                raise entries
             return Page(entries=entries, cursor=None, has_more=False)
 
         def continue_(self, cursor):
             raise AssertionError("these fakes never paginate")
 
-    def build(remote):
+    def build(remote, tokens=None):
         return object(), Lister()
 
     build.calls = calls
@@ -464,6 +468,42 @@ def test_a_part_that_changes_during_the_walk_is_stale_but_keeps_its_members(
     assert store.stats(row["id"])["n_members"] == len(MEMBERS)
 
 
+def test_index_waits_out_a_rate_limited_listing_and_asks_again(tmp_path, monkeypatch,
+                                                                capsys):
+    """Every listing takes its turn at the limiter: a 429 pauses every request, and then
+    the listing is asked again."""
+    source = tmp_path / "parts"
+    source.mkdir()
+    archive_set = write_parts(source, build_tar(MEMBERS), 4096)
+    db = str(tmp_path / "archives.db")
+    register_dropbox(monkeypatch, db, archive_set)
+    monkeypatch.setattr("dbaudit.cli.build_lister", fake_build_lister(
+        [RateLimited("too_many_requests", retry_after=0.01), dropbox_entries(archive_set)]))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None:
+            LocalRangeReader(source, archive_set))
+    capsys.readouterr()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    out = capsys.readouterr().out
+    assert "a.tar: complete" in out and "429s          : 1" in out
+
+
+def test_index_gives_up_on_a_folder_listing_that_keeps_failing(tmp_path, monkeypatch,
+                                                               capsys):
+    source = tmp_path / "parts"
+    source.mkdir()
+    archive_set = write_parts(source, build_tar(MEMBERS), 4096)
+    db = str(tmp_path / "archives.db")
+    register_dropbox(monkeypatch, db, archive_set)
+    monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
+    build = fake_build_lister([TransientError("request failed: connection reset")])
+    monkeypatch.setattr("dbaudit.cli.build_lister", build)
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert "could not list /d: TransientError" in capsys.readouterr().err
+    assert build.calls["n"] == LISTING_ATTEMPTS
+
+
 # ---- outcomes ----------------------------------------------------------------
 
 
@@ -720,6 +760,19 @@ def test_index_refuses_a_pax_archive_loudly_and_for_good(tmp_path, capsys):
     row = ArchiveStore(db).get("a.tar")
     assert row["state"] == "unsupported", "not `error` (retryable) or `corrupt` (a verdict)"
     assert "pax" in (row["detail"] or "")
+
+
+def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(tmp_path):
+    """`archive run` shares one stop among every walk: a pax archive must end its own walk
+    and no other."""
+    source = _pax_archive(tmp_path, MEMBERS)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    store = ArchiveStore(db)
+    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive", "a.tar"])
+    stop = threading.Event()
+    walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
+    assert walked.state == "unsupported" and not stop.is_set()
 
 
 def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):

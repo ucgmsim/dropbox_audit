@@ -33,9 +33,10 @@ import time
 import zlib
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .api import HttpLister
+from .api import AuthExpired, HttpLister, RateLimited, TransientError
 from .archive.parts import ArchiveSet, ArchiveSetError
 from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeReader,
                              LocalRangeReader, ReaderError)
@@ -179,8 +180,10 @@ def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
     )
 
 
-def build_lister(remote: str):
-    tokens = TokenProvider(remote=remote)
+def build_lister(remote: str, tokens=None):
+    """A lister, with its own HTTP session, over ``tokens`` or a new provider. Pass the
+    provider a run already holds: each new one shells out to rclone for its token."""
+    tokens = tokens or TokenProvider(remote=remote)
     return tokens, HttpLister(tokens)
 
 
@@ -610,6 +613,38 @@ def _folder_entries(lister, folder: str, name: str) -> list[dict]:
     return entries
 
 
+#: How many times a folder listing that failed on an expired token or a failed request is
+#: asked for, backing off LISTING_BACKOFF ** n seconds (at most a minute) between tries. A
+#: 429 is asked again however often it comes: the limiter first pauses every request for
+#: its Retry-After.
+LISTING_ATTEMPTS = 8
+LISTING_BACKOFF = 2.0
+
+
+def _listed(lister, limiter, folder, name, stop=None):
+    """`_folder_entries` through the shared limiter, the way the crawl lists, or None if
+    ``stop`` is set first."""
+    tries = 0
+    while stop is None or not stop.is_set():
+        try:
+            with limiter.slot():
+                entries = _folder_entries(lister, folder, name)
+        except RateLimited as exc:
+            limiter.on_rate_limited(exc.retry_after)
+            continue
+        except (AuthExpired, TransientError) as exc:
+            if isinstance(exc.__cause__, AuthError):
+                raise exc.__cause__ from None   # no credentials: asking again cannot help
+            tries += 1
+            if tries >= LISTING_ATTEMPTS:
+                raise
+            time.sleep(min(LISTING_BACKOFF ** tries, 60.0))
+            continue
+        limiter.on_success()
+        return entries
+    return None
+
+
 def _archive_set(args):
     """Build an ArchiveSet from Dropbox or from a local directory."""
     if args.local_dir:
@@ -646,15 +681,18 @@ def _reader_for(row, archive_set, tokens=None, limiter=None):
     return DropboxRangeReader(archive_set, tokens, limiter)
 
 
-def _fingerprint(store, row, remote):
+def _fingerprint(store, row, remote, tokens, limiter, stop=None):
     """Compare every registered part against what the folder holds right now.
 
     Matching is by file id first and by name second: all 18 parts of v01p0_incomplete
     moved between folders in five weeks, and an id survives that where a path does not.
-    Returns (missing, changed) part names.
+    Returns (missing, changed) part names, or None if ``stop`` is set before the folder
+    is listed.
     """
-    _, lister = build_lister(remote)
-    entries = _folder_entries(lister, row["folder"], row["name"])
+    _, lister = build_lister(remote, tokens)
+    entries = _listed(lister, limiter, row["folder"], row["name"], stop)
+    if entries is None:
+        return None
     by_id = {e["id"]: e for e in entries if e.get("id")}
     by_name = {e["name"]: e for e in entries}
     missing, changed = [], []
@@ -734,7 +772,10 @@ class _Run:
         self.archive_set = archive_set
         self.tokens = tokens
         self.limiter = limiter
+        #: The caller's stop, which a signal sets -- in `archive run`, every archive's --
+        #: and this archive's own, which a pax header or `--max-batches` sets.
         self.stop = stop
+        self.halt = threading.Event()
         self.lock = threading.Lock()
         self.batches = 0
         #: Set by a worker whose own machinery failed, as opposed to a bad part. A run
@@ -743,8 +784,11 @@ class _Run:
         #: same answer.
         self.failed = False
         #: Set by the first chain to meet a pax header. The format is the archive's, not
-        #: one part's, so every other chain would meet it too: the run stops.
+        #: one part's, so every other chain would meet it too: the walk stops.
         self.unsupported = None
+
+    def stopping(self) -> bool:
+        return self.stop.is_set() or self.halt.is_set()
 
     def commit(self, segment_id, members, next_offset, requests, bytes_fetched) -> None:
         """Write one batch, or refuse to once `--max-batches` has been reached.
@@ -776,7 +820,7 @@ class _Run:
             if members:
                 self.batches += 1
                 if limit and self.batches >= limit:
-                    self.stop.set()
+                    self.halt.set()
 
 
 def _walk_segment(run, segment) -> None:
@@ -821,7 +865,7 @@ def _walk_segment(run, segment) -> None:
         if cursor is None:
             cursor = start
         result = walk(concat, cursor, commit, batch_size=args.batch,
-                      stop_at=segment["stop_at"], should_stop=run.stop.is_set)
+                      stop_at=segment["stop_at"], should_stop=run.stopping)
     except _Stopped:
         # The refused batch was read before it was refused.
         requests, fetched = delta()
@@ -836,7 +880,7 @@ def _walk_segment(run, segment) -> None:
             with run.lock:
                 if run.unsupported is None:
                     run.unsupported = str(exc)
-            run.stop.set()
+            run.halt.set()
             log.error("segment %d: %s", segment["idx"], exc)
         else:
             # A chain found by a cold scan may be walking a tarball stored inside the
@@ -870,11 +914,11 @@ def _worker(run) -> None:
     """Claim segments until there are none left, or until the run is stopping."""
     owner = f"{os.getpid()}:{threading.get_ident()}"
     try:
-        while not run.stop.is_set():
+        while not run.stopping():
             segment = run.store.claim_segment(run.archive_id, owner)
             if segment is None:
                 return
-            if run.stop.is_set():
+            if run.stopping():
                 # Claimed a moment before the stop. Hand it straight back rather than
                 # begin a scan, which has no bound of its own -- Task 1 measured seeds
                 # that found no header within 64 MiB.
@@ -1082,7 +1126,29 @@ def _compression(row, archive_set, tokens, limiter) -> str | None:
     return next((name for name, magic in COMPRESSION if head.startswith(magic)), None)
 
 
-def _run_index(args, store, row) -> int:
+@dataclass
+class _Walked:
+    """How one archive's walk ended: what `archive index` reports, and `archive run`
+    counts. ``started`` is False for a walk refused before it began, which has no
+    figures worth printing; ``bug`` marks the machinery failing, not the archive."""
+    state: str
+    code: int
+    errors: list = field(default_factory=list)
+    started: bool = True
+    stopped: bool = False
+    bug: bool = False
+
+
+def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
+                  recheck=False) -> _Walked:
+    """Walk one registered archive to a verdict, or until ``stop`` is set.
+
+    The pipeline `archive index` and `archive run` share: the parts checked against the
+    folder, the chains walked and joined, the audit, the parts checked again, and the
+    outcome recorded. The caller owns the lock, the signals and the printing.
+    ``check_before`` is False when the caller registered the parts from a listing a
+    moment ago, which is that same check.
+    """
     archive_id = row["id"]
     archive_set = _stored_archive_set(store, row)
     dropbox = row["source"] == "dropbox"
@@ -1090,38 +1156,39 @@ def _run_index(args, store, row) -> int:
     # A before/after fingerprint of every part, as the spec requires. Local archives
     # are not fingerprinted: there is no cheap hash to ask for, and re-hashing 5 TiB
     # would cost far more than the walk it is meant to protect.
-    if dropbox:
+    if dropbox and check_before:
         try:
-            missing, changed = _fingerprint(store, row, args.remote)
+            fingerprinted = _fingerprint(store, row, args.remote, tokens, limiter, stop)
         except AuthError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
+            return _Walked(row["state"], 2, [f"error: {exc}"], started=False)
         except Exception as exc:
-            print(f"error: could not list {row['folder']}: {type(exc).__name__}: {exc}",
-                  file=sys.stderr)
-            return 1
+            return _Walked(row["state"], 1,
+                           [f"error: could not list {row['folder']}: "
+                            f"{type(exc).__name__}: {exc}"], started=False)
+        if fingerprinted is None:
+            return _Walked(row["state"], 0, started=False, stopped=True)
+        missing, changed = fingerprinted
         if missing:
             detail = (f"{len(missing)} part(s) missing from {row['folder']}: "
                       f"{', '.join(missing[:5])}")
             store.fail(archive_id, detail)
-            print(f"error: {detail}\n       re-register the archive with its new "
-                  f"--folder", file=sys.stderr)
-            return 1
+            return _Walked("error", 1, [f"error: {detail}\n       re-register the archive "
+                                        f"with its new --folder"], started=False)
         if changed:
             detail = (f"{len(changed)} part(s) changed since registration: "
                       f"{', '.join(changed[:5])}")
             store.mark_stale(archive_id, detail)
-            print(f"error: {detail}\n       the stored offsets describe bytes that are "
-                  f"no longer there; re-register to walk it again", file=sys.stderr)
-            return 1
+            return _Walked("stale", 1, [f"error: {detail}\n       the stored offsets "
+                                        f"describe bytes that are no longer there; "
+                                        f"re-register to walk it again"], started=False)
 
-    if args.recheck:
+    if recheck:
         # Only now, under the lock and with every part unchanged: rows are dropped to be
         # walked again, and an archive whose parts changed keeps its rows as evidence.
         rechecked = store.recheck(archive_id)
         if rechecked is None:
-            print(f"error: {row['name']} is stale; re-register it", file=sys.stderr)
-            return 1
+            return _Walked("stale", 1, [f"error: {row['name']} is stale; re-register it"],
+                           started=False)
         again, ending = rechecked
         further = (" -- a segment further back than the last --recheck, which ended the "
                    "same way" if again["idx"] < ending["idx"] - 1 else "")
@@ -1130,91 +1197,60 @@ def _run_index(args, store, row) -> int:
               f"{further}")
 
     workers = max(args.workers, 1)
-    tokens = limiter = None
-    if dropbox:
-        # One provider and one limiter for the whole command: Dropbox limits per
-        # account, and the provider caches its token behind a lock.
-        tokens = TokenProvider(remote=args.remote)
-        limiter = AdaptiveLimiter(rps=args.rps, max_concurrency=workers)
-
     store.start_walk(archive_id)
-    stop = threading.Event()
-    hard = {"count": 0}
-
-    def handle(signum, frame):
-        hard["count"] += 1
-        if hard["count"] == 1:
-            # Flag first, then log: the log line is then proof the walk is already
-            # winding down rather than a promise that it is about to.
-            stop.set()
-            log.warning("signal %d: committing the batch in flight, then exiting", signum)
-        else:
-            log.warning("second signal: exiting immediately")
-            os._exit(1)
-
-    # Unlike `run`, these are put back: the tests call main() in-process and must not
-    # be left with pytest's SIGINT handling replaced.
-    previous = {}
     run = _Run(args, store, row, archive_set, tokens, limiter, stop)
-    started = time.time()
     outcome = blocked = audit_failed = None
     exhausted = False
     log.info("walking %s (%d parts, %s) with %d chains",
              row["name"], row["n_parts"], human_bytes(row["total_size"]), workers)
-    try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            previous[signum] = signal.signal(signum, handle)
-        # Each repair advances the confirmed frontier by at least one segment, so this
-        # is bounded by the segment count; in the worst case it degrades to a
-        # sequential walk. The bound is asserted rather than assumed.
-        for _round in range(len(store.segments(archive_id)) + 2):
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                for future in [pool.submit(_worker, run) for _ in range(workers)]:
-                    future.result()
-            if run.unsupported:
-                break                     # no verdict to join towards: see below
-            kind, payload = _join(store, archive_id)
-            if (kind == _BLOCKED and payload["state"] == "error"
-                    and (payload["error"] or "").startswith(_PAX_SIGHTING)):
-                # The join only stops at a segment on the confirmed chain, so this pax
-                # sighting is the archive's own.
-                run.unsupported = payload["error"][len(_PAX_SIGHTING):]
+    # Each repair advances the confirmed frontier by at least one segment, so this is
+    # bounded by the segment count; in the worst case it degrades to a sequential walk.
+    # The bound is asserted rather than assumed.
+    for _round in range(len(store.segments(archive_id)) + 2):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for future in [pool.submit(_worker, run) for _ in range(workers)]:
+                future.result()
+        if run.unsupported:
+            break                     # no verdict to join towards: see below
+        kind, payload = _join(store, archive_id)
+        if (kind == _BLOCKED and payload["state"] == "error"
+                and (payload["error"] or "").startswith(_PAX_SIGHTING)):
+            # The join only stops at a segment on the confirmed chain, so this pax
+            # sighting is the archive's own.
+            run.unsupported = payload["error"][len(_PAX_SIGHTING):]
+            break
+        if kind == _OUTCOME and payload.state == "complete":
+            try:
+                redo = _audit_repeated_paths(run)
+            except Exception as exc:
+                audit_failed = (f"could not read again the rows under repeated paths: "
+                                f"{type(exc).__name__}: {exc}")
                 break
-            if kind == _OUTCOME and payload.state == "complete":
-                try:
-                    redo = _audit_repeated_paths(run)
-                except Exception as exc:
-                    audit_failed = (f"could not read again the rows under repeated paths: "
-                                    f"{type(exc).__name__}: {exc}")
-                    break
-                if redo:
-                    # No stop check needed: a stopping pool claims nothing, so the next
-                    # join finds them pending and the run ends there, resumable.
-                    log.warning("segment(s) %s held a row that disagreed with a fresh "
-                                "read; walking them again", ", ".join(map(str, redo)))
-                    continue
-            if kind == _OUTCOME:
-                outcome = payload
-                break
-            if kind == _BLOCKED:
-                blocked = payload
-                break
-            log.info("segment %d did not meet the chain before it; re-walking it",
-                     payload)
-            if stop.is_set():
-                break
-        else:
-            # Unreachable by construction; if it ever happens it is a bug, not a stop.
-            exhausted = True
-            log.error("giving up after too many join rounds; see `archive status`")
-    finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+            if redo:
+                # No stop check needed: a stopping pool claims nothing, so the next join
+                # finds them pending and the run ends there, resumable.
+                log.warning("segment(s) %s held a row that disagreed with a fresh read; "
+                            "walking them again", ", ".join(map(str, redo)))
+                continue
+        if kind == _OUTCOME:
+            outcome = payload
+            break
+        if kind == _BLOCKED:
+            blocked = payload
+            break
+        log.info("segment %d did not meet the chain before it; re-walking it", payload)
+        if run.stopping():
+            break
+    else:
+        # Unreachable by construction; if it ever happens it is a bug, not a stop.
+        exhausted = True
+        log.error("giving up after too many join rounds; see `archive status`")
 
     stale = None
     if dropbox:
         try:
-            missing, changed = _fingerprint(store, row, args.remote)
+            # Listed even when stopping: a verdict is recorded only after this check.
+            missing, changed = _fingerprint(store, row, args.remote, tokens, limiter)
         except Exception as exc:
             log.warning("could not re-list %s to fingerprint it: %s: %s",
                         row["folder"], type(exc).__name__, exc)
@@ -1245,55 +1281,94 @@ def _run_index(args, store, row) -> int:
     elif blocked is not None and blocked["state"] == "error":
         store.fail(archive_id, f"segment {blocked['idx']}: {blocked['error'] or 'failed'}")
 
-    stats = store.stats(archive_id)
-    rate_limited = limiter.rate_limit_events if limiter else 0
-    if rate_limited:
-        store.log_event(archive_id, "rate_limited", str(rate_limited))
-    ratio = (stats["bytes_fetched"] / stats["member_bytes"]) if stats["member_bytes"] else 0.0
-    print(f"{row['name']}: {stats['state']}")
-    print(f"  members       : {stats['n_members']:,} "
-          f"({human_bytes(stats['member_bytes'])} of member data)")
-    print(f"  requests      : {stats['requests']:,}")
-    print(f"  bytes fetched : {human_bytes(stats['bytes_fetched'])}")
-    print(f"  ratio         : {ratio:.3f} bytes fetched per member byte")
-    print(f"  429s          : {rate_limited}")
-    print(f"  elapsed       : {human_duration(time.time() - started)}")
-
+    state = store.connect().execute(
+        "SELECT state FROM archives WHERE id=?", (archive_id,)).fetchone()[0]
     if stale is not None:
-        print(f"error: {stale}; the members found are kept, but re-register before "
-              f"trusting them", file=sys.stderr)
-        return 1
+        return _Walked(state, 1, [f"error: {stale}; the members found are kept, but "
+                                  f"re-register before trusting them"])
     if run.unsupported:
-        print(f"error: {row['name']} is a pax-format archive, which dbaudit does not index. "
-              f"{run.unsupported}", file=sys.stderr)
-        return 1
+        return _Walked(state, 1, [f"error: {row['name']} is a pax-format archive, which "
+                                  f"dbaudit does not index. {run.unsupported}"])
     if compressed:
-        print(f"error: {row['name']} is {compressed}-compressed, not a tar: it cannot be "
-              f"walked header by header", file=sys.stderr)
-        return 1
+        return _Walked(state, 1, [f"error: {row['name']} is {compressed}-compressed, not "
+                                  f"a tar: it cannot be walked header by header"])
     if audit_failed is not None:
-        print(f"error: the walk finished, but the audit {audit_failed}; run `index` again "
-              f"to retry it", file=sys.stderr)
-        return 1
+        return _Walked(state, 1, [f"error: the walk finished, but the audit {audit_failed}; "
+                                  f"run `index` again to retry it"])
     if run.failed:
-        print(f"error: a chain stopped on an unexpected failure; see the log and "
-              f"`archive status`", file=sys.stderr)
-        return 1
+        return _Walked(state, 1, ["error: a chain stopped on an unexpected failure; see "
+                                  "the log and `archive status`"], bug=True)
     if outcome is not None:
         if outcome.state == "complete":
-            return 0
-        print(f"error: {row['name']} is {outcome.state}: {outcome.detail}",
-              file=sys.stderr)
-        return 1
+            return _Walked(state, 0)
+        return _Walked(state, 1, [f"error: {row['name']} is {outcome.state}: "
+                                  f"{outcome.detail}"])
     if blocked is not None and blocked["state"] == "error":
-        print(f"error: segment {blocked['idx']}: {blocked['error']}", file=sys.stderr)
-        return 1
+        return _Walked(state, 1, [f"error: segment {blocked['idx']}: {blocked['error']}"])
     if exhausted:
-        print(f"error: {row['name']} did not settle; see `archive status`",
-              file=sys.stderr)
-        return 1
-    log.info("stopped before the chain reached a verdict; re-run to resume")
-    return 0
+        return _Walked(state, 1, [f"error: {row['name']} did not settle; see "
+                                  f"`archive status`"], bug=True)
+    return _Walked(state, 0, stopped=True)
+
+
+def _run_index(args, store, row) -> int:
+    dropbox = row["source"] == "dropbox"
+    workers = max(args.workers, 1)
+    tokens = limiter = None
+    if dropbox:
+        # One provider and one limiter for the whole command: Dropbox limits per
+        # account, and the provider caches its token behind a lock.
+        tokens = TokenProvider(remote=args.remote)
+        limiter = AdaptiveLimiter(rps=args.rps, max_concurrency=workers)
+
+    stop = threading.Event()
+    hard = {"count": 0}
+
+    def handle(signum, frame):
+        hard["count"] += 1
+        if hard["count"] == 1:
+            # Flag first, then log: the log line is then proof the walk is already
+            # winding down rather than a promise that it is about to.
+            stop.set()
+            log.warning("signal %d: committing the batch in flight, then exiting", signum)
+        else:
+            log.warning("second signal: exiting immediately")
+            os._exit(1)
+
+    # Unlike `run`, these are put back: the tests call main() in-process and must not
+    # be left with pytest's SIGINT handling replaced.
+    previous = {}
+    started = time.time()
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, handle)
+        walked = _walk_archive(args, store, row, tokens, limiter, stop,
+                               recheck=args.recheck)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+    if walked.started:
+        archive_id = row["id"]
+        stats = store.stats(archive_id)
+        rate_limited = limiter.rate_limit_events if limiter else 0
+        if rate_limited:
+            store.log_event(archive_id, "rate_limited", str(rate_limited))
+        ratio = ((stats["bytes_fetched"] / stats["member_bytes"])
+                 if stats["member_bytes"] else 0.0)
+        print(f"{row['name']}: {stats['state']}")
+        print(f"  members       : {stats['n_members']:,} "
+              f"({human_bytes(stats['member_bytes'])} of member data)")
+        print(f"  requests      : {stats['requests']:,}")
+        print(f"  bytes fetched : {human_bytes(stats['bytes_fetched'])}")
+        print(f"  ratio         : {ratio:.3f} bytes fetched per member byte")
+        print(f"  429s          : {rate_limited}")
+        print(f"  elapsed       : {human_duration(time.time() - started)}")
+    for line in walked.errors:
+        print(line, file=sys.stderr)
+    if walked.stopped:
+        log.info("stopped before the chain reached a verdict; re-run to resume")
+    return walked.code
 
 
 def _print_archive_status(store, row) -> None:
