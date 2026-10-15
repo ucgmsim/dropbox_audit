@@ -1397,21 +1397,43 @@ def cmd_archive_status(args) -> int:
     if store is None:
         print(f"error: {args.db} holds no registered archives", file=sys.stderr)
         return 2
-    if args.archive:
-        row = store.get(args.archive)
-        if row is None:
-            print(f"error: no archive named {args.archive!r} in {args.db}",
-                  file=sys.stderr)
-            return 2
-        rows = [row]
-    else:
-        rows = store.connect().execute("SELECT * FROM archives ORDER BY id").fetchall()
-    if not rows:
-        print(f"{args.db}: no archives registered yet")
+    if not args.archive:
+        _print_archive_summary(store, args.db)
         return 0
-    for row in rows:
-        _print_archive_status(store, row)
+    row = store.get(args.archive)
+    if row is None:
+        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
+        return 2
+    _print_archive_status(store, row)
     return 0
+
+
+def _print_archive_summary(store, db) -> None:
+    """Every archive in the database, by state, and the ones mid-walk: what `archive
+    run` has done so far, readable from any shell. One archive's full status is
+    `--archive`."""
+    conn = store.connect()
+    states = conn.execute(
+        "SELECT state, COUNT(*), COALESCE(SUM(total_size), 0), COALESCE(SUM(n_members), 0) "
+        "FROM archives GROUP BY state ORDER BY state").fetchall()
+    if not states:
+        print(f"{db}: no archives registered yet")
+        return
+    count = sum(s[1] for s in states)
+    print(f"{db}: {count:,} archive{'' if count == 1 else 's'}, "
+          f"{human_bytes(sum(s[2] for s in states))}")
+    for state, count, size, members in states:
+        extra = f", {members:,} members" if members else ""
+        print(f"  {state:12}: {count:,} ({human_bytes(size)}{extra})")
+    walking = conn.execute(
+        "SELECT id, name, folder, total_size FROM archives WHERE state='walking' "
+        "ORDER BY total_size DESC").fetchall()
+    if walking:
+        print("mid-walk:")
+        for row in walking:
+            covered = store.stats(row["id"])["covered"] / max(row["total_size"], 1)
+            print(f"  {row['name']}  {human_bytes(row['total_size'])}  "
+                  f"covered {100 * covered:.1f}%  ({row['folder']})")
 
 
 def _print_index_completeness_warning(row) -> None:

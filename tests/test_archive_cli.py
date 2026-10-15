@@ -583,7 +583,7 @@ def test_status_shows_every_segment_and_the_efficiency_ratio(tmp_path, capsys):
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     capsys.readouterr()
 
-    assert main(["archive", "status", "--db", db]) == 0
+    assert main(["archive", "status", "--db", db, "--archive", "a.tar"]) == 0
     out = capsys.readouterr().out
     store = ArchiveStore(db)
     segments = store.segments(store.get("a.tar")["id"])
@@ -1584,3 +1584,26 @@ def test_a_compressed_file_too_short_to_hold_a_tar_is_unsupported_not_truncated(
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert ArchiveStore(db).get("a.tar")["state"] == "unsupported"
+
+
+def test_status_without_an_archive_summarises_the_database(tmp_path, capsys):
+    """With thousands of archives, one line per state and a line per walk in progress;
+    one archive's full status is `--archive`."""
+    db = str(tmp_path / "archives.db")
+    other = build_tar(MEMBERS + [("run/extra.bin", b"e" * 100)])     # its own identity
+    for name, data, cap in (("a.tar", build_tar(MEMBERS), []),
+                            ("b.tar", other, ["--batch", "5", "--max-batches", "1"])):
+        source = tmp_path / name
+        source.mkdir()
+        write_parts(source, data, 4096, base=name)
+        main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", name])
+        main(["archive", "index", "--db", db, "--archive", name, *cap])
+    capsys.readouterr()
+
+    assert main(["archive", "status", "--db", db]) == 0
+    out = capsys.readouterr().out
+    assert "2 archives" in out
+    assert "complete    : 1 (" in out and f"{len(MEMBERS)} members" in out
+    assert "walking     : 1 (" in out
+    assert "mid-walk:" in out and "b.tar" in out and "covered" in out
+    assert "[ 0]" not in out                    # no segment listing without --archive
