@@ -137,7 +137,10 @@ python -m dbaudit archive cat      --db archives.db --archive big.tar \
 - **Few requests.** Reads go through a window that doubles from 64 KiB up to 16 MiB
   while headers keep landing inside it, so a run of small members shares one
   request and a large member costs one small read. A 5 TiB archive in 18 parts was
-  indexed in about six hours.
+  indexed in about six hours. Each request also fetches up to 64 KiB either side and
+  throws it away (see "Checked reads"). On archives of large members that nearly
+  doubles `bytes fetched`, and the ratio `index` and `status` report, but it adds well
+  under 1% to the time: a request costs about 1.6 s, a MiB about 0.04 s.
 - **Resumable.** Each batch of members is committed with the cursor that resumes
   it, so `index` can be interrupted and re-run at any time.
 - **Checked reads.** Dropbox sometimes answers a range request with the wrong bytes,

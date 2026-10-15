@@ -12,7 +12,8 @@ few MiB. That argues for a generous cap: in a dense pocket one 16 MiB fetch serv
 hundreds of headers. It also argues for a small floor, because the floor is paid on
 every jump and 99.3% of that archive's bytes sit inside members larger than 2 MiB --
 at a 1 MiB floor the walk drags ~210 GiB, at 64 KiB it drags ~13 GiB for the same
-wall time.
+wall time. The shapes below add about as much again -- up to 64 KiB either side of every
+request, about 64 KiB a request on average -- for well under 1% more time.
 
 Reading again must also ask again differently. A server can answer one request wrongly
 every time it is asked -- Dropbox does (DROPBOX_BLOCK) -- and then a second read that asks
