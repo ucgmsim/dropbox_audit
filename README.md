@@ -182,6 +182,11 @@ python -m dbaudit archive status --db archives.db   # counts by state, and walks
   tried once more at the end of the queue. The third unexpected failure stops the run,
   with status 1.
 
+`archive import --db TARGET --from SOURCE` copies every archive of another archive
+database into TARGET, finished or mid-walk, and replaces one already there with the
+same content. `archive forget --db DB --archive NAME --folder FOLDER` drops an archive
+and everything recorded about it, so that the next run walks it from scratch.
+
 ## Known limits
 
 - **Team folders the account has not joined are invisible.** rclone's token has no

@@ -926,3 +926,92 @@ class ArchiveStore:
         except Exception:
             conn.execute("ROLLBACK")
             raise
+
+    # ---- moving archives between databases ----------------------------------
+
+    def forget(self, archive_id, why: str) -> None:
+        """Drop an archive and everything recorded about it, so that the next run walks
+        it from scratch. The event that says so has no archive to belong to."""
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._drop(conn, archive_id)
+            self.log_event(None, "forget", why)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def import_from(self, source) -> list[tuple[int, int, int | None]]:
+        """Copy every archive in the database at ``source`` into this one, finished or
+        mid-walk, under new ids: its row, parts, segments (with no owner, so that the
+        next walk reclaims them), members, events and recheck note. An archive here with
+        the same content is replaced, and everything recorded about it goes. One
+        transaction, so a failure imports nothing.
+
+        Raises ValueError when the two databases differ in tables or columns: a copy
+        column for column would then mean something else. Returns (id there, id here,
+        id replaced here or None) for each archive.
+        """
+        conn = self.connect()
+        conn.execute("ATTACH DATABASE ? AS src", (str(source),))
+        try:
+            differ = [table for table in sorted(self._tables("main") | self._tables("src"))
+                      if self._columns("main", table) != self._columns("src", table)]
+            if differ:
+                raise ValueError(f"{source} and {self.path} differ in tables or columns "
+                                 f"({', '.join(differ)})")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                moved = [self._import_one(conn, row, source) for row in conn.execute(
+                    "SELECT * FROM src.archives ORDER BY id").fetchall()]
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.execute("DETACH DATABASE src")
+        return moved
+
+    def _tables(self, schema) -> set[str]:
+        return {row[0] for row in self.connect().execute(
+            f"SELECT name FROM {schema}.sqlite_master WHERE type='table'")}
+
+    def _columns(self, schema, table) -> list[tuple[str, str]]:
+        return [(row["name"], row["type"]) for row in self.connect().execute(
+            f"PRAGMA {schema}.table_info({table})")]
+
+    def _import_one(self, conn, row, source) -> tuple[int, int, int | None]:
+        old = conn.execute("SELECT id FROM main.archives WHERE set_hash=?",
+                           (row["set_hash"],)).fetchone()
+        if old is not None:
+            self._drop(conn, old["id"])
+        columns = [name for name, _ in self._columns("main", "archives") if name != "id"]
+        new = conn.execute(
+            f"INSERT INTO main.archives ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' * len(columns))})",
+            [row[name] for name in columns]).lastrowid
+        for table, leave_out, blank in (("parts", (), ()), ("segments", ("id",), ("owner",)),
+                                        ("members", (), ()), ("events", (), ())):
+            columns = [name for name, _ in self._columns("main", table)
+                       if name not in leave_out]
+            chosen = ["?" if name == "archive_id" else "NULL" if name in blank else name
+                      for name in columns]
+            conn.execute(f"INSERT INTO main.{table} ({', '.join(columns)}) "
+                         f"SELECT {', '.join(chosen)} FROM src.{table} WHERE archive_id=?",
+                         (new, row["id"]))
+        note = conn.execute("SELECT value FROM src.meta WHERE key=?",
+                            (f"recheck:{row['id']}",)).fetchone()
+        if note is not None:
+            conn.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)",
+                         (f"recheck:{new}", note["value"]))
+        replaced = f", replacing archive {old['id']}" if old is not None else ""
+        self.log_event(new, "import", f"archive {row['id']} of {source}{replaced}")
+        return row["id"], new, old["id"] if old is not None else None
+
+    def _drop(self, conn, archive_id) -> None:
+        """Everything recorded about one archive, inside the caller's transaction."""
+        for table in ("parts", "segments", "members", "events"):
+            conn.execute(f"DELETE FROM main.{table} WHERE archive_id=?", (archive_id,))
+        conn.execute("DELETE FROM main.meta WHERE key=?", (f"recheck:{archive_id}",))
+        conn.execute("DELETE FROM main.archives WHERE id=?", (archive_id,))

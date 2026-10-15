@@ -1620,6 +1620,60 @@ def _run_archives(args, store, jobs) -> int:
     return 0
 
 
+def cmd_archive_import(args) -> int:
+    source = _open_archive_store(args.source)
+    if source is None:
+        print(f"error: {args.source} holds no registered archives", file=sys.stderr)
+        return 2
+    source.close()
+    if _other_kind_of_database(args.db):
+        print(f"error: {args.db} is not an archive database", file=sys.stderr)
+        return 2
+    if os.path.exists(args.db) and os.path.samefile(args.db, args.source):
+        print(f"error: --from names {args.db} itself", file=sys.stderr)
+        return 2
+    store = ArchiveStore(args.db)
+    try:
+        # The source's lock too: a walk still writing to it would be copied half-done.
+        with InstanceLock(f"{args.db}.lock"), InstanceLock(f"{args.source}.lock"):
+            store.init_schema()
+            moved = store.import_from(args.source)
+    except LockHeld as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    except ValueError as exc:
+        print(f"error: {exc}; nothing was imported", file=sys.stderr)
+        return 2
+    replaced = sum(old is not None for _, _, old in moved)
+    print(f"imported {len(moved):,} archives from {args.source} into {args.db}, "
+          f"{replaced:,} of them replacing one of the same content")
+    return 0
+
+
+def cmd_archive_forget(args) -> int:
+    store = _open_archive_store(args.db)
+    if store is None:
+        print(f"error: {args.db} holds no registered archives", file=sys.stderr)
+        return 2
+    try:
+        with InstanceLock(f"{args.db}.lock"):
+            found = store.query("SELECT id, state, n_members FROM archives "
+                                "WHERE name=? AND folder=?", (args.archive, args.folder))
+            if not found:
+                print(f"error: no archive named {args.archive!r} in {args.folder}",
+                      file=sys.stderr)
+                return 2
+            for row in found:
+                what = (f"archive {row['id']}: {args.folder}/{args.archive}, {row['state']}, "
+                        f"{row['n_members']:,} members")
+                store.forget(row["id"], what)
+                print(f"forgot {what}")
+    except LockHeld as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    return 0
+
+
 def cmd_archive_status(args) -> int:
     store = _open_archive_store(args.db)
     if store is None:
@@ -2376,6 +2430,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_arun.add_argument("--batch", type=int, default=2000)
     p_arun.add_argument("--lock")
     p_arun.set_defaults(func=cmd_archive_run, max_batches=0)
+
+    p_aimp = asub.add_parser(
+        "import", help="copy every archive of another archive database into this one")
+    p_aimp.add_argument("--db", required=True)
+    p_aimp.add_argument("--from", dest="source", required=True,
+                        help="the archive database to copy from; it is left as it is")
+    p_aimp.set_defaults(func=cmd_archive_import)
+
+    p_afgt = asub.add_parser(
+        "forget", help="drop an archive and all its rows, so the next run walks it afresh")
+    p_afgt.add_argument("--db", required=True)
+    p_afgt.add_argument("--archive", required=True)
+    p_afgt.add_argument("--folder", required=True)
+    p_afgt.set_defaults(func=cmd_archive_forget)
 
     p_ast = asub.add_parser("status", help="show archive indexing progress")
     p_ast.add_argument("--db", required=True)
