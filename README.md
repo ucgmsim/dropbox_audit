@@ -128,7 +128,7 @@ as one continuous file.
 ```bash
 python -m dbaudit archive register --db archives.db --name big.tar --folder /TeamSpace/runs
 python -m dbaudit archive index    --db archives.db --archive big.tar
-python -m dbaudit archive status   --db archives.db
+python -m dbaudit archive status   --db archives.db --archive big.tar
 python -m dbaudit archive report   --db archives.db --archive big.tar   # or `export --out DIR`
 python -m dbaudit archive cat      --db archives.db --archive big.tar \
     --member path/inside/archive --out member.bin
@@ -172,10 +172,14 @@ python -m dbaudit archive status --db archives.db   # counts by state, and walks
   stream. The log records each change, and every 10 minutes a progress line gives the
   TiB done, the streams, the request rate, and the time left at the last hour's pace, by
   count and by size.
-- **Each archive is listed at its turn,** so one that moved since the audit is walked
-  where it is now, changed content is walked as new, and a vanished one is recorded.
+- **Each archive is listed at its turn,** in the folder where the audit saw it. Content
+  that changed since is walked as new, and an archive registered elsewhere before is
+  walked here, from where its walk stopped. One that has gone, or lost a part, is
+  recorded, and a copy of it elsewhere is walked instead. An archive that moved after
+  the audit waits for the next audit.
 - **Skipped:** archives that already have a verdict, copies of another (the same
-  content elsewhere), compressed names such as `.tar.gz`, and sets of parts with gaps.
+  content elsewhere, walked only if that one has gone), compressed names such as
+  `.tar.gz`, and sets of parts with gaps.
   An archive whose first bytes are gzip, bzip2, xz or zstd is recorded `unsupported`.
 - **Stopping and failures.** SIGINT or SIGTERM stops every walk at its next batch, and
   the run exits 0; run it again to resume. An archive whose walk ends in `error` is
