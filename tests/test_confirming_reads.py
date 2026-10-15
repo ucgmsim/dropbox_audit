@@ -32,7 +32,11 @@ class _BadShape:
     everywhere else; the same bytes asked for any other way come back true.
 
     ``first``, if given, is what the very first request to cover ``at`` carries there
-    instead, once: an ordinary bad read, so that there is something to read again."""
+    instead, once: an ordinary bad read, so that there is something to read again.
+
+    It arms on the whole request, the bytes ConcatFile throws away included. So a test
+    keeps every earlier request clear of ``at`` -- a window and 64 KiB past where it
+    starts -- or the lie lands where nothing reads it."""
 
     def __init__(self, directory, at, wrong, first=None, armed=lambda: True):
         self.directory, self.at, self.wrong, self.first = directory, at, wrong, first
@@ -166,9 +170,10 @@ def test_the_audits_second_read_does_not_repeat_its_first(tmp_path, monkeypatch)
     """Review finding 2. The archive holds one path twice, as `tar -r` leaves it, so the
     audit reads both rows again. Its read of the newer one is answered with member 7's
     header. The audit's second read used to ask the same and agree, so the segment was
-    walked again, round after round, until the run gave up."""
+    walked again, round after round, until the run gave up. (A big member between the two
+    rows keeps the audit's read of the older one from reaching the newer.)"""
     members, _, _ = _jumped()
-    members = members + [("run/m03.bin", b"y" * 999)]
+    members = members + [("run/pad.bin", b"p" * BIG), ("run/m03.bin", b"y" * 999)]
     data = build_tar(members)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
         infos = list(tar)
@@ -179,8 +184,18 @@ def test_the_audits_second_read_does_not_repeat_its_first(tmp_path, monkeypatch)
     monkeypatch.setattr("dbaudit.cli._reader_for", server.reader_for)
     monkeypatch.setattr("dbaudit.cli._audit_repeated_paths",
                         _while(cli, "_audit_repeated_paths", auditing))
+    read = []
+
+    def read_member(concat, offset):
+        member = tarwalk.read_member(concat, offset)
+        read.append((offset, member.name))
+        return member
+
+    monkeypatch.setattr("dbaudit.cli.read_member", read_member)
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", *SMALL]) == 0
+    # The audit's first read of the newer row came back as member 7, its second truly.
+    assert [name for offset, name in read if offset == newer] == ["m07.bin", "m03.bin"]
     store = ArchiveStore(db)
     events = store.connect().execute(
         "SELECT kind, detail FROM events WHERE archive_id=?",
