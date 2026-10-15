@@ -3,7 +3,7 @@ import json
 import pytest
 
 from dbaudit.archive.parts import ArchiveSet
-from dbaudit.archive.reader import (ALLOWED_URLS, DOWNLOAD_URL, ConcatFile,
+from dbaudit.archive.reader import (ALLOWED_URLS, DOWNLOAD_URL, SHAPES, ConcatFile,
                                     DropboxRangeReader, ReaderError)
 from dbaudit.archive.tarwalk import walk
 from dbaudit.limiter import AdaptiveLimiter
@@ -208,7 +208,25 @@ def test_a_walk_reaches_a_header_that_starts_a_block():
     tar = build_tar([("first.bin", b"\x5a" * (BLOCK - 512)), ("second.bin", b"x" * 1000)])
     archive, reader, _ = dropbox_like(tar)
     members = []
-    result = walk(ConcatFile(archive, reader), 0, lambda batch, _next: members.extend(batch))
+    # Shape 0 asks from the byte before the header, as October's walks did: the guard's
+    # to get right, not the confirming pass's.
+    result = walk(ConcatFile(archive, reader, shape=0), 0,
+                  lambda batch, _next: members.extend(batch))
     assert result.state == "complete"
     assert [(m.name, m.hdr_offset) for m in members] == [("first.bin", 0),
                                                          ("second.bin", BLOCK)]
+
+
+def test_a_lead_that_lands_on_a_blocks_last_byte_is_still_guarded():
+    """A lead can put a request's start on a block's last byte; the guard must still move
+    it. Shape 30,599 has a lead of one byte, so a read at a block's first byte asks from
+    the last byte of the block before."""
+    data = (bytes(range(251)) * (2 * BLOCK // 251 + 64))[:2 * BLOCK + 4096]
+    archive, reader, session = dropbox_like(data)
+    for pos, lead in ((BLOCK, 1), (BLOCK + 1000, 1001)):
+        handle = ConcatFile(archive, reader, window_min=1024, window_max=1024,
+                            shape=lead * 30_599 % SHAPES)
+        session.ranges.clear()
+        handle.seek(pos)
+        assert handle.read(512) == data[pos:pos + 512]
+        assert session.ranges == [(BLOCK - 2, pos + 1023 + lead)]

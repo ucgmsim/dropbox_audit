@@ -13,12 +13,24 @@ hundreds of headers. It also argues for a small floor, because the floor is paid
 every jump and 99.3% of that archive's bytes sit inside members larger than 2 MiB --
 at a 1 MiB floor the walk drags ~210 GiB, at 64 KiB it drags ~13 GiB for the same
 wall time.
+
+Reading again must also ask again differently. A server can answer one request wrongly
+every time it is asked -- Dropbox does (DROPBOX_BLOCK) -- and then a second read that asks
+the same question agrees with the first and proves nothing. So every ConcatFile asks in a
+*shape*: each request starts a lead of up to 64 KiB before the byte it needs and runs as
+far past the last, and those bytes are thrown away. Dropping the cache moves to the next
+shape, whose lead differs by tens of kilobytes, so a re-read never repeats the request it
+checks; and a new ConcatFile starts at a random shape, so a later walk of the same chain --
+a resume, `--recheck`, the audit -- does not repeat the first walk's requests either. The
+extra bytes are nearly free, and never cost a request: neither end reaches beyond the part
+it is in.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import secrets
 import time
 from pathlib import Path
 from typing import Protocol
@@ -36,9 +48,18 @@ DEFAULT_TIMEOUT = 180
 #: Dropbox stores a file in blocks of this size, and answers a range that starts on a
 #: block's last byte with that block from its start: a 206 with the asked-for
 #: Content-Range and length, and the wrong bytes. Measured on 2026-10-15, the same every
-#: time it was asked, so reading again does not catch it. tarfile walks straight into
-#: it: it reads the byte before every header it seeks to.
+#: time it was asked. A re-read asks differently now (ConcatFile.drop_cache) and would
+#: catch it, but a first read is read again only where the chain derails, and tarfile
+#: walks straight into this: it reads the byte before every header it seeks to.
 DROPBOX_BLOCK = 4 << 20
+
+#: How many shapes a ConcatFile asks in, and so the most a lead can be, less one.
+SHAPES = 1 << 16
+#: A shape's lead is ``shape * LEAD_STEP % SHAPES`` bytes. Odd, so the leads run through
+#: every value below SHAPES, and the next shape's lead differs by 40,503 or 25,033 bytes
+#: and in parity -- so in alignment at every power of two. Two leads one byte apart, which
+#: the block-edge guard could merge into one request, are 30,599 shapes apart or more.
+LEAD_STEP = 40503
 
 
 class ReaderError(RuntimeError):
@@ -83,7 +104,7 @@ class ConcatFile:
     """A seekable, read-only file over an ArchiveSet. Enough of the interface for tarfile."""
 
     def __init__(self, archive, reader, window_min: int = WINDOW_MIN,
-                 window_max: int = WINDOW_MAX):
+                 window_max: int = WINDOW_MAX, shape: int | None = None):
         self.archive = archive
         self.reader = reader
         self._window_min = window_min
@@ -96,6 +117,9 @@ class ConcatFile:
         #: read one place again, when a fetch of its own served a header -- part of how it
         #: knows which headers to hold back and read again to confirm a verdict.
         self.fills = 0
+        #: How this reader asks: see the module docstring. Random unless given, so that
+        #: two readers of one archive do not ask alike.
+        self.shape = secrets.randbelow(SHAPES) if shape is None else shape
 
     def tell(self) -> int:
         return self._pos
@@ -139,12 +163,16 @@ class ConcatFile:
         return self._cache_start, self._cache_start + len(self._cache)
 
     def drop_cache(self, keep_window: bool = False) -> None:
-        """Forget the fetched window, so the next read asks the server again.
+        """Forget the fetched window, so the next read asks the server again -- and asks
+        it differently.
 
         A read that came back wrong is indistinguishable from one that came back right
         until something reads those bytes a second time -- and a second read served out
         of this cache is the same read. The walker drops it before reading again the
-        fetches behind any verdict it reaches, so that verdict is read twice.
+        fetches behind any verdict it reaches, so that verdict is read twice. Nor is a
+        second request that asks exactly what the first asked a second reading: a server
+        can get one request wrong every time (DROPBOX_BLOCK). So a drop also moves to
+        the next shape, and every request after it starts somewhere else.
 
         ``keep_window`` keeps the size the window had grown to, for re-reading the same
         stretch of archive: in a dense run of small members the window is at 16 MiB, and
@@ -152,6 +180,7 @@ class ConcatFile:
         """
         self._cache = b""
         self._cache_start = -1
+        self.shape = (self.shape + 1) % SHAPES
         if not keep_window:
             self._window = self._window_min
 
@@ -164,9 +193,19 @@ class ConcatFile:
             self._window = self._window_min
         # With nothing cached the window is what drop_cache left: the floor, or kept.
         length = min(max(need, self._window), self.archive.total_size - pos)
+        end = pos + length
+        # As much again is asked for past the end, so that where the start cannot move --
+        # at the first byte of a part, or in the next part, which a read crossing into it
+        # asks for from its first byte -- the length still does. Neither reaches beyond
+        # the part it is in, so neither adds a request.
+        want = self.shape * LEAD_STEP % SHAPES
+        lead = min(want, self.archive.locate(pos)[1])
+        last = self.archive.parts[self.archive.locate(end - 1)[0]]
+        tail = min(want, last.offset + last.size - end)
         chunks = [self.reader.read_range(idx, offset, count)
-                  for idx, offset, count in self.archive.slices(pos, length)]
-        self._cache = b"".join(chunks)
+                  for idx, offset, count in self.archive.slices(pos - lead,
+                                                                lead + length + tail)]
+        self._cache = b"".join(chunks)[lead:lead + length]
         self._cache_start = pos
         self.fills += 1
 

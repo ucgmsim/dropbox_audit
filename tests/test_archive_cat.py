@@ -170,6 +170,7 @@ def test_cat_refuses_a_directory_naming_its_type(tmp_path, capsys):
 # ---- T8-6: cat reads exactly the member, not the window -------------------------
 
 
+@pytest.mark.unshaped
 def test_cat_fetches_the_member_and_its_anchors_not_the_window(tmp_path, monkeypatch):
     """With the real CAT_CHUNK (16 MiB) a member this size is one request regardless
     of the window, so CAT_CHUNK is shrunk here to force several fills -- the only way
@@ -380,6 +381,7 @@ AROUND = [("run/before.bin", b"b" * 3000), ("run/data.bin", RANDOMISH),
           ("run/after.bin", b"a" * 3000)]
 
 
+@pytest.mark.unshaped
 def test_cat_repairs_a_read_whose_body_is_another_range(tmp_path, monkeypatch):
     db, _ = _single_part_archive(tmp_path, AROUND)
     readers = []
@@ -392,6 +394,7 @@ def test_cat_repairs_a_read_whose_body_is_another_range(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("liar", [1, 2, 3])
+@pytest.mark.unshaped
 def test_cat_repairs_a_bad_read_on_any_chunk_of_a_large_member(tmp_path, monkeypatch, liar):
     """Several reads per member, and whichever of them comes back wrong, the file is
     right. Before, only the chunk boundaries of the *index* were checked: none."""
@@ -407,6 +410,7 @@ def test_cat_repairs_a_bad_read_on_any_chunk_of_a_large_member(tmp_path, monkeyp
     assert out.read_bytes() == RANDOMISH
 
 
+@pytest.mark.unshaped
 def test_cat_gives_up_on_reads_that_never_line_up_and_writes_nothing(tmp_path, monkeypatch):
     db, _ = _single_part_archive(tmp_path, AROUND)
     _with_reader(monkeypatch, lambda d, a: _Swaps(d, a, None))
@@ -435,6 +439,7 @@ def test_cat_notices_a_part_that_changed_under_the_index(tmp_path):
     assert not out.exists()
 
 
+@pytest.mark.unshaped
 def test_cat_trusts_an_all_zero_overlap_only_when_two_reads_agree(tmp_path, monkeypatch):
     """Zeros where two reads overlap agree with anything that is also zeros there -- so
     a wrong body of zeros would sail through. Such a read is taken only once a second
@@ -455,6 +460,7 @@ def test_cat_trusts_an_all_zero_overlap_only_when_two_reads_agree(tmp_path, monk
     assert out.read_bytes() == payload
 
 
+@pytest.mark.unshaped
 def test_cat_checks_a_zero_length_member_against_its_neighbours(tmp_path, monkeypatch):
     db, _ = _single_part_archive(tmp_path, [("run/before.bin", b"b" * 3000),
                                             ("run/empty", b""),
@@ -468,6 +474,7 @@ def test_cat_checks_a_zero_length_member_against_its_neighbours(tmp_path, monkey
     assert out.read_bytes() == b""
 
 
+@pytest.mark.unshaped
 def test_cat_checks_the_last_member_against_the_terminator(tmp_path, monkeypatch):
     db, _ = _single_part_archive(tmp_path, [("run/before.bin", b"b" * 3000),
                                             ("run/last.bin", RANDOMISH[:5000])])
@@ -480,6 +487,7 @@ def test_cat_checks_the_last_member_against_the_terminator(tmp_path, monkeypatch
     assert out.read_bytes() == RANDOMISH[:5000]
 
 
+@pytest.mark.unshaped
 def test_cat_catches_a_read_that_goes_wrong_partway_through(tmp_path, monkeypatch):
     """Right at its head, wrong from the middle on: only the trailing anchor -- the next
     member's header, one block past this one -- can see that."""
@@ -494,6 +502,7 @@ def test_cat_catches_a_read_that_goes_wrong_partway_through(tmp_path, monkeypatc
     assert out.read_bytes() == RANDOMISH
 
 
+@pytest.mark.unshaped
 def test_cat_checks_a_bad_read_over_the_terminator(tmp_path, monkeypatch):
     """The same failure on the archive's last member, whose trailing anchor is the
     terminator: those bytes must be zeros, not merely present."""
@@ -509,6 +518,7 @@ def test_cat_checks_a_bad_read_over_the_terminator(tmp_path, monkeypatch):
     assert out.read_bytes() == RANDOMISH[:5000]
 
 
+@pytest.mark.unshaped
 def test_cat_rejects_another_members_header_before_writing_a_byte(tmp_path, monkeypatch):
     """The likeliest wrong body on a busy account is some other read's range -- and
     reads start on headers, so it opens with a perfectly valid one. Only its size gives
@@ -603,6 +613,7 @@ def _back_half(reader, at, length, true):
     return true[:cut] + (bytes(range(256)) * (length // 256 + 1))[:length - cut]
 
 
+@pytest.mark.unshaped
 def test_cat_is_not_fooled_by_another_member_of_the_same_size(tmp_path, monkeypatch):
     """root_params.yaml in two realisations: same size, other bytes. The body of a
     concurrent `cat` of the other one opens on a valid header stating the same size --
@@ -621,6 +632,7 @@ def test_cat_is_not_fooled_by_another_member_of_the_same_size(tmp_path, monkeypa
     assert out.read_bytes() == mine
 
 
+@pytest.mark.unshaped
 def test_cat_is_not_fooled_by_a_long_name_header_of_the_right_size(tmp_path, monkeypatch):
     """A GNU ././@LongLink header states the name's length + 1: for a 200-byte member, a
     body starting on it passes a size check, the name block standing in for the data."""
@@ -657,6 +669,7 @@ def test_cat_refuses_a_part_rewritten_with_the_same_layout(tmp_path, capsys):
     assert not out.exists()
 
 
+@pytest.mark.unshaped
 def test_cat_repairs_a_read_wrong_in_its_back_half_before_writing_it(
         tmp_path, monkeypatch, capsysbinary):
     """Right at its head, wrong from halfway: on a read that is not the last, only the
@@ -677,6 +690,7 @@ def test_cat_repairs_a_read_wrong_in_its_back_half_before_writing_it(
     assert capsysbinary.readouterr().out == payload
 
 
+@pytest.mark.unshaped
 def test_cat_does_not_take_zeros_at_a_reads_tail_on_trust(tmp_path, monkeypatch):
     """The first read replaced by another same-size member's range, both zero where the
     first and second reads meet: the second read's head agrees with the wrong first read,
@@ -700,6 +714,7 @@ def test_cat_does_not_take_zeros_at_a_reads_tail_on_trust(tmp_path, monkeypatch)
     assert out.read_bytes() == a
 
 
+@pytest.mark.unshaped
 def test_cat_does_not_take_fill_at_both_ends_of_a_read_on_trust(tmp_path, monkeypatch):
     """Zeros have a twin: any overlap whose bytes recur elsewhere. Both ends of the
     second read fall in 0xFF fill, and the wrong body is fill from another member -- it
@@ -721,6 +736,7 @@ def test_cat_does_not_take_fill_at_both_ends_of_a_read_on_trust(tmp_path, monkey
 
 
 @pytest.mark.parametrize("extra", [0, 300])
+@pytest.mark.unshaped
 def test_cat_confirms_the_last_read_when_nothing_follows_the_member(
         tmp_path, monkeypatch, extra):
     """An archive that ends at the member, or within a block of it, offers no block
@@ -746,6 +762,7 @@ def test_cat_confirms_the_last_read_when_nothing_follows_the_member(
     assert out.read_bytes() == payload
 
 
+@pytest.mark.unshaped
 def test_cat_checks_every_request_when_a_member_spans_small_parts(tmp_path, monkeypatch):
     """A read over three parts is three requests, and the middle one touches neither end
     of the read -- so no read may cross a part boundary, and a short read straddles each
@@ -763,6 +780,7 @@ def test_cat_checks_every_request_when_a_member_spans_small_parts(tmp_path, monk
     assert out.read_bytes() == payload
 
 
+@pytest.mark.unshaped
 def test_cat_checks_both_ends_of_a_read_that_meets_a_part_boundary(tmp_path, monkeypatch):
     """The observed failure's own shape -- real content from 777 bytes away -- on the
     part of the first read that lies past a boundary, where the member is zeros around
@@ -797,6 +815,7 @@ def test_cat_checks_both_ends_of_a_read_that_meets_a_part_boundary(tmp_path, mon
     assert out.read_bytes() == body
 
 
+@pytest.mark.unshaped
 def test_cat_vouches_for_every_request_at_both_ends(tmp_path, monkeypatch):
     """The rule behind the boundary handling, checked directly: every request cat makes
     shares its first and its last byte with some other request -- or has them vouched for
@@ -873,6 +892,7 @@ def test_cat_refuses_a_member_the_archive_ends_inside(tmp_path, capsys):
     assert not out.exists()
 
 
+@pytest.mark.unshaped
 def test_cat_reads_repetitive_data_twice_and_distinctive_data_once(tmp_path, monkeypatch):
     """What the ambiguity rule costs, pinned: a member of zeros is read twice over, one
     of random bytes once. (For a real 16 MiB read the price is 1.6 s per extra request.)"""
@@ -932,6 +952,7 @@ def _zeros_at(payload_len, start, stop, seed):
     return bytes(body)
 
 
+@pytest.mark.unshaped
 def test_cat_reads_twice_a_read_whose_head_only_zeros_vouch_for(tmp_path, monkeypatch):
     """The second read begins in zeros, so the first read agreeing with its head proves
     nothing -- and this bad read is zeros where its data begins and right from halfway
@@ -954,6 +975,7 @@ def test_cat_reads_twice_a_read_whose_head_only_zeros_vouch_for(tmp_path, monkey
     assert out.read_bytes() == payload
 
 
+@pytest.mark.unshaped
 def test_cat_holds_a_re_read_to_its_own_head_too(tmp_path, monkeypatch):
     """The first read comes back wrong in its back half; two reads of the second agree
     with each other and not with it, so the first is read again -- and that re-read is
@@ -977,6 +999,7 @@ def test_cat_holds_a_re_read_to_its_own_head_too(tmp_path, monkeypatch):
     assert out.read_bytes() == payload
 
 
+@pytest.mark.unshaped
 def test_cat_refuses_rather_than_take_a_thrice_served_body_its_neighbour_denies(
         tmp_path, monkeypatch, capsys):
     """If a server ever served the same wrong body three times running, even a lead of two
@@ -1004,6 +1027,7 @@ def test_cat_refuses_rather_than_take_a_thrice_served_body_its_neighbour_denies(
     assert not out.exists()
 
 
+@pytest.mark.unshaped
 def test_cat_does_not_take_the_terminators_zeros_as_proof(tmp_path, monkeypatch):
     """The archive's last member ends on the terminator: zeros. A read wrong from halfway
     -- zeros from there on -- agrees with that as well as the true one does, so the last
@@ -1023,6 +1047,7 @@ def test_cat_does_not_take_the_terminators_zeros_as_proof(tmp_path, monkeypatch)
     assert out.read_bytes() == payload
 
 
+@pytest.mark.unshaped
 def test_cat_rereads_zeros_where_the_index_says_a_header_follows(tmp_path, monkeypatch):
     """What follows a member that is not the last is another header. Zeros there are not
     what the index says, so the read is made again -- one request -- rather than merely
@@ -1086,6 +1111,7 @@ def _cat_across_parts(tmp_path, monkeypatch, part_size):
     return readers[0].log
 
 
+@pytest.mark.unshaped
 def test_cat_reads_each_part_once_when_the_reads_vouch_for_each_other(
         tmp_path, monkeypatch):
     """Random data across 10,000-byte parts: the member's span [3584, 45056) touches five
@@ -1097,6 +1123,7 @@ def test_cat_reads_each_part_once_when_the_reads_vouch_for_each_other(
     assert len(set(log)) == len(log), "a read was confirmed twice over"
 
 
+@pytest.mark.unshaped
 def test_cat_does_not_let_a_few_shared_bytes_vouch_for_a_read(tmp_path, monkeypatch):
     """Consecutive reads share 4 KiB; shared bytes much fewer -- 64 here -- are too few
     to go on: a read right at both ends and wrong in between agrees with both its
@@ -1137,6 +1164,7 @@ def _twins_back_half(me, twin):
     return lie
 
 
+@pytest.mark.unshaped
 def test_cat_is_not_fooled_by_a_twins_back_half(tmp_path, monkeypatch):
     """Two realisations' out.bin: same size, same header layout. Half of this read is the
     twin's, ending on the header after the twin -- valid, so a check for "some header"
@@ -1151,6 +1179,7 @@ def test_cat_is_not_fooled_by_a_twins_back_half(tmp_path, monkeypatch):
     assert out.read_bytes() == TWINS[0][1]
 
 
+@pytest.mark.unshaped
 def test_cat_is_not_fooled_by_a_twins_back_half_on_the_last_of_several_reads(
         tmp_path, monkeypatch):
     monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 2_048)
@@ -1168,6 +1197,7 @@ def test_cat_is_not_fooled_by_a_twins_back_half_on_the_last_of_several_reads(
     assert out.read_bytes() == TWINS[0][1]
 
 
+@pytest.mark.unshaped
 def test_cat_on_a_partial_index_does_not_take_any_header_after_the_member_on_trust(
         tmp_path, monkeypatch):
     """A walk stopped early knows nothing past its last member, so what follows the
@@ -1199,6 +1229,7 @@ def test_cat_on_a_partial_index_does_not_take_any_header_after_the_member_on_tru
     assert out.read_bytes() == TWINS[0][1]
 
 
+@pytest.mark.unshaped
 def test_cat_reads_a_long_named_successors_headers_whole_wherever_a_read_ends(
         tmp_path, monkeypatch):
     """A member followed by one with a GNU long name: what must follow it is three
@@ -1222,6 +1253,7 @@ def test_cat_reads_a_long_named_successors_headers_whole_wherever_a_read_ends(
     assert readers[0].log == [(0, 16_896)]
 
 
+@pytest.mark.unshaped
 def test_cat_does_not_let_a_few_zero_bytes_of_a_header_vouch_for_a_request(
         tmp_path, monkeypatch):
     """A part boundary 48 bytes before a long-named member's data: the request after it
@@ -1258,6 +1290,7 @@ def test_cat_does_not_let_a_few_zero_bytes_of_a_header_vouch_for_a_request(
     assert out.read_bytes() == payload
 
 
+@pytest.mark.unshaped
 def test_cat_does_not_let_a_few_bytes_of_the_next_header_vouch_for_a_request(
         tmp_path, monkeypatch):
     """The mirror image: a part boundary 200 bytes into the header after the member. The
@@ -1300,6 +1333,7 @@ def _split_at(tmp_path, data, cuts):
     return db
 
 
+@pytest.mark.unshaped
 def test_cat_repairs_a_twins_body_behind_five_bytes_of_header_padding(tmp_path, monkeypatch):
     """Review 5's T3, real constants: a part boundary 5 bytes before the member's data,
     and the request after it replaced by the same shape of range around an equal-size
@@ -1321,6 +1355,7 @@ def test_cat_repairs_a_twins_body_behind_five_bytes_of_header_padding(tmp_path, 
     assert out.read_bytes() == mine
 
 
+@pytest.mark.unshaped
 def test_cat_repairs_a_twins_body_that_ends_one_byte_into_the_next_header(
         tmp_path, monkeypatch):
     """Review 5's T4: a boundary one byte past the member's padded end, so the request
@@ -1372,6 +1407,7 @@ class _ServesTwice(LocalRangeReader):
         return self.wrong(true)
 
 
+@pytest.mark.unshaped
 def test_cat_does_not_let_a_body_served_twice_outvote_a_right_one(tmp_path, monkeypatch):
     """Review 5's T2: zeros at both of the middle read's overlaps, data only inside it.
     Its first fetch is right, but nothing distinctive vouches for it, so it is fetched
@@ -1451,6 +1487,7 @@ def _clean_log(monkeypatch, db, path):
     return readers[0].log
 
 
+@pytest.mark.unshaped
 def test_cat_bridges_a_part_boundary_exactly_at_the_members_end(tmp_path, monkeypatch):
     """`split -b 300G` boundaries are 512-aligned, so a part can end exactly where a
     member does. The read ending there still has its tail checked by a bridge: a body
@@ -1474,6 +1511,7 @@ def test_cat_bridges_a_part_boundary_exactly_at_the_members_end(tmp_path, monkey
     assert out.read_bytes() == body
 
 
+@pytest.mark.unshaped
 def test_cat_expects_the_terminator_after_the_last_member(tmp_path, monkeypatch):
     """The archive's last member is followed by the terminator. A last read whose tail
     is a valid header -- spliced from a same-shape member's range -- must not stand."""
@@ -1500,6 +1538,7 @@ def test_cat_expects_the_terminator_after_the_last_member(tmp_path, monkeypatch)
     assert out.read_bytes() == last
 
 
+@pytest.mark.unshaped
 def test_cat_tells_two_copies_of_a_path_apart_by_owner_and_mode(tmp_path, monkeypatch):
     """`tar -r` after a chown: the same path, size and mtime twice, owners and modes
     differ. A body from the other copy's range is caught by the header anchor."""
@@ -1544,6 +1583,7 @@ def test_cat_extracts_every_member_across_parts_smaller_than_the_overlap(
         assert out.read_bytes() == payload, name
 
 
+@pytest.mark.unshaped
 def test_cat_holds_a_re_read_last_read_to_its_own_head(tmp_path, monkeypatch):
     """The last read's tail fails the check after it; its re-read comes back wrong at its
     head -- a second bad read. That re-read must not replace it unless its head agrees
@@ -1565,6 +1605,7 @@ def test_cat_holds_a_re_read_last_read_to_its_own_head(tmp_path, monkeypatch):
     assert out.read_bytes() == body
 
 
+@pytest.mark.unshaped
 def test_cat_checks_a_settled_last_read_against_the_read_before_it(tmp_path, monkeypatch):
     """The archive's last member ends on the terminator's zeros, so its last read is
     settled. A wrong body served three times running wins that vote -- and must still
@@ -1592,6 +1633,7 @@ def test_cat_checks_a_settled_last_read_against_the_read_before_it(tmp_path, mon
     assert not out.exists()
 
 
+@pytest.mark.unshaped
 def test_cat_rereads_a_header_where_the_terminator_belongs_even_served_thrice(
         tmp_path, monkeypatch):
     """After the archive's last member come the terminator's zeros, so a header there is

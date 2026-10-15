@@ -206,6 +206,7 @@ def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path):
 # ---- stopping a run ----------------------------------------------------------
 
 
+@pytest.mark.unshaped
 def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
         tmp_path, monkeypatch):
     """SIGINT mid-walk: exit 0, keep what was committed, hand the segment back, and
@@ -628,6 +629,7 @@ def _terminator_of(data):
 
 
 @pytest.mark.parametrize("nth", [1, 2])
+@pytest.mark.unshaped
 def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
         tmp_path, monkeypatch, nth):
     """End to end, through the 8-worker pool, the join and the store: one bad read at the
@@ -655,6 +657,7 @@ def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
     assert liar.lied == 1, "the test did not actually inject a bad read"
 
 
+@pytest.mark.unshaped
 def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
         tmp_path, monkeypatch):
     """Every other read of the terminator comes back as junk, so each reading of the
@@ -866,6 +869,7 @@ class _CopiesAHeader:
         return _Reader(self.directory, archive_set)
 
 
+@pytest.mark.unshaped
 def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
         tmp_path, monkeypatch, capsys):
     """The silent case: member 5's header served where member 20's belongs. Same padded
@@ -1008,6 +1012,7 @@ def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(tmp_path, monk
     assert len(store.find_members(row["id"], "run/file05.bin")) == 2
 
 
+@pytest.mark.unshaped
 def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch, capsys):
     """Review 5's K6. A well-formed bad read in segment 1: member 18's header read as
     member 5's (same padded size, so the chain rejoins). The audit finds member 5's path
@@ -1186,6 +1191,7 @@ def test_recheck_reads_nothing_of_a_complete_archive(tmp_path, monkeypatch, caps
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
 
 
+@pytest.mark.unshaped
 def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatch):
     """One bad fetch holds a stretch of the archive from elsewhere: two wrong headers in a
     row, then member data. The walk reads the verdict again from the fetches that led to
@@ -1262,6 +1268,7 @@ def _header_claiming(data, header, size):
     return bytes(block)
 
 
+@pytest.mark.unshaped
 def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
         tmp_path, monkeypatch, capsys):
     """Review 6's #2. One bad read in segment 0 sends its chain into a tarball stored in
@@ -1316,6 +1323,7 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
 
 
+@pytest.mark.unshaped
 def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
         tmp_path, monkeypatch, capsys):
     """Review 7's B2. The stored tarball a bad read sends segment 0 into fills the whole of

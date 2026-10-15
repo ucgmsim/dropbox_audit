@@ -103,6 +103,7 @@ class _Counting(LocalRangeReader):
         return data
 
 
+@pytest.mark.unshaped
 def test_a_truncated_verdict_is_read_twice_before_it_stands(tmp_path):
     """A chain runs off the end because the last header's size claims more than is
     left. That size is one read's word, so it is read again before `truncated` stands:
@@ -125,6 +126,7 @@ def test_a_truncated_verdict_is_read_twice_before_it_stands(tmp_path):
     assert reader.covering == 2, "the header that ran out was read twice"
 
 
+@pytest.mark.unshaped
 def test_a_well_formed_bad_read_cannot_fake_a_truncated_archive(tmp_path):
     """A bad read that is valid tar from elsewhere -- here, an early 40 KB member's
     header served where a late member's belongs -- passes its checksum and claims more
@@ -440,6 +442,7 @@ def _header_offsets(data):
         return [m.offset for m in reference]
 
 
+@pytest.mark.unshaped
 def test_one_bad_read_does_not_condemn_the_whole_archive(tmp_path):
     """A read that came back wrong must not be able to end the walk.
 
@@ -498,6 +501,7 @@ def test_dropping_the_cache_makes_the_next_read_ask_again(tmp_path):
 BIG = [(f"run/big{i:03d}.bin", bytes([i % 251]) * 120_000) for i in range(40)]
 
 
+@pytest.mark.unshaped
 def test_a_bad_read_of_zeros_is_not_mistaken_for_the_end_of_the_archive(tmp_path):
     """The 2026-09-21 bad reads carried float data, but nothing says the next one will.
     Zeros where a header belongs look like a terminator, which is a *different* corrupt
@@ -517,6 +521,7 @@ def test_a_bad_read_of_zeros_is_not_mistaken_for_the_end_of_the_archive(tmp_path
     assert len(seen) == len(BIG)
 
 
+@pytest.mark.unshaped
 def test_a_bad_read_of_zeros_cannot_end_the_walk_claiming_success(tmp_path):
     """The worst outcome is not a false `corrupt` -- it is a false `complete`, because
     members go missing silently and `archive index` then refuses to walk the archive
@@ -592,6 +597,7 @@ def _rows(tmp_path, reader_class=LocalRangeReader, data=None, **reader_kw):
     return rows, result, reader
 
 
+@pytest.mark.unshaped
 def test_a_bad_read_of_only_a_long_name_block_is_read_again(tmp_path):
     """The one bad read no header checksum sees: the name block garbled, the headers
     around it intact. Unchecked, the member is recorded under a garbled path."""
@@ -606,6 +612,7 @@ def test_a_bad_read_of_only_a_long_name_block_is_read_again(tmp_path):
     assert "re-read at 1024" in result.detail
 
 
+@pytest.mark.unshaped
 def test_a_bad_read_of_only_a_long_link_target_block_is_read_again(tmp_path):
     data, target = _long_link_archive()
     rows, result, reader = _rows(tmp_path, _LiesOnce, data, bad=1536,
@@ -654,6 +661,7 @@ def test_a_writer_that_does_not_copy_the_name_costs_one_read_not_a_refusal(tmp_p
     assert "re-read" not in result.detail
 
 
+@pytest.mark.unshaped
 def test_a_long_name_that_reads_differently_every_time_gives_up(tmp_path):
     """A server that never tells the same story twice is not an archive fact. The walk
     gives up, with the cursor where the members it has read only once begin -- here the
@@ -669,6 +677,7 @@ def test_a_long_name_that_reads_differently_every_time_gives_up(tmp_path):
     assert calls[-1] == ([], 0)
 
 
+@pytest.mark.unshaped
 def test_a_wrong_header_after_true_long_blocks_is_replaced_and_the_chain_follows_it(
         tmp_path):
     """A well-formed bad read can put another member's valid header where this one's
@@ -818,6 +827,7 @@ def test_a_damaged_long_name_member_is_diagnosed_once_and_not_called_transient(t
     assert len(calls) == 3, f"each pass's end, then what both agreed on: {calls}"
 
 
+@pytest.mark.unshaped
 def test_bytes_that_are_wrong_differently_every_time_are_still_corrupt(tmp_path):
     """A server that lies afresh on every read changes the verdict's wording but not
     its substance, so retrying must stay bounded rather than run to REREAD_LIMIT."""
@@ -835,6 +845,7 @@ def test_bytes_that_are_wrong_differently_every_time_are_still_corrupt(tmp_path)
     assert "re-read at" not in result.detail
 
 
+@pytest.mark.unshaped
 def test_a_bad_read_after_a_long_name_header_is_also_re_read(tmp_path):
     """The block tarfile rejects is not always the one the walk stopped on: after a GNU
     long-name header it is the real header that follows. Re-walking from the member's
@@ -885,6 +896,7 @@ def _walk_with_transients(tmp_path, count):
     return (walk(handle, 0, lambda members, offset: seen.extend(members)), seen, reader)
 
 
+@pytest.mark.unshaped
 def test_a_walk_rescues_up_to_the_reread_limit(tmp_path):
     result, seen, reader = _walk_with_transients(tmp_path, REREAD_LIMIT)
     assert reader.lied == REREAD_LIMIT
@@ -903,6 +915,7 @@ class _LiesOnEach(_LiesOnce):
         return self.covering in self.nths
 
 
+@pytest.mark.unshaped
 def test_a_verdict_that_keeps_changing_gives_up_loudly(tmp_path):
     """Every other read of the terminator comes back as junk: each reading of the verdict
     contradicts the one before. One more contradiction than REREAD_LIMIT allows, and the
@@ -937,6 +950,7 @@ class _NeverTheSameTwice(LocalRangeReader):
         return data[:cut] + donor[:length - cut] + data[cut + 512:]
 
 
+@pytest.mark.unshaped
 def test_a_header_that_never_reads_the_same_way_twice_gives_up_loudly(tmp_path):
     """Two readings of a header disagree, and no third read agrees with either -- nor any
     read after it. No version has two reads behind it, so none is recorded: the walk
@@ -986,6 +1000,7 @@ def _walk_lying_once(tmp_path, data, bad, nth, fill=JUNK, start=0, span=1024):
 
 
 @pytest.mark.parametrize("nth", [1, 2])
+@pytest.mark.unshaped
 def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path, nth):
     data = build_tar(MEMBERS)
     result, seen, reader = _walk_lying_once(tmp_path, data, _terminator(data), nth)
@@ -995,6 +1010,7 @@ def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path, nth):
 
 
 @pytest.mark.parametrize("nth", [1, 2])
+@pytest.mark.unshaped
 def test_one_bad_read_cannot_pass_a_damaged_archive_as_complete(tmp_path, nth):
     """The false `complete` is the silent failure: members go missing and `index`
     refuses to walk the archive again. Here the archive really is damaged -- junk after
@@ -1008,6 +1024,7 @@ def test_one_bad_read_cannot_pass_a_damaged_archive_as_complete(tmp_path, nth):
     assert reader.lied == 1, "the test did not actually inject a bad read"
 
 
+@pytest.mark.unshaped
 def test_a_bad_read_of_the_very_first_block_is_read_again(tmp_path):
     """Segment 0 starts at 0 on a fresh reader, so nothing has validated its first block.
     A verdict reached at a walk's own start offset used to be believed outright. (Only
@@ -1020,6 +1037,7 @@ def test_a_bad_read_of_the_very_first_block_is_read_again(tmp_path):
 
 
 @pytest.mark.parametrize("nth", [1, 2, 3, 4])
+@pytest.mark.unshaped
 def test_a_walk_resumed_at_the_terminator_confirms_complete(tmp_path, nth):
     """A stop landing between the last batch and `finish_segment` leaves the cursor on
     the terminator, so a resumed walk's own start decides the verdict. The read that
@@ -1034,6 +1052,7 @@ def test_a_walk_resumed_at_the_terminator_confirms_complete(tmp_path, nth):
 
 
 @pytest.mark.parametrize("nth", [1, 2, 3, 4])
+@pytest.mark.unshaped
 def test_a_walk_resumed_at_the_terminator_still_finds_real_damage(tmp_path, nth):
     """The same resume on an archive that really is damaged after its terminator: a
     read of zeros over the damage must not let it pass as complete."""
@@ -1046,6 +1065,7 @@ def test_a_walk_resumed_at_the_terminator_still_finds_real_damage(tmp_path, nth)
     assert reader.lied == 1
 
 
+@pytest.mark.unshaped
 def test_a_walk_resumed_on_a_long_name_member_re_reads_its_real_header(tmp_path):
     """A cursor can land on a GNU long-name member. tarfile rejects the whole thing when
     the real header after the name reads badly, at the walk's own start offset."""
@@ -1058,6 +1078,7 @@ def test_a_walk_resumed_on_a_long_name_member_re_reads_its_real_header(tmp_path)
     assert [m.name for m in seen] == ["deep.bin"]
 
 
+@pytest.mark.unshaped
 def test_a_rescue_that_ends_in_a_crossing_keeps_its_note(tmp_path):
     """Seventeen of v01p0's eighteen segments end `crossed`, not `complete`, so this is
     where a rescue's note usually has to survive -- it is the only record of it."""
@@ -1072,6 +1093,7 @@ def test_a_rescue_that_ends_in_a_crossing_keeps_its_note(tmp_path):
     assert f"re-read at {offs[10]}" in result.detail
 
 
+@pytest.mark.unshaped
 def test_the_note_names_each_re_read_offset_once(tmp_path):
     """Re-reading one offset until two reads agree can take several passes there; the
     note is for a person, and should name the offset once."""
@@ -1172,6 +1194,7 @@ def test_a_global_pax_header_is_refused_with_the_cursor_before_it(tmp_path):
     assert calls[-1] == (0, 0)
 
 
+@pytest.mark.unshaped
 def test_one_bad_read_carrying_a_pax_header_is_read_again_not_believed(tmp_path):
     """`unsupported` is for good, so it is not decided on one read. A bad read can be
     valid pax from elsewhere -- a stored tarball, say -- sitting where a GNU member's
@@ -1196,6 +1219,7 @@ def test_one_bad_read_carrying_a_pax_header_is_read_again_not_believed(tmp_path)
     assert f"re-read at {at}" in result.detail
 
 
+@pytest.mark.unshaped
 def test_one_bad_read_carrying_a_global_pax_header_leaves_nothing_behind(tmp_path):
     """A `g` header changes the walk's own state: tarfile applies it to every member
     after it. Read again and found not to be there, it must stop applying -- otherwise
@@ -1310,6 +1334,7 @@ def _header_with_size(data, header, size):
     return _with_field(data, header, 124, 12, b"%011o" % size)[header:header + 512]
 
 
+@pytest.mark.unshaped
 def test_a_header_copied_from_elsewhere_cannot_condemn_a_sound_archive(tmp_path):
     """The big member's header served where member 30's belongs sends the chain 6,656
     bytes on, into member data. Reading that landing again finds the same data, so it
@@ -1352,6 +1377,7 @@ def _gnu_holding_a_pax_tarball():
     return members, data, second
 
 
+@pytest.mark.unshaped
 def test_a_header_copied_from_elsewhere_cannot_condemn_an_archive_as_pax(tmp_path):
     """The wrong header's size lands the chain on a real pax header inside a stored
     tarball. Every read of it says pax, so reading it twice confirmed `unsupported` -- for
@@ -1372,6 +1398,7 @@ def test_a_header_copied_from_elsewhere_cannot_condemn_an_archive_as_pax(tmp_pat
     assert f"re-read at {at}" in result.detail
 
 
+@pytest.mark.unshaped
 def test_a_header_copied_from_elsewhere_cannot_move_where_a_chain_crosses(tmp_path):
     """A crossing is what the next segment's start is judged by: a wrong one resets that
     segment onto bytes that are not a header. The wrong header here skips three members
@@ -1395,6 +1422,7 @@ def test_a_header_copied_from_elsewhere_cannot_move_where_a_chain_crosses(tmp_pa
     assert rows.cursor == offsets[30]
 
 
+@pytest.mark.unshaped
 def test_a_copied_header_that_rejoins_the_chain_near_its_end_is_read_again(tmp_path):
     """Member 5's header served where member 20's belongs: the same padded size, so the
     chain rejoins and the walk ends `complete`, one row wrong. It lies within the fills
@@ -1452,6 +1480,7 @@ class _LiesOnceArmed(LocalRangeReader):
         return data[:cut] + self.fill[:length - cut] + data[cut + len(self.fill):]
 
 
+@pytest.mark.unshaped
 def test_a_wrong_header_read_by_the_confirming_pass_is_outvoted(tmp_path):
     """The archive really is damaged at member 30's header. The second reading of it comes
     back as a valid header from elsewhere -- one whose size rejoins the chain, so, believed,
@@ -1527,6 +1556,7 @@ class _LiesAfter(_AlwaysLies):
         return self.covering > self.first
 
 
+@pytest.mark.unshaped
 def test_giving_up_during_a_second_reading_leaves_it_to_be_read_again(tmp_path):
     """The second reading gives up on a long name that never reads the same way twice.
     Nothing either reading saw was committed, and the cursor is where they begin: the
@@ -1547,6 +1577,7 @@ def test_giving_up_during_a_second_reading_leaves_it_to_be_read_again(tmp_path):
     assert rows.names() == ["first.bin", "deep.bin"]
 
 
+@pytest.mark.unshaped
 def test_reads_that_agree_no_member_is_there_are_an_answer(tmp_path):
     """A bad fetch holding a stretch of a stored pax tarball, served where z.bin's header
     belongs: its first member sends the chain into z.bin's data, where the same fetch has
@@ -1577,6 +1608,7 @@ def test_reads_that_agree_no_member_is_there_are_an_answer(tmp_path):
     assert f"re-read at {landing}" in result.detail, "the pax read there was a rescue"
 
 
+@pytest.mark.unshaped
 def test_a_landing_on_a_real_header_in_its_own_fetch_is_read_back_past(tmp_path):
     """The wrong header's size lands the chain on a real header -- the last member of a
     tarball stored in the archive -- in a fetch of its own. The chain walks that member and
@@ -1606,6 +1638,7 @@ def test_a_landing_on_a_real_header_in_its_own_fetch_is_read_back_past(tmp_path)
     assert rows.names() == _names_of(members)
 
 
+@pytest.mark.unshaped
 def test_a_bad_fetch_is_read_again_from_the_first_header_it_served(tmp_path):
     """A bad fetch holding a stretch of the archive from elsewhere serves two wrong headers
     in a row before the chain leaves it, landing in member data. The last of them is not
@@ -1632,6 +1665,7 @@ def test_a_bad_fetch_is_read_again_from_the_first_header_it_served(tmp_path):
     assert rows.consistent()
 
 
+@pytest.mark.unshaped
 def test_damage_read_as_a_valid_header_is_found_by_the_second_reading(tmp_path):
     """The archive really is damaged at member 30's header, and the first pass read it as a
     valid header from elsewhere that rejoins the chain, walking on to `complete`. The
@@ -1672,6 +1706,7 @@ class _GarblesEachOnce(LocalRangeReader):
         return bytes(data)
 
 
+@pytest.mark.unshaped
 def test_rescues_on_the_way_do_not_use_up_the_verdicts_own_re_reads(tmp_path):
     """A long walk meets independent transients far apart -- here a garbled long name for
     each of REREAD_LIMIT + 1 members. Each is settled where it is met. None of them is
@@ -1718,6 +1753,7 @@ def test_confirming_a_verdict_reads_its_last_fetches_again_not_the_walk(tmp_path
     assert reader.requests - first == CONFIRM_FILLS + 3
 
 
+@pytest.mark.unshaped
 def test_a_copied_header_spanning_two_members_is_read_again_and_counted(tmp_path):
     """A wrong header whose size covers members 20 and 21 together: the chain rejoins at
     22 with 21 never read, and the walk ends `complete`, one member short. The second
@@ -1738,6 +1774,7 @@ def test_a_copied_header_spanning_two_members_is_read_again_and_counted(tmp_path
     assert result.members == len(MEMBERS)
 
 
+@pytest.mark.unshaped
 def test_a_wrong_header_read_by_the_second_reading_of_a_sound_archive_is_outvoted(tmp_path):
     """The first pass reads member 45 right; the second reading gets a valid header there
     claiming another size. A third read agrees with the first, and the walk must go on
@@ -1762,6 +1799,7 @@ def test_a_wrong_header_read_by_the_second_reading_of_a_sound_archive_is_outvote
     assert f"re-read at {at}" in result.detail
 
 
+@pytest.mark.unshaped
 def test_a_global_header_only_the_second_readings_bad_read_saw_stops_applying(tmp_path):
     """The second reading of member 48 comes back as a `g` header and a copy of it. The `g`
     makes the member suspect, so it is read again at once, and that read agrees with the
@@ -1812,6 +1850,7 @@ def _cut_after_a_long_name(damaged=False):
     return data[:start + 1024 + 100], start
 
 
+@pytest.mark.unshaped
 def test_a_tie_break_that_finds_the_archive_cut_short_says_truncated(tmp_path):
     """The archive ends inside the real header of a long-named member: `truncated`. The
     second reading gets a valid header there instead; two reads settle that none begins
@@ -1833,6 +1872,7 @@ def test_a_tie_break_that_finds_the_archive_cut_short_says_truncated(tmp_path):
     assert reader.covering == 3, "one read per pass, and one to break the tie"
 
 
+@pytest.mark.unshaped
 def test_reads_that_agree_no_member_is_there_say_what_tarfile_found(tmp_path):
     """A pax header served where a long-named member's own sequence begins -- whose real
     header is damaged. Read again, tarfile rejects the sequence for that damage, twice; the
@@ -1850,6 +1890,7 @@ def test_reads_that_agree_no_member_is_there_say_what_tarfile_found(tmp_path):
     assert "bad checksum" in result.detail, result.detail
 
 
+@pytest.mark.unshaped
 def test_a_second_reading_that_moves_a_sparse_member_is_outvoted(tmp_path):
     """A GNU sparse member records the file's expanded size, so where its stored bytes end
     -- where the chain goes next -- is not among the fields recorded. A second reading that
@@ -1889,6 +1930,7 @@ class _LiesThenFails(_LiesOnce):
         return super().read_range(part_idx, offset, length)
 
 
+@pytest.mark.unshaped
 def test_a_walk_interrupted_before_its_verdict_is_read_again_reads_it_again_on_resume(
         tmp_path):
     """Review 6's #1. The first pass is derailed by a copied header and lands in member
@@ -1917,6 +1959,7 @@ def test_a_walk_interrupted_before_its_verdict_is_read_again_reads_it_again_on_r
     assert rows.names() == _names_of(members)
 
 
+@pytest.mark.unshaped
 def test_re_reading_one_member_does_not_push_the_bad_fetch_out_of_what_is_read_again(
         tmp_path):
     """Review 6's #4. The wrong header's size lands in a stored tarball whose members' long
@@ -1951,6 +1994,7 @@ def test_re_reading_one_member_does_not_push_the_bad_fetch_out_of_what_is_read_a
     assert rows.names() == _names_of(members)
 
 
+@pytest.mark.unshaped
 def test_a_fetch_caught_lying_has_the_headers_it_served_before_read_again(tmp_path):
     """Review 6's #5. A bad fetch holding a stretch of a stored pax tarball serves, where
     b.bin belongs, that tarball's member of the same padded size -- the chain rejoins,
@@ -2005,6 +2049,7 @@ def test_a_second_reading_in_a_dense_run_starts_at_the_window_it_had_grown_to(tm
     assert reader.requests - at_commit[0] == CONFIRM_FILLS
 
 
+@pytest.mark.unshaped
 def test_two_readings_that_run_out_in_different_places_do_not_agree(tmp_path):
     """Review 6's #8. Two bad reads, each a header claiming more than the archive has left:
     one in the first pass at member 45, and one met only by the second reading -- which
@@ -2037,6 +2082,7 @@ def test_two_readings_that_run_out_in_different_places_do_not_agree(tmp_path):
     assert rows.names() == _names_of(MEMBERS)
 
 
+@pytest.mark.unshaped
 def test_rescues_after_the_walk_moves_on_do_not_use_up_the_verdicts_re_reads(tmp_path):
     """Review 6's #9. A derailment early on, rightly undone by the second reading -- which
     then walks on through the rest of the archive and meets REREAD_LIMIT garbled long names
@@ -2076,6 +2122,7 @@ def test_rescues_after_the_walk_moves_on_do_not_use_up_the_verdicts_re_reads(tmp
         name for name, _ in members]
 
 
+@pytest.mark.unshaped
 def test_a_landing_that_reads_two_more_fetches_of_real_headers_is_read_back_past(
         tmp_path):
     """The wrong header's size lands on a real header in a stored tarball whose members are
@@ -2106,6 +2153,7 @@ def test_a_landing_that_reads_two_more_fetches_of_real_headers_is_read_back_past
 # ---- review 7: every pass that goes against the one before it counts --------------------
 
 @pytest.mark.parametrize("settles_on", ["another member", "no member"])
+@pytest.mark.unshaped
 def test_a_header_that_flips_from_pass_to_pass_gives_up_rather_than_loop(tmp_path,
                                                                          settles_on):
     """Review 7's B1. The server serves member 20's header one way on one pass and another
@@ -2354,6 +2402,7 @@ def test_a_run_of_members_each_read_twice_still_commits_as_it_goes(tmp_path, mon
     assert reader.requests < count * 11 // 10
 
 
+@pytest.mark.unshaped
 def test_a_server_that_lies_about_most_headers_is_given_up_on(tmp_path, monkeypatch):
     """Review 8's #2. The server serves a pax header in place of every header a read does
     not start at -- as a first read of each does not -- and the truth to a read that
@@ -2421,6 +2470,7 @@ def test_a_header_sequence_two_fetches_serve_counts_as_two(tmp_path, monkeypatch
     assert held[0] == ["b.bin", "c.bin"]
 
 
+@pytest.mark.unshaped
 def test_reading_on_out_of_re_reads_fetches_moves_on_a_fetch_at_a_time(tmp_path):
     """Review 6's #4 case, one stored member longer: the wrong header lands in a stored
     tarball whose members each take a re-read, and the walk reads on out of those re-reads'
@@ -2454,6 +2504,7 @@ def test_reading_on_out_of_re_reads_fetches_moves_on_a_fetch_at_a_time(tmp_path)
     assert rows.names() == _names_of(members)
 
 
+@pytest.mark.unshaped
 def test_a_verdict_reached_after_rescues_does_not_count_as_one(tmp_path):
     """Rescues one after another count toward REREAD_LIMIT; the pass that then walks on to
     the verdict was not cut short, and does not. Here REREAD_LIMIT + 1 headers in a row
@@ -2516,6 +2567,7 @@ def _derailed_into_a_stored_tarball(directory, inner_members, uncopied, landing,
     return result, rows.names() == _names_of(members), inside
 
 
+@pytest.mark.unshaped
 def test_a_fetch_made_where_a_re_read_counted_one_does_not_count_again(tmp_path):
     """Review 9's #1. The wrong header lands in a stored tarball, at L, read out of a fetch
     C of the walk's own. A member S inside C takes a re-read, whose fetch R reaches past
@@ -2538,6 +2590,7 @@ def test_a_fetch_made_where_a_re_read_counted_one_does_not_count_again(tmp_path)
         assert exact
 
 
+@pytest.mark.unshaped
 def test_fetching_again_what_a_re_read_took_out_of_the_cache_is_not_reading_on(tmp_path):
     """Review 9's #3. A member's re-read starts where its header sequence does -- before the
     fetch of the walk's own that served the rest of it -- so it ends before that fetch did.
@@ -2635,6 +2688,7 @@ class _LiesUnlessAskedThere(LocalRangeReader):
         return bytes(got)
 
 
+@pytest.mark.unshaped
 def test_rescues_far_apart_do_not_add_up_to_giving_up(tmp_path):
     """Review 9's #2. Two headers in a row that read wrongly unless read from exactly where
     they begin cut two passes short, the second with nothing committed since the first,
