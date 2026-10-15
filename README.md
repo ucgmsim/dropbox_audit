@@ -140,10 +140,13 @@ python -m dbaudit archive cat      --db archives.db --archive big.tar \
   indexed in about six hours.
 - **Resumable.** Each batch of members is committed with the cursor that resumes
   it, so `index` can be interrupted and re-run at any time.
-- **Checked reads.** Dropbox occasionally answers a range request with the wrong
-  bytes, so nothing is believed on one read: members are committed, and a verdict
-  such as "complete" or "corrupt" stands, only once two readings agree. `cat`
-  checks every read against the member's header and the blocks around it.
+- **Checked reads.** Dropbox sometimes answers a range request with the wrong bytes,
+  and some requests it gets wrong every time they are asked. So a verdict such as
+  "complete" or "corrupt" stands only once two readings agree, and every reading made
+  to confirm another asks differently: its request starts and ends tens of kilobytes
+  away from the first. The members around a verdict are read twice, and so is every
+  path the index holds twice. `cat` checks every read against the member's header and
+  the blocks around it.
 - `cat` pulls one member straight from its recorded offset. `register --local-dir`
   indexes a local copy instead of Dropbox.
 

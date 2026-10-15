@@ -47,8 +47,10 @@ CONFIRM_FILLS = 3
 
 #: How many times a walk will accept a second reading of its verdict that disagrees with the
 #: first before it gives up and raises UnsettledRead -- and how many passes in a row it lets
-#: be cut short with nothing more committed. A bad read is rare and independent; a bad
-#: archive is neither, so a verdict that keeps changing is the server, not the archive.
+#: be cut short with nothing more committed. A bad read is rare, and one that comes from
+#: how a read was asked does not survive being asked differently, as every re-read is
+#: (ConcatFile.drop_cache); a bad archive reads the same however it is asked. So a verdict
+#: that keeps changing is the server, not the archive.
 REREAD_LIMIT = 3
 
 #: What a pass that crossed its boundary, or was stopped, read where it ended: nothing.

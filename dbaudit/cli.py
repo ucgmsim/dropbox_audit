@@ -916,8 +916,9 @@ def _audit_repeated_paths(run) -> list[int]:
     second time, at an offset that was never that member's. When the member it replaced
     pads to the same size, the chain rejoins straight after, and nothing else notices --
     the walk ends `complete` with one member twice and one never. A fresh read of each
-    such row says which is which, and a row that disagrees is read once more before a
-    segment is walked again: one bad read by the audit must not cost a 300 GiB re-walk.
+    such row says which is which, and a row that disagrees is read once more, asked
+    differently, before a segment is walked again: one bad read by the audit must not
+    cost a 300 GiB re-walk.
     An archive with no repeated path pays nothing.
 
     What it cannot see: a copied header whose path is recorded nowhere else -- a member
@@ -933,7 +934,8 @@ def _audit_repeated_paths(run) -> list[int]:
         detail = f"read again only the first {AUDIT_LIMIT} rows under repeated paths"
         log.warning("audit: %s", detail)
         store.log_event(archive_id, "audit_partial", detail)
-    # Its own reader and window: every byte compared comes from a request of its own.
+    # Its own reader and window: every byte compared comes from a request of its own,
+    # in a shape of its own -- not the walk's.
     reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
     concat = ConcatFile(run.archive_set, reader, window_min=run.args.window_min,
                         window_max=run.args.window_max)
@@ -941,7 +943,7 @@ def _audit_repeated_paths(run) -> list[int]:
         return _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)
 
     def confirmed(row):
-        concat.drop_cache()                 # a second, fresh request of its own
+        concat.drop_cache()                 # a second request, asked differently
         return disagrees(row)
 
     try:

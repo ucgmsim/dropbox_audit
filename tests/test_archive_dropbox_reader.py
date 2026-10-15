@@ -230,3 +230,20 @@ def test_a_lead_that_lands_on_a_blocks_last_byte_is_still_guarded():
         handle.seek(pos)
         assert handle.read(512) == data[pos:pos + 512]
         assert session.ranges == [(BLOCK - 2, pos + 1023 + lead)]
+
+
+def test_the_block_edge_fault_is_caught_even_without_its_guard(monkeypatch):
+    """Dropbox's own fault with the guard that avoids it switched off. Shape 0 asks from
+    the byte before the header that starts the second block, as the October walks did, and
+    gets that block's start. The confirming pass asks in the next shape and is answered
+    truly, so the walk ends complete -- where October's called the archive corrupt."""
+    monkeypatch.setattr(DropboxRangeReader, "read_range", DropboxRangeReader._read_range)
+    tar = build_tar([("first.bin", b"\x5a" * (BLOCK - 512)), ("second.bin", b"x" * 1000)])
+    archive, reader, session = dropbox_like(tar)
+    members = {}
+    result = walk(ConcatFile(archive, reader, shape=0), 0,
+                  lambda batch, _next: members.update((m.hdr_offset, m.name) for m in batch))
+    assert result.state == "complete", result.detail
+    assert members == {0: "first.bin", BLOCK: "second.bin"}
+    assert f"re-read at {BLOCK}" in result.detail
+    assert any(first == BLOCK - 1 for first, _ in session.ranges), "the fault was not asked"
