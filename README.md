@@ -107,7 +107,8 @@ for credentials and for `verify`.
   requests/s). After every five minutes in which requests went out at close to that
   rate, without a 429, it rises by 0.5/s, up to `--max-rps` (default 20). A 429
   (rate-limit response) pauses every worker for the full `Retry-After`, and once per
-  pause halves the rate and drops one worker. The log records each change. If 429s
+  overload halves the rate and drops one worker: 429s that come back during the pause,
+  or within a second of the first, are one overload. The log records each change. If 429s
   keep coming, as `status` shows for the last hour, another job is probably using the
   same account's API quota: lower `--max-rps`, which also caps where the rate starts.
 - **Leave `--queue-target` alone.** Late in a crawl, a few large subtrees can leave

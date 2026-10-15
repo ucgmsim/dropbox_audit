@@ -197,6 +197,16 @@ def test_429s_that_come_back_together_are_one_overload_even_at_retry_after_zero(
     assert (lim.rps, lim.concurrency) == (2.0, 22)
 
 
+def test_429s_that_keep_coming_still_halve_the_rate_once_a_second():
+    """The window runs from an overload's first 429, not its latest: a throttle answering
+    "retry after 0" every 0.6 s for as long as it lasts is a new overload each second."""
+    clock, lim = make(rps=8.0, max_rps=20.0, max_concurrency=24)
+    for _ in range(3):
+        lim.on_rate_limited(0)
+        clock.t += 0.6
+    assert lim.rps == 2.0
+
+
 def test_a_429_halves_the_rate_but_not_below_one_request_a_second():
     clock, lim = make(rps=8.0, max_rps=20.0)
     rates = []

@@ -7,8 +7,9 @@ the response to a 429 is to park *every* worker for the full ``Retry-After`` --
 letting the other workers keep firing during a five-minute penalty is what turns a
 brief stall into a long outage.
 
-Concurrency follows additive-increase/additive-decrease: one worker off per pause, one
-back after a clean interval.
+Concurrency follows additive-increase/additive-decrease: one worker off per overload, one
+back after a clean interval. An overload is the 429s that come back during its pause, or
+within a second of its first 429.
 
 The request rate follows additive-increase/multiplicative-decrease, as TCP does. It
 starts at ``rps``, the rate measured safe. After each clean interval in which requests
