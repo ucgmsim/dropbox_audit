@@ -44,7 +44,7 @@ from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeRea
 from .archive import report as archive_report
 from .archive.runner import Done, Job, Runner
 from .archive.store import ArchiveStore
-from .archive.tarwalk import (BLOCK, REREAD_LIMIT, Member, UnsupportedArchive,
+from .archive.tarwalk import (BLOCK, REREAD_LIMIT, Member, ScanStopped, UnsupportedArchive,
                               WalkResult, find_chain_start, read_member, walk)
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
@@ -842,7 +842,11 @@ def _walk_segment(run, segment) -> None:
     try:
         start = segment["first_header"]
         if start is None:
-            start = find_chain_start(concat, segment["scan_from"])
+            try:
+                start = find_chain_start(concat, segment["scan_from"],
+                                         should_stop=run.stopping)
+            except ScanStopped:
+                raise _Stopped("stopped while scanning for the chain's first header") from None
             if start is None:
                 # Not a failure in itself -- the join resets such a segment to its
                 # predecessor's exit like any other disagreement.

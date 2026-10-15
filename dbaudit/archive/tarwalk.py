@@ -66,6 +66,10 @@ class UnsettledRead(Exception):
     """
 
 
+class ScanStopped(Exception):
+    """`find_chain_start` gave way, between reads, to a caller that asked it to stop."""
+
+
 class UnsupportedArchive(Exception):
     """The archive is in a tar format this walker does not index: pax.
 
@@ -586,7 +590,7 @@ def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
 
 
 def find_chain_start(concat, from_offset: int, scan_read: int = 16 << 20,
-                     limit: int | None = None) -> int | None:
+                     limit: int | None = None, should_stop=None) -> int | None:
     """The first checksum-valid header at or after ``from_offset``.
 
     A part boundary falls wherever split(1) put it, which is almost always inside a
@@ -601,11 +605,16 @@ def find_chain_start(concat, from_offset: int, scan_read: int = 16 << 20,
 
     A valid header here is not proof: a tar stored inside the tar offers perfectly
     good ones. The joining rule in the CLI is what settles it.
+
+    ``should_stop``, a zero-argument predicate, is asked before every read; once it
+    holds, the scan raises `ScanStopped`.
     """
     total = concat.archive.total_size
     offset = -(-from_offset // BLOCK) * BLOCK   # round up: a header only starts on a block
     scanned = 0
     while offset < total and (limit is None or scanned < limit):
+        if should_stop is not None and should_stop():
+            raise ScanStopped(f"stopped scanning at {offset}")
         length = min(scan_read, total - offset)
         if length < BLOCK:
             return None

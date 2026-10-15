@@ -348,6 +348,48 @@ def test_a_stop_between_claim_and_scan_never_starts_the_scan(tmp_path, monkeypat
     assert scans["n"] == 0
 
 
+def _deep_second_part(tmp_path):
+    """Two parts, the second beginning inside a 40 MiB member, so that a scan of it reads
+    16 MiB of nothing before the header beyond. Returns the database and where in the
+    second part a read counts as scanning: anywhere short of that header's window."""
+    data = build_tar([("run/a.bin", b"a" * 1000), ("run/big.bin", bytes(40 << 20)),
+                      ("run/c.bin", b"c" * 1000), ("run/d.bin", b"d" * 1000)])
+    part = 21 << 20
+    source = local_archive(tmp_path, data, part_size=part)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        header = next(m.offset for m in tar if m.name == "run/c.bin")
+    return db, header - part - (128 << 10)
+
+
+def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(tmp_path, monkeypatch):
+    """The scan has no bound of its own, so a stop must reach it between reads -- not wait
+    for a header that may lie gigabytes on -- and the walk resumes later all the same."""
+    db, scanning = _deep_second_part(tmp_path)
+    stop, scans = threading.Event(), []
+
+    class Stopping(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if part_idx == 0:
+                stop.wait(10)                   # the first chain crosses only after it
+            elif offset < scanning:
+                scans.append(offset)
+                stop.set()                      # a signal, as the second chain scans
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: Stopping(row["folder"], s))
+    store = ArchiveStore(db)
+    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
+                                          "a.tar", "--workers", "2"])
+    walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
+    assert walked.stopped and len(scans) == 1
+    monkeypatch.undo()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    assert ArchiveStore(db).get("a.tar")["n_members"] == 4
+
+
 def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypatch):
     """One bad part must not kill the run -- but the reads it made before it died are
     real, and every other exit path charges them."""
@@ -1105,7 +1147,8 @@ def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch,
     # read again to confirm segment 1's verdict hold only its last members, and the copy
     # is left for the audit to find.
     monkeypatch.setattr("dbaudit.cli.find_chain_start",
-                        lambda concat, start: find_chain_start(concat, start, scan_read=4096))
+                        lambda concat, start, **kw: find_chain_start(concat, start,
+                                                                     scan_read=4096, **kw))
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
 

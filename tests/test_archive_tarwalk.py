@@ -5,7 +5,7 @@ import tarfile
 import pytest
 
 from dbaudit.archive.reader import ConcatFile, LocalRangeReader, ReaderError
-from dbaudit.archive.tarwalk import (CONFIRM_FILLS, REREAD_LIMIT, UnsettledRead,
+from dbaudit.archive.tarwalk import (CONFIRM_FILLS, REREAD_LIMIT, ScanStopped, UnsettledRead,
                                      UnsupportedArchive, find_chain_start, walk)
 from tests.archive_fakes import build_tar, write_parts
 
@@ -382,6 +382,23 @@ def test_find_chain_start_returns_none_when_it_runs_out(tmp_path):
     archive = write_parts(directory, b"\x00" * 20000, part_size=4096)
     handle = ConcatFile(archive, LocalRangeReader(directory, archive))
     assert find_chain_start(handle, 0, scan_read=4096) is None
+
+
+def test_find_chain_start_gives_way_between_reads_when_asked(tmp_path):
+    """It has no bound of its own -- the next header may lie gigabytes on -- so a caller
+    that is stopping must be heard between one read and the next."""
+    archive = write_parts(tmp_path, b"\x00" * (1 << 20), part_size=1 << 20)
+    reads = []
+
+    class Counting(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            reads.append(offset)
+            return super().read_range(part_idx, offset, length)
+
+    handle = ConcatFile(archive, Counting(tmp_path, archive))
+    with pytest.raises(ScanStopped):
+        find_chain_start(handle, 0, scan_read=4096, should_stop=lambda: bool(reads))
+    assert len(reads) == 1
 
 
 JUNK = bytes(range(256))
