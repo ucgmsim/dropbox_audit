@@ -143,7 +143,7 @@ python -m dbaudit archive cat      --db archives.db --archive big.tar \
 - **Checked reads.** Dropbox sometimes answers a range request with the wrong bytes,
   and some requests it gets wrong every time they are asked. So a verdict such as
   "complete" or "corrupt" stands only once two readings agree, and every reading made
-  to confirm another asks differently: its request starts and ends tens of kilobytes
+  to confirm another asks differently: its request starts or ends tens of kilobytes
   away from the first. The members around a verdict are read twice, and so is every
   path the index holds twice. `cat` checks every read against the member's header and
   the blocks around it.
@@ -158,6 +158,10 @@ python -m dbaudit archive cat      --db archives.db --archive big.tar \
   would take months, so it shows up only as the reconciliation gap.
 - **GNU and ustar tars only.** pax archives are refused rather than indexed, because
   pax can keep a member's size outside the checksummed header.
+- **A part smaller than one request is always asked the same way.** A request never
+  crosses into another part, so one that already spans a whole part has nowhere to
+  move, and a fault tied to how it is asked would be confirmed. In practice only a
+  small last part is like this.
 
 ## Development
 

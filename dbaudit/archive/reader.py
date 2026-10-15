@@ -19,11 +19,12 @@ every time it is asked -- Dropbox does (DROPBOX_BLOCK) -- and then a second read
 the same question agrees with the first and proves nothing. So every ConcatFile asks in a
 *shape*: each request starts a lead of up to 64 KiB before the byte it needs and runs as
 far past the last, and those bytes are thrown away. Dropping the cache moves to the next
-shape, whose lead differs by tens of kilobytes, so a re-read never repeats the request it
+shape, whose lead differs by tens of kilobytes, so a re-read does not repeat the request it
 checks; and a new ConcatFile starts at a random shape, so a later walk of the same chain --
 a resume, `--recheck`, the audit -- does not repeat the first walk's requests either. The
 extra bytes are nearly free, and never cost a request: neither end reaches beyond the part
-it is in.
+it is in. So a request that already spans a whole part -- a part smaller than a request,
+in practice a small last part -- has nowhere to move, and is asked the same way every time.
 """
 
 from __future__ import annotations
