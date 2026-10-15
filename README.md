@@ -153,6 +153,35 @@ python -m dbaudit archive cat      --db archives.db --archive big.tar \
 - `cat` pulls one member straight from its recorded offset. `register --local-dir`
   indexes a local copy instead of Dropbox.
 
+### Every archive in a listing
+
+`archive run` walks every tar archive an audit database lists into one archive
+database, many at a time:
+
+```bash
+python -m dbaudit archive run    --db archives.db --audit-db audit.db --dry-run
+python -m dbaudit archive run    --db archives.db --audit-db audit.db
+python -m dbaudit archive status --db archives.db   # counts by state, and walks under way
+```
+
+- **Largest first.** Each archive walks on its own thread. The next one starts whenever
+  the chains walking number fewer than the streams allowed, plus two. One archive walks
+  at most `--workers` chains, one for each part with work left.
+- **The streams adapt.** A run starts at `--streams` (12) and adds one after every five
+  minutes without a 429, up to `--max-streams` (24). A 429 pauses every walk and drops a
+  stream. The log records each change, and every 10 minutes a progress line gives the
+  TiB done, the streams, the request rate, and the time left at the last hour's pace, by
+  count and by size.
+- **Each archive is listed at its turn,** so one that moved since the audit is walked
+  where it is now, changed content is walked as new, and a vanished one is recorded.
+- **Skipped:** archives that already have a verdict, copies of another (the same
+  content elsewhere), compressed names such as `.tar.gz`, and sets of parts with gaps.
+  An archive whose first bytes are gzip, bzip2, xz or zstd is recorded `unsupported`.
+- **Stopping and failures.** SIGINT or SIGTERM stops every walk at its next batch, and
+  the run exits 0; run it again to resume. An archive whose walk ends in `error` is
+  tried once more at the end of the queue. The third unexpected failure stops the run,
+  with status 1.
+
 ## Known limits
 
 - **Team folders the account has not joined are invisible.** rclone's token has no

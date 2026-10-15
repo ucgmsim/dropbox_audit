@@ -36,11 +36,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .api import AuthExpired, HttpLister, RateLimited, TransientError
+from .api import ApiError, AuthExpired, HttpLister, PathNotFound, RateLimited, TransientError
+from .archive.candidates import find_candidates
 from .archive.parts import ArchiveSet, ArchiveSetError
 from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeReader,
                              LocalRangeReader, ReaderError)
 from .archive import report as archive_report
+from .archive.runner import Done, Job, Runner
 from .archive.store import ArchiveStore
 from .archive.tarwalk import (BLOCK, REREAD_LIMIT, Member, UnsupportedArchive,
                               WalkResult, find_chain_start, read_member, walk)
@@ -698,6 +700,18 @@ def _open_archive_store(path):
         # thing to a caller who mistyped --db.
         return None
     return store
+
+
+def _other_kind_of_database(path) -> bool:
+    """A file at ``path`` that is not an archive database -- the audit database, given by
+    mistake -- which `run` and `import` must not add their tables to."""
+    if not os.path.exists(path):
+        return False
+    store = _open_archive_store(path)
+    if store is None:
+        return True
+    store.close()
+    return False
 
 
 def cmd_archive_register(args) -> int:
@@ -1390,6 +1404,220 @@ def _print_archive_status(store, row) -> None:
                f"  first={'-' if first is None else first:>12}"
                f"  cursor {progress:>5}"
                f"  members={segment['members']:<7}{note}").rstrip())
+
+
+#: States that end a walk. An archive in one is not walked again by `archive run`.
+VERDICTS = frozenset({"complete", "truncated", "corrupt", "unsupported"})
+
+
+def _run_jobs(store, listing, workers):
+    """What `archive run` has to walk, largest first, and a count of everything else.
+
+    Every valid archive the listing names that has no verdict yet, and every archive the
+    database holds without one -- imported mid-walk, or registered by hand -- once per
+    folder and name. Returns (jobs, counts, sizes), the last two keyed by kind.
+    """
+    rows = store.connect().execute(
+        "SELECT a.*, (SELECT COUNT(*) FROM segments s WHERE s.archive_id = a.id"
+        "             AND s.state IN ('pending', 'walking', 'error')) AS unfinished "
+        "FROM archives a").fetchall()
+    by_hash = {row["set_hash"]: row for row in rows}
+    jobs, counts, sizes, places, ids = [], Counter(), Counter(), set(), set()
+
+    def add(kind, folder, name, size, chains, archive_id):
+        # An archive that moved is listed where it is now, and is in the database where
+        # it was registered: one walk, from where it is now, which comes first.
+        if (folder, name) in places or archive_id in ids:
+            return
+        places.add((folder, name))
+        if archive_id is not None:
+            ids.add(archive_id)
+        jobs.append(Job(key=f"{folder}/{name}", label=f"{folder}/{name}", size=size,
+                        chains=max(1, min(chains, workers)), folder=folder, name=name,
+                        archive_id=archive_id))
+        counts[kind] += 1
+        sizes[kind] += size
+
+    for candidate in listing.candidates:
+        if candidate.status != "ok":
+            counts[candidate.status] += 1
+            sizes[candidate.status] += candidate.size
+            continue
+        row = by_hash.get(candidate.set_hash)
+        if row is not None and row["state"] in VERDICTS:
+            places.add((candidate.folder, candidate.name))
+            counts["done"] += 1
+            sizes["done"] += candidate.size
+        elif row is None:
+            add("new", candidate.folder, candidate.name, candidate.size, candidate.n_parts,
+                None)
+        else:
+            add("resuming", candidate.folder, candidate.name, candidate.size,
+                row["unfinished"] or candidate.n_parts, row["id"])
+    for row in rows:
+        if row["state"] not in VERDICTS and row["source"] == "dropbox":
+            add("resuming", row["folder"], row["name"], row["total_size"],
+                row["unfinished"] or row["n_parts"], row["id"])
+    counts["compressed names"], sizes["compressed names"] = listing.compressed
+    counts["other names"], sizes["other names"] = listing.other
+    return sorted(jobs, key=lambda job: -job.size), counts, sizes
+
+
+def _walk_job(args, store, job, tokens, limiter, stop) -> Done:
+    """One archive at its turn. One listing of its folder registers what is there now:
+    the same row, with its walk so far, if the content is unchanged -- wherever it was
+    registered before -- or a new one if not. Then the walk."""
+    try:
+        _, lister = build_lister(args.remote, tokens)
+        try:
+            entries = _listed(lister, limiter, job.folder, job.name, stop)
+        except PathNotFound as exc:
+            store.log_event(job.archive_id, "gone", f"{job.label}: {exc}")
+            return Done("gone")
+        except ApiError as exc:
+            store.log_event(job.archive_id, "fail", f"{job.label}: could not list its "
+                                                    f"folder: {type(exc).__name__}: {exc}")
+            return Done("error")
+        if entries is None:
+            return Done("stopped")
+        if not entries:
+            store.log_event(job.archive_id, "gone", f"{job.label}: no longer in its folder")
+            return Done("gone")
+        try:
+            archive_set = ArchiveSet.from_entries(entries, job.name)
+        except ArchiveSetError as exc:
+            store.log_event(job.archive_id, "refused", f"{job.label}: {exc}")
+            return Done("refused")
+        job.archive_id = store.register(job.name, "tar", job.folder, "dropbox",
+                                        archive_set.parts)
+        store.seed_segments(job.archive_id, archive_set.parts)
+        row = store.connect().execute(
+            "SELECT * FROM archives WHERE id=?", (job.archive_id,)).fetchone()
+        if row["state"] in VERDICTS:
+            return Done("done")                 # this content was walked before
+        walked = _walk_archive(args, store, row, tokens, limiter, stop, check_before=False)
+        for line in walked.errors:
+            log.warning("%s: %s", job.label, line.removeprefix("error: "))
+        stats = store.stats(row["id"])
+        return Done("stopped" if walked.stopped else walked.state,
+                    members=stats["n_members"], requests=stats["requests"], bug=walked.bug)
+    finally:
+        store.close()                           # this thread's own connection
+
+
+def _record_bug(store, job, exc) -> None:
+    """Leave the archive an unexpected failure stopped in `error`, saying why."""
+    detail = f"{type(exc).__name__}: {exc}"
+    try:
+        if job.archive_id is not None:
+            store.fail(job.archive_id, detail)
+        else:
+            store.log_event(None, "fail", f"{job.label}: {detail}")
+    finally:
+        store.close()                           # this thread's own connection
+
+
+def _print_run_plan(jobs, counts, sizes) -> None:
+    total = sum(job.size for job in jobs)
+    print(f"archive run: {len(jobs):,} archives to walk ({human_bytes(total)}): "
+          f"{counts['new']:,} new, {counts['resuming']:,} resuming")
+    for kind, label in (("done", "already walked"), ("copy", "copies"),
+                        ("refused", "refused"), ("compressed names", "compressed names"),
+                        ("other names", "other names")):
+        print(f"  {label:17}: {counts[kind]:,} ({human_bytes(sizes[kind])})")
+    if jobs:
+        print("  first in line:")
+        for job in jobs[:5]:
+            print(f"    {human_bytes(job.size):>10}  {job.label}")
+
+
+def cmd_archive_run(args) -> int:
+    setup_logging(args.verbose)
+    if not 1 <= args.streams <= args.max_streams:
+        print(f"error: --streams {args.streams} must lie between 1 and --max-streams "
+              f"{args.max_streams}", file=sys.stderr)
+        return 2
+    if not os.path.exists(args.audit_db):
+        print(f"error: no audit database at {args.audit_db}", file=sys.stderr)
+        return 2
+    if _other_kind_of_database(args.db):
+        print(f"error: {args.db} is not an archive database", file=sys.stderr)
+        return 2
+    try:
+        listing = find_candidates(args.audit_db)
+    except sqlite3.DatabaseError as exc:
+        print(f"error: {args.audit_db} is not an audit database: {exc}", file=sys.stderr)
+        return 2
+    workers = max(args.workers, 1)
+    if args.dry_run:
+        if os.path.exists(args.db):
+            store = ArchiveStore(args.db)
+        else:                       # nothing is written: a new database starts empty
+            store = ArchiveStore(":memory:")
+            store.init_schema()
+        _print_run_plan(*_run_jobs(store, listing, workers))
+        return 0
+    try:
+        lock = InstanceLock(args.lock or f"{args.db}.lock")
+        lock.__enter__()
+    except LockHeld as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    try:
+        # The work list is read under the lock, so no other walk changes it after.
+        store = ArchiveStore(args.db)
+        store.init_schema()
+        jobs, counts, sizes = _run_jobs(store, listing, workers)
+        _print_run_plan(jobs, counts, sizes)
+        return _run_archives(args, store, jobs)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _run_limiter(args) -> AdaptiveLimiter:
+    """One limiter for every walk and listing: Dropbox limits per account. The rate starts
+    where the streams need it, a request costing about 1.5 s, so the stream count is what
+    Dropbox's pushback adjusts."""
+    return AdaptiveLimiter(rps=args.streams / 1.5, max_rps=args.max_streams / 1.5,
+                           max_concurrency=args.max_streams, start_concurrency=args.streams)
+
+
+def _run_archives(args, store, jobs) -> int:
+    tokens = TokenProvider(remote=args.remote)       # one, so its token is cached once
+    limiter = _run_limiter(args)
+    stop = threading.Event()
+    hard = {"count": 0}
+
+    def handle(signum, frame):
+        hard["count"] += 1
+        if hard["count"] == 1:
+            stop.set()
+            log.warning("signal %d: committing every batch in flight, then exiting", signum)
+        else:
+            log.warning("second signal: exiting immediately")
+            os._exit(1)
+
+    previous = {}
+    started = time.time()
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, handle)
+        report = Runner(lambda job: _walk_job(args, store, job, tokens, limiter, stop),
+                        limiter, stop, limit=args.limit,
+                        on_bug=lambda job, exc: _record_bug(store, job, exc)).run(jobs)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    print(f"archive run: {report.started:,} archives started, "
+          f"{sum(report.outcomes.values()):,} finished, in "
+          f"{human_duration(time.time() - started)}")
+    for state, count in sorted(report.outcomes.items()):
+        print(f"  {state:11}: {count:,}")
+    if report.failed:
+        print("error: stopped after repeated unexpected failures; see the log",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_archive_status(args) -> int:
@@ -2126,6 +2354,28 @@ def build_parser() -> argparse.ArgumentParser:
                             "each time")
     p_idx.add_argument("--lock")
     p_idx.set_defaults(func=cmd_archive_index)
+
+    p_arun = asub.add_parser(
+        "run", help="walk every archive still to be walked, many at once; safe to "
+                    "interrupt and re-run")
+    p_arun.add_argument("--db", required=True)
+    p_arun.add_argument("--audit-db", required=True,
+                        help="the audit database whose tar archives to walk")
+    p_arun.add_argument("--remote", default="dropbox")
+    p_arun.add_argument("--streams", type=int, default=12, help="streams to start at")
+    p_arun.add_argument("--max-streams", type=int, default=24,
+                        help="most streams to climb to while Dropbox allows")
+    p_arun.add_argument("--workers", type=int, default=ARCHIVE_WORKERS,
+                        help="most chains one archive may have")
+    p_arun.add_argument("--limit", type=int, default=0,
+                        help="most archives to start; 0 means no limit")
+    p_arun.add_argument("--dry-run", action="store_true",
+                        help="print what would be walked, without contacting Dropbox")
+    p_arun.add_argument("--window-min", type=int, default=WINDOW_MIN)
+    p_arun.add_argument("--window-max", type=int, default=WINDOW_MAX)
+    p_arun.add_argument("--batch", type=int, default=2000)
+    p_arun.add_argument("--lock")
+    p_arun.set_defaults(func=cmd_archive_run, max_batches=0)
 
     p_ast = asub.add_parser("status", help="show archive indexing progress")
     p_ast.add_argument("--db", required=True)
