@@ -828,17 +828,14 @@ class _Run:
 def _chain_start(run, segment, concat):
     """Where a chain with no start yet begins: where the chain before it crossed into this
     part, which is exactly where the join would start it, or else the first header a scan
-    finds -- None if there is none. The scan gives way between reads to that crossing, and
-    to a stop, which raises `_Stopped`."""
+    finds -- None if there is none. The scan gives way, before every read, to that crossing
+    and to a stop, which raises `_Stopped`."""
     def crossed():
         if segment["idx"] == 0:
             return None
         before = run.store.segments(run.archive_id)[segment["idx"] - 1]
         return before["exit_offset"] if before["state"] == "crossed" else None
 
-    start = crossed()
-    if start is not None:
-        return start
     try:
         return find_chain_start(concat, segment["scan_from"],
                                 should_stop=lambda: run.stopping() or crossed() is not None)
