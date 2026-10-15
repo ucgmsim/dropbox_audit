@@ -14,7 +14,7 @@ The request rate follows additive-increase/multiplicative-decrease, as TCP does.
 starts at ``rps``, the rate measured safe. After each clean interval in which requests
 went out at no less than 90% of the rate -- so the rate, not latency or the number of
 workers, was what held them back -- it rises by 0.5/s, up to ``max_rps``. A 429 halves
-it, once per pause, never below 1/s. Clean intervals are counted from the end of a pause:
+it, once per overload, never below 1/s. Clean intervals are counted from the end of a pause:
 waiting one out says nothing about what Dropbox will take. The rate climbs slowly
 because a 429 can cost every worker five minutes.
 """
@@ -31,6 +31,7 @@ log = logging.getLogger("dbaudit.limiter")
 RATE_STEP = 0.5       # requests/s added after an interval the rate was the bottleneck of
 MIN_RPS = 1.0         # a 429 never halves the rate below this
 SATURATED = 0.9       # share of the rate an interval's requests must reach to count
+OVERLOAD_WINDOW = 1.0  # seconds after the first 429 of an overload that later ones join it
 
 
 class AdaptiveLimiter:
@@ -70,6 +71,7 @@ class AdaptiveLimiter:
         self._tokens = float(burst)
         self._last_refill = clock()
         self._paused_until = 0.0
+        self._overload_began = float("-inf")
         self._last_429 = clock() if start < self.max_concurrency else float("-inf")
         self._interval_start = clock()  # the clean interval the rate is judged over
         self._granted = 0               # requests let through since it began
@@ -146,8 +148,12 @@ class AdaptiveLimiter:
         with self._lock:
             now = self.clock()
             # Requests in flight when Dropbox objects all come back 429 together: one
-            # overload, so one halving of the rate and one worker fewer per pause.
-            first = now >= self._paused_until
+            # overload, so one halving of the rate and one worker fewer. Together is
+            # during its pause, or within OVERLOAD_WINDOW of its first 429: a pause of
+            # "retry after 0" would make each of them an overload of its own.
+            first = now >= max(self._paused_until, self._overload_began + OVERLOAD_WINDOW)
+            if first:
+                self._overload_began = now
             self._paused_until = max(self._paused_until, now + float(retry_after))
             self.rate_limit_events += 1
             if first:

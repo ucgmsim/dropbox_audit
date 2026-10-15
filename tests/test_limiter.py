@@ -184,6 +184,19 @@ def test_429s_during_one_pause_halve_the_rate_and_drop_a_worker_once():
     assert (lim.rps, lim.concurrency) == (4.0, 7)
 
 
+def test_429s_that_come_back_together_are_one_overload_even_at_retry_after_zero():
+    """Seen live: three 429s that said retry after 0 came back within 0.16 s, and each
+    halved the rate. Requests in flight when Dropbox objects are one overload."""
+    clock, lim = make(rps=8.0, max_rps=20.0, max_concurrency=24)
+    for _ in range(3):
+        lim.on_rate_limited(0)
+        clock.t += 0.08
+    assert (lim.rps, lim.concurrency) == (4.0, 23)
+    clock.t += 5                        # Dropbox objecting again later is a new overload
+    lim.on_rate_limited(0)
+    assert (lim.rps, lim.concurrency) == (2.0, 22)
+
+
 def test_a_429_halves_the_rate_but_not_below_one_request_a_second():
     clock, lim = make(rps=8.0, max_rps=20.0)
     rates = []
