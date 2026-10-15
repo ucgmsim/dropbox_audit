@@ -44,6 +44,7 @@ class AdaptiveLimiter:
         clock=time.monotonic,
         sleep=time.sleep,
         max_rps: float | None = None,
+        start_concurrency: int | None = None,
     ):
         # Without a ceiling above the starting rate, the rate never climbs past where
         # it started; a 429 still halves it.
@@ -58,15 +59,22 @@ class AdaptiveLimiter:
         self.sleep = sleep
 
         self._lock = threading.Lock()
-        self._concurrency = int(max_concurrency)
+        # Below the ceiling, the climb waits a full clean interval from the start: the
+        # first request is no evidence that Dropbox will take more.
+        start = self.max_concurrency if start_concurrency is None else int(start_concurrency)
+        if not self.min_concurrency <= start <= self.max_concurrency:
+            raise ValueError(f"start_concurrency {start} is outside "
+                             f"[{self.min_concurrency}, {self.max_concurrency}]")
+        self._concurrency = start
         self._in_flight = 0
         self._tokens = float(burst)
         self._last_refill = clock()
         self._paused_until = 0.0
-        self._last_429 = float("-inf")
+        self._last_429 = clock() if start < self.max_concurrency else float("-inf")
         self._interval_start = clock()  # the clean interval the rate is judged over
         self._granted = 0               # requests let through since it began
         self.rate_limit_events = 0
+        self._granted_total = 0          # every request let through, for progress
 
     # ---- observable state ---------------------------------------------
 
@@ -79,6 +87,11 @@ class AdaptiveLimiter:
     def paused_until(self) -> float:
         with self._lock:
             return self._paused_until
+
+    @property
+    def granted_total(self) -> int:
+        with self._lock:
+            return self._granted_total
 
     @property
     def in_flight(self) -> int:
@@ -107,6 +120,7 @@ class AdaptiveLimiter:
             self._tokens -= 1.0
             self._in_flight += 1
             self._granted += 1
+            self._granted_total += 1
             return 0.0
 
     def _release(self) -> None:
@@ -141,12 +155,13 @@ class AdaptiveLimiter:
                 self._concurrency = max(self.min_concurrency, self._concurrency - 1)
             self._last_429 = self._interval_start = self._paused_until
             self._granted = 0
-            rate = self.rps
+            rate, concurrency = self.rps, self._concurrency
         if first:
-            log.warning("rate limited by Dropbox: request rate down to %.2f/s", rate)
+            log.warning("rate limited by Dropbox: concurrency down to %d, request rate "
+                        "down to %.2f/s", concurrency, rate)
 
     def on_success(self) -> None:
-        raised = None
+        raised = stepped = None
         with self._lock:
             now = self.clock()
             elapsed = now - self._interval_start
@@ -159,8 +174,11 @@ class AdaptiveLimiter:
             if (self._concurrency < self.max_concurrency
                     and now - self._last_429 > self.recover_after):
                 self._concurrency += 1
+                stepped = self._concurrency
                 # Restart the clean-interval window so we step up gradually rather
                 # than jumping straight back to full concurrency.
                 self._last_429 = now
         if raised is not None:
             log.info("request rate up to %.2f/s", raised)
+        if stepped is not None:
+            log.info("concurrency up to %d", stepped)

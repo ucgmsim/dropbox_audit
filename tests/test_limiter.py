@@ -1,4 +1,7 @@
+import logging
 import threading
+
+import pytest
 
 from dbaudit.limiter import AdaptiveLimiter
 
@@ -194,3 +197,44 @@ def test_a_429_halves_the_rate_but_not_below_one_request_a_second():
 def test_a_ceiling_below_the_starting_rate_lowers_the_start():
     _, lim = make(rps=5.0, max_rps=3.0)
     assert lim.rps == 3.0
+
+
+def test_a_limiter_can_start_below_its_ceiling_and_climbs_a_stream_per_clean_interval():
+    """`archive run` starts at 12 streams and earns its way to 24: the first step comes a
+    full clean interval after the start, not on the first request."""
+    clock, lim = make(max_concurrency=24, start_concurrency=12, recover_after=300)
+    assert lim.concurrency == 12
+    clock.t += 100
+    lim.on_success()
+    assert lim.concurrency == 12
+    clock.t += 201
+    lim.on_success()
+    assert lim.concurrency == 13
+    clock.t += 301
+    lim.on_success()
+    assert lim.concurrency == 14
+
+
+def test_the_starting_concurrency_lies_between_the_floor_and_the_ceiling():
+    for start in (0, 25):
+        with pytest.raises(ValueError):
+            make(max_concurrency=24, min_concurrency=1, start_concurrency=start)
+
+
+def test_the_limiter_counts_every_request_it_lets_through():
+    clock, lim = make()
+    for _ in range(5):
+        with lim.slot():
+            pass
+    assert lim.granted_total == 5
+
+
+def test_every_change_in_concurrency_is_logged(caplog):
+    clock, lim = make(max_concurrency=24, start_concurrency=12, recover_after=300)
+    with caplog.at_level(logging.INFO, logger="dbaudit.limiter"):
+        clock.t += 301
+        lim.on_success()
+        lim.on_rate_limited(5)
+    messages = [r.getMessage() for r in caplog.records]
+    assert "concurrency up to 13" in messages
+    assert any("concurrency down to 12" in m for m in messages)
