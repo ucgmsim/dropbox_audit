@@ -1069,6 +1069,19 @@ def cmd_archive_index(args) -> int:
         lock.__exit__(None, None, None)
 
 
+#: The first bytes of the compressed files people name `.tar`. Such a file has no
+#: headers to walk; calling it `corrupt` would send its owner looking for damage.
+COMPRESSION = (("gzip", b"\x1f\x8b"), ("bzip2", b"BZh"), ("xz", b"\xfd7zXZ\x00"),
+               ("zstd", b"\x28\xb5\x2f\xfd"))
+
+
+def _compression(row, archive_set, tokens, limiter) -> str | None:
+    """The compression format the archive's first bytes announce, or None."""
+    first = archive_set.parts[0]
+    head = _reader_for(row, archive_set, tokens, limiter).read_range(0, 0, min(6, first.size))
+    return next((name for name, magic in COMPRESSION if head.startswith(magic)), None)
+
+
 def _run_index(args, store, row) -> int:
     archive_id = row["id"]
     archive_set = _stored_archive_set(store, row)
@@ -1213,14 +1226,22 @@ def _run_index(args, store, row) -> int:
                 # reason, so the walk's own bookkeeping cannot erase it.
                 store.mark_stale(archive_id, stale)
 
+    compressed = None
     if run.unsupported:
         store.mark_unsupported(archive_id, run.unsupported)
     elif audit_failed is not None:
         # Every chain is walked, so the retry this invites goes straight to the audit.
         store.fail(archive_id, audit_failed)
     elif outcome is not None:
-        store.finish(archive_id, outcome)
-        store.build_indexes(archive_id)        # only once a walk is over, never during
+        if outcome.state in ("corrupt", "truncated") and outcome.end_offset == 0:
+            # No header at the very start: perhaps no tar at all.
+            compressed = _compression(row, archive_set, tokens, limiter)
+        if compressed:
+            store.mark_unsupported(archive_id, f"{compressed}-compressed: not a tar, so it "
+                                               f"cannot be walked header by header")
+        else:
+            store.finish(archive_id, outcome)
+            store.build_indexes(archive_id)    # only once a walk is over, never during
     elif blocked is not None and blocked["state"] == "error":
         store.fail(archive_id, f"segment {blocked['idx']}: {blocked['error'] or 'failed'}")
 
@@ -1245,6 +1266,10 @@ def _run_index(args, store, row) -> int:
     if run.unsupported:
         print(f"error: {row['name']} is a pax-format archive, which dbaudit does not index. "
               f"{run.unsupported}", file=sys.stderr)
+        return 1
+    if compressed:
+        print(f"error: {row['name']} is {compressed}-compressed, not a tar: it cannot be "
+              f"walked header by header", file=sys.stderr)
         return 1
     if audit_failed is not None:
         print(f"error: the walk finished, but the audit {audit_failed}; run `index` again "

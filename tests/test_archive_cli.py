@@ -5,11 +5,15 @@ monkeypatched `build_lister`, and where such a test has to read bytes it substit
 `LocalRangeReader` through `_reader_for` -- which is exactly the seam Task 8 reuses.
 """
 
+import bz2
 import contextlib
+import gzip
 import tarfile
 import io
 import logging
+import lzma
 import os
+import random
 import signal
 import threading
 
@@ -1477,3 +1481,53 @@ def test_the_chain_crossing_into_a_retired_segment_re_arms_it(tmp_path):
     assert (kind, payload) == ("repaired", 1)
     row = store.segments(archive_id)[1]
     assert (row["state"], row["first_header"], row["joined"]) == ("pending", 700, 1)
+
+
+# ---- compressed files named .tar --------------------------------------------------
+
+def _compressed(kind, data):
+    if kind == "gzip":
+        return gzip.compress(data)
+    if kind == "bzip2":
+        return bz2.compress(data)
+    if kind == "xz":
+        return lzma.compress(data, format=lzma.FORMAT_XZ)
+    return b"\x28\xb5\x2f\xfd" + bytes(range(256)) * 8      # zstd's magic, then its frame
+
+
+RANDOM_MEMBERS = [(f"run/r{i}.bin", random.Random(i).randbytes(3000)) for i in range(3)]
+
+
+@pytest.mark.parametrize("kind", ["gzip", "bzip2", "xz", "zstd"])
+def test_a_compressed_file_named_tar_is_unsupported_not_corrupt(tmp_path, capsys, kind):
+    """Its owner should look for a decompressor, not for damage."""
+    data = _compressed(kind, build_tar(RANDOM_MEMBERS))
+    assert len(data) > 2048                     # past where a tar's first header ends
+    source = local_archive(tmp_path, data, part_size=1 << 20)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    row = ArchiveStore(db).get("a.tar")
+    assert row["state"] == "unsupported"
+    assert row["detail"].startswith(f"{kind}-compressed: not a tar")
+    assert f"a.tar is {kind}-compressed, not a tar" in capsys.readouterr().err
+
+
+def test_junk_at_the_start_that_is_no_known_compression_stays_corrupt(tmp_path):
+    source = local_archive(tmp_path, b"PK\x03\x04" + b"z" * 5000, part_size=1 << 20)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert ArchiveStore(db).get("a.tar")["state"] == "corrupt"
+
+
+def test_a_compressed_file_too_short_to_hold_a_tar_is_unsupported_not_truncated(tmp_path):
+    data = _compressed("gzip", build_tar(MEMBERS))
+    assert len(data) < 1024                     # shorter than a terminator: `truncated`
+    source = local_archive(tmp_path, data, part_size=1 << 20)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert ArchiveStore(db).get("a.tar")["state"] == "unsupported"
