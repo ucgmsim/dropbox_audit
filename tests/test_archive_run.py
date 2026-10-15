@@ -621,6 +621,43 @@ def test_a_copy_is_walked_when_the_archive_standing_for_it_has_gone_or_lost_a_pa
                for kind, detail in events)
 
 
+def test_the_next_archive_starts_while_another_finishes_its_last_chain(tmp_path, monkeypatch):
+    """The streams of an archive's finished chains go to the next archive at once, not when
+    the whole archive ends."""
+    world = World(tmp_path)
+    data = build_tar(members(60, 1))
+    world.add("/R/a", "a.tar", data, part_size=len(data) // 6 + 1)      # six parts
+    world.add("/R/b", "b.tar", build_tar(members(3, 2)))
+    world.install(monkeypatch)
+    order, b_started, held = [], threading.Event(), []
+    real = cli._walk_archive
+
+    def walking(args, store, row, *rest, **kwargs):
+        order.append(("start", row["name"]))
+        if row["name"] == "b.tar":
+            b_started.set()
+        try:
+            return real(args, store, row, *rest, **kwargs)
+        finally:
+            order.append(("end", row["name"]))
+
+    class LastPartWaits(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if part_idx == 5 and not held:      # a.tar's last chain waits for b.tar, a while
+                held.append(True)
+                b_started.wait(5)
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._walk_archive", walking)
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: LastPartWaits(world.local[row["folder"]], archive_set))
+    db = str(tmp_path / "archives.db")
+    # Six chains fill 4 streams and the margin of 2: b.tar can start only as they finish.
+    assert run(db, world.audit_db(), "--streams", "4", "--max-streams", "4",
+               "--workers", "6") == 0
+    assert order.index(("start", "b.tar")) < order.index(("end", "a.tar"))
+
+
 def test_a_run_goes_on_with_a_walk_from_its_cursors_not_from_the_start(tmp_path, monkeypatch):
     """What the switch rests on: a walk half done in the database goes on from where it
     stopped. A walk from scratch would read the first header again."""

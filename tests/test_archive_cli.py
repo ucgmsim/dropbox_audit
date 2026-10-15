@@ -193,6 +193,22 @@ def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path):
     assert manifests[1] == manifests[4]
 
 
+def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path):
+    """So `archive run` can give the streams of chains that have finished to the next
+    archive, rather than wait for this one to end."""
+    source = local_archive(tmp_path)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    store = ArchiveStore(db)
+    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
+                                          "a.tar", "--workers", "4"])
+    seen = []
+    walked = cli._walk_archive(args, store, store.get("a.tar"), None, None,
+                               threading.Event(), on_chains=seen.append)
+    assert walked.state == "complete"
+    assert max(seen) == 4 and seen[-1] == 0
+
+
 @pytest.mark.parametrize("seed", range(10))
 def test_chains_find_every_member_wherever_the_parts_divide(tmp_path, seed):
     """Against tarfile's own listing: members from a few bytes to many times a part, parts

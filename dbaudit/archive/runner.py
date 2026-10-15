@@ -28,7 +28,8 @@ log = logging.getLogger("dbaudit")
 
 @dataclass
 class Job:
-    """One archive to walk. ``chains`` is how many it wants at once."""
+    """One archive to walk. ``chains`` is how many it wants at once: an estimate until its
+    walk begins, then the number its walk reports as chains finish."""
     key: str
     label: str
     size: int

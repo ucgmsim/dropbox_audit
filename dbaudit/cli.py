@@ -755,7 +755,7 @@ class _Run:
     chain, because a `requests.Session` is not thread-safe.
     """
 
-    def __init__(self, args, store, row, archive_set, tokens, limiter, stop):
+    def __init__(self, args, store, row, archive_set, tokens, limiter, stop, on_chains=None):
         self.args = args
         self.store = store
         self.row = row
@@ -777,9 +777,20 @@ class _Run:
         #: Set by the first chain to meet a pax header. The format is the archive's, not
         #: one part's, so every other chain would meet it too: the walk stops.
         self.unsupported = None
+        #: Workers walking or about to claim a segment, told to ``on_chains`` as it changes:
+        #: `archive run` gives the streams of chains that have finished to the next archive.
+        self.chains = 0
+        self.on_chains = on_chains
 
     def stopping(self) -> bool:
         return self.stop.is_set() or self.halt.is_set()
+
+    def chain(self, step) -> None:
+        with self.lock:
+            self.chains += step
+            chains = self.chains
+        if self.on_chains is not None:
+            self.on_chains(chains)
 
     def commit(self, segment_id, members, next_offset, requests, bytes_fetched) -> None:
         """Write one batch, or refuse to once `--max-batches` has been reached.
@@ -928,6 +939,7 @@ def _walk_segment(run, segment) -> None:
 def _worker(run) -> None:
     """Claim segments until there are none left, or until the run is stopping."""
     owner = f"{os.getpid()}:{threading.get_ident()}"
+    run.chain(1)
     try:
         while not run.stopping():
             segment = run.store.claim_segment(run.archive_id, owner)
@@ -946,6 +958,7 @@ def _worker(run) -> None:
         run.failed = True
         log.exception("worker stopping after an unexpected failure")
     finally:
+        run.chain(-1)
         run.store.close()          # this thread's own connection
 
 
@@ -1178,14 +1191,15 @@ class _Walked:
 
 
 def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
-                  recheck=False) -> _Walked:
+                  recheck=False, on_chains=None) -> _Walked:
     """Walk one registered archive to a verdict, or until ``stop`` is set.
 
     The pipeline `archive index` and `archive run` share: the parts checked against the
     folder, the chains walked and joined, the audit, the parts checked again, and the
     outcome recorded. The caller owns the lock, the signals and the printing.
     ``check_before`` is False when the caller registered the parts from a listing a
-    moment ago, which is that same check.
+    moment ago, which is that same check. ``on_chains`` is told how many chains are
+    walking each time that changes.
     """
     archive_id = row["id"]
     archive_set = _stored_archive_set(store, row)
@@ -1236,7 +1250,7 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
 
     workers = max(args.workers, 1)
     store.start_walk(archive_id)
-    run = _Run(args, store, row, archive_set, tokens, limiter, stop)
+    run = _Run(args, store, row, archive_set, tokens, limiter, stop, on_chains)
     outcome = blocked = audit_failed = None
     exhausted = False
     log.info("walking %s (%d parts, %s) with %d chains",
@@ -1593,8 +1607,10 @@ def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
                 "SELECT * FROM archives WHERE id=?", (job.archive_id,)).fetchone()
             if row["state"] in VERDICTS:
                 return Done("done")             # this content was walked before
+            def chains(n):
+                job.chains = max(1, n)          # the scheduler counts this one's chains now
             walked = _walk_archive(args, store, row, tokens, limiter, stop,
-                                   check_before=False)
+                                   check_before=False, on_chains=chains)
             for line in walked.errors:
                 log.warning("%s: %s", label, line.removeprefix("error: "))
             stats = store.stats(row["id"])
