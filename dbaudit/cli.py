@@ -1088,8 +1088,12 @@ def cmd_archive_index(args) -> int:
               file=sys.stderr)
         return 1
     if row["state"] == "unsupported" and not args.recheck:
-        print(f"error: {row['name']} is a pax-format archive, which dbaudit does not "
-              f"index: {row['detail'] or ''}{recheck}", file=sys.stderr)
+        if compressed := _compressed_as(row):
+            print(f"error: {row['name']} is {compressed}-compressed, not a tar: it cannot be "
+                  f"walked header by header{recheck}", file=sys.stderr)
+        else:
+            print(f"error: {row['name']} is a pax-format archive, which dbaudit does not "
+                  f"index: {row['detail'] or ''}{recheck}", file=sys.stderr)
         return 1
 
     try:
@@ -1127,6 +1131,13 @@ def _compression(row, archive_set, tokens, limiter) -> str | None:
                     row["name"], found)
         return None
     return found
+
+
+def _compressed_as(row) -> str | None:
+    """The compression format an `unsupported` archive was recorded under, or None for a
+    pax archive."""
+    fmt, compressed, _ = (row["detail"] or "").partition("-compressed: ")
+    return fmt if compressed and fmt in dict(COMPRESSION) else None
 
 
 @dataclass
@@ -1765,7 +1776,9 @@ def _print_index_completeness_warning(row) -> None:
         print("  It may be missing members, and until every chain is confirmed it may also")
         print("  list members of a tar stored inside the archive: treat these figures as")
         print("  provisional.")
-    if row["state"] == "unsupported":
+    if row["state"] == "unsupported" and (compressed := _compressed_as(row)):
+        print(f"  It is {compressed}-compressed, not a tar: it has no headers to index.")
+    elif row["state"] == "unsupported":
         print("  It is a pax-format archive, which dbaudit does not index: the walk")
         print("  stopped at the first pax member.")
     if row["state"] == "stale":
@@ -2174,6 +2187,10 @@ def cmd_archive_cat(args) -> int:
               file=sys.stderr)
         return 1
 
+    if row["state"] == "unsupported" and (compressed := _compressed_as(row)):
+        print(f"error: {row['name']} is {compressed}-compressed, not a tar: dbaudit cannot "
+              f"extract from it", file=sys.stderr)
+        return 1
     if row["state"] == "unsupported":
         # Its index stops at the first pax member, and pax is where a member's name and
         # size can sit outside the checksummed header the read checks below rely on.

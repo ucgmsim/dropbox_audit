@@ -1649,6 +1649,24 @@ def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(tmp_path, monkeypat
     assert 0 not in asked
 
 
+def test_a_compressed_archive_is_never_called_pax(tmp_path, capsys):
+    """`index` again, `report` and `cat` name what the walk found, as the walk did."""
+    source = local_archive(tmp_path, _compressed("gzip", build_tar(RANDOM_MEMBERS)),
+                           part_size=1 << 20)
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(["archive", "index", "--db", db, "--archive", "a.tar"])
+    capsys.readouterr()
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    main(["archive", "report", "--db", db, "--archive", "a.tar"])
+    assert main(["archive", "cat", "--db", db, "--archive", "a.tar", "--member", "run/r0.bin",
+                 "--out", str(tmp_path / "r0.bin")]) == 1
+    out, err = capsys.readouterr()
+    assert "pax" not in out + err
+    assert "gzip-compressed" in out and err.count("gzip-compressed") == 2
+
+
 def test_status_without_an_archive_summarises_the_database(tmp_path, capsys):
     """With thousands of archives, one line per state and a line per walk in progress;
     one archive's full status is `--archive`."""
