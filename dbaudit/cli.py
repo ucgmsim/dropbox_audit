@@ -1496,7 +1496,27 @@ def _run_jobs(store, listing, workers):
     return sorted(jobs, key=lambda job: -job.size), counts, sizes
 
 
-def _walk_job(args, store, job, tokens, limiter, stop) -> Done:
+class _Walking:
+    """The contents being walked right now, by set hash. Two places the listing saw apart
+    can hold the same content by their turns, and one archive must not be walked by two
+    jobs at once."""
+
+    def __init__(self):
+        self._lock, self._hashes = threading.Lock(), set()
+
+    def claim(self, set_hash) -> bool:
+        with self._lock:
+            if set_hash in self._hashes:
+                return False
+            self._hashes.add(set_hash)
+            return True
+
+    def release(self, set_hash) -> None:
+        with self._lock:
+            self._hashes.discard(set_hash)
+
+
+def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
     """One archive at its turn. One listing of its folder registers what is there now:
     the same row, with its walk so far, if the content is unchanged -- wherever it was
     registered before -- or a new one if not. Then the walk."""
@@ -1521,19 +1541,27 @@ def _walk_job(args, store, job, tokens, limiter, stop) -> Done:
         except ArchiveSetError as exc:
             store.log_event(job.archive_id, "refused", f"{job.label}: {exc}")
             return Done("refused")
-        job.archive_id = store.register(job.name, "tar", job.folder, "dropbox",
-                                        archive_set.parts)
-        store.seed_segments(job.archive_id, archive_set.parts)
-        row = store.connect().execute(
-            "SELECT * FROM archives WHERE id=?", (job.archive_id,)).fetchone()
-        if row["state"] in VERDICTS:
-            return Done("done")                 # this content was walked before
-        walked = _walk_archive(args, store, row, tokens, limiter, stop, check_before=False)
-        for line in walked.errors:
-            log.warning("%s: %s", job.label, line.removeprefix("error: "))
-        stats = store.stats(row["id"])
-        return Done("stopped" if walked.stopped else walked.state,
-                    members=stats["n_members"], requests=stats["requests"], bug=walked.bug)
+        set_hash = archive_set.set_hash()
+        if not walking.claim(set_hash):
+            return Done("done")                 # another job is walking this content
+        try:
+            job.archive_id = store.register(job.name, "tar", job.folder, "dropbox",
+                                            archive_set.parts)
+            store.seed_segments(job.archive_id, archive_set.parts)
+            row = store.connect().execute(
+                "SELECT * FROM archives WHERE id=?", (job.archive_id,)).fetchone()
+            if row["state"] in VERDICTS:
+                return Done("done")             # this content was walked before
+            walked = _walk_archive(args, store, row, tokens, limiter, stop,
+                                   check_before=False)
+            for line in walked.errors:
+                log.warning("%s: %s", job.label, line.removeprefix("error: "))
+            stats = store.stats(row["id"])
+            return Done("stopped" if walked.stopped else walked.state,
+                        members=stats["n_members"], requests=stats["requests"],
+                        bug=walked.bug)
+        finally:
+            walking.release(set_hash)
     finally:
         store.close()                           # this thread's own connection
 
@@ -1619,6 +1647,7 @@ def _run_archives(args, store, jobs) -> int:
     tokens = TokenProvider(remote=args.remote)       # one, so its token is cached once
     limiter = _run_limiter(args)
     stop = threading.Event()
+    walking = _Walking()
     hard = {"count": 0}
 
     def handle(signum, frame):
@@ -1635,9 +1664,10 @@ def _run_archives(args, store, jobs) -> int:
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.signal(signum, handle)
-        report = Runner(lambda job: _walk_job(args, store, job, tokens, limiter, stop),
-                        limiter, stop, limit=args.limit,
-                        on_bug=lambda job, exc: _record_bug(store, job, exc)).run(jobs)
+        report = Runner(
+            lambda job: _walk_job(args, store, job, tokens, limiter, stop, walking),
+            limiter, stop, limit=args.limit,
+            on_bug=lambda job, exc: _record_bug(store, job, exc)).run(jobs)
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)

@@ -42,7 +42,8 @@ class Job:
 @dataclass
 class Done:
     """What one walk came to. ``state`` is the archive's state afterwards, or `stopped`
-    (resumable), `gone` (no longer where the listing said) or `done` (walked before)."""
+    (resumable), `gone` (no longer where the listing said) or `done` (walked before, or
+    being walked by another job)."""
     state: str
     members: int = 0
     requests: int = 0

@@ -560,6 +560,43 @@ def test_content_walked_before_under_another_name_is_not_walked_again(tmp_path,
     assert walked == []
 
 
+def test_two_places_that_come_to_hold_the_same_content_walk_it_once(tmp_path, monkeypatch):
+    """The listing saw two archives; by their turns one place holds the other's bytes. Both
+    jobs meet the same archive, which one walks, not both at once."""
+    world = World(tmp_path)
+    data = build_tar(members(40, 4))
+    world.add("/R/a", "a.tar", data, part_size=60_000)
+    world.add("/R/b", "b.tar", build_tar(members(40, 5)), part_size=60_000)
+    world.install(monkeypatch)
+    audit = world.audit_db()
+    world.folders["/R/b"] = []
+    world.add("/R/b", "b.tar", data, part_size=60_000)     # b.tar now holds a.tar's bytes
+    flying, most, lock, real = Counter(), Counter(), threading.Lock(), cli._walk_archive
+
+    def counted(args, store, row, *rest, **kw):
+        with lock:
+            flying[row["id"]] += 1
+            most[row["id"]] = max(most[row["id"]], flying[row["id"]])
+        try:
+            return real(args, store, row, *rest, **kw)
+        finally:
+            with lock:
+                flying[row["id"]] -= 1
+
+    class Slow(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            time.sleep(0.02)                    # so that the two walks would overlap
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._walk_archive", counted)
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: Slow(world.local[row["folder"]], archive_set))
+    db = str(tmp_path / "archives.db")
+    assert run(db, audit) == 0
+    assert list(most.values()) == [1]
+    assert [r["state"] for r in rows(db).values()] == ["complete"]
+
+
 def test_every_walk_and_listing_takes_its_turn_at_one_limiter(tmp_path, monkeypatch):
     """So one walk's rate-limit response slows every walk: the limiter pauses every
     request it gates."""
