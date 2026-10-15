@@ -193,12 +193,26 @@ def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path):
     assert manifests[1] == manifests[4]
 
 
-def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path):
+def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path, monkeypatch):
     """So `archive run` can give the streams of chains that have finished to the next
     archive, rather than wait for this one to end."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    # The first four workers meet before any claims: on a busy machine the fourth could
+    # otherwise start after another had already run out of segments.
+    barrier, arrived, lock = threading.Barrier(4, timeout=30), set(), threading.Lock()
+    real_claim = ArchiveStore.claim_segment
+
+    def claim_segment(self, archive_id, owner):
+        with lock:
+            first = owner not in arrived and len(arrived) < 4
+            arrived.add(owner)
+        if first:
+            barrier.wait()
+        return real_claim(self, archive_id, owner)
+
+    monkeypatch.setattr(ArchiveStore, "claim_segment", claim_segment)
     store = ArchiveStore(db)
     args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
                                           "a.tar", "--workers", "4"])
@@ -210,10 +224,13 @@ def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path):
 
 
 @pytest.mark.parametrize("seed", range(10))
-def test_chains_find_every_member_wherever_the_parts_divide(tmp_path, seed):
+def test_chains_find_every_member_wherever_the_parts_divide(tmp_path, monkeypatch, seed):
     """Against tarfile's own listing: members from a few bytes to many times a part, parts
     cut anywhere, one chain or many -- each starting where its scan found a header, or
-    where the chain before it crossed into its part."""
+    where the chain before it crossed into its part, before or during the scan."""
+    monkeypatch.setattr("dbaudit.cli.find_chain_start",     # small reads, so scans give way
+                        lambda concat, start, **kw: find_chain_start(concat, start,
+                                                                     scan_read=4096, **kw))
     rng = random.Random(seed)
     sizes = [rng.choice([10, 700, 5000, 70_000, 400_000]) for _ in range(rng.randint(5, 40))]
     data = build_tar([(f"run/m{i:03d}.bin", rng.randbytes(n)) for i, n in enumerate(sizes)])
@@ -447,6 +464,7 @@ def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(tmp_pa
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
     assert ArchiveStore(db).get("a.tar")["n_members"] == 4
     assert scans == []
+    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "repair") == 0   # exact
 
 
 def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(tmp_path, monkeypatch):
@@ -475,6 +493,42 @@ def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(tmp_path, monk
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "2"]) == 0
     assert ArchiveStore(db).get("a.tar")["n_members"] == 4
     assert len(scans) == 1
+    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "repair") == 0   # exact
+
+
+def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(tmp_path,
+                                                                           monkeypatch):
+    """The join hands the scanning chain that start on the next run all the same."""
+    db, scanning = _deep_second_part(tmp_path)
+    stop, started, crossed, after = (threading.Event(), threading.Event(), threading.Event(),
+                                     [])
+    real_finish = ArchiveStore.finish_segment
+
+    def finish_segment(self, segment_id, result, *rest, **kwargs):
+        real_finish(self, segment_id, result, *rest, **kwargs)
+        if result.state == "crossed":
+            stop.set()                          # a signal lands as segment 0 crosses
+            crossed.set()
+
+    class Ordered(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if stop.is_set():
+                after.append((part_idx, offset))
+            if part_idx == 0:
+                started.wait(10)
+            elif offset < scanning:
+                started.set()
+                crossed.wait(10)
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr(ArchiveStore, "finish_segment", finish_segment)
+    monkeypatch.setattr("dbaudit.cli._reader_for",
+                        lambda row, s, t=None, l=None: Ordered(row["folder"], s))
+    store = ArchiveStore(db)
+    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
+                                          "a.tar", "--workers", "2"])
+    walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
+    assert walked.stopped and after == []
 
 
 def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypatch):

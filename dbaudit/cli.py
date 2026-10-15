@@ -781,16 +781,16 @@ class _Run:
         #: `archive run` gives the streams of chains that have finished to the next archive.
         self.chains = 0
         self.on_chains = on_chains
+        self.chain_lock = threading.Lock()  # not `lock`: a commit can hold that for seconds
 
     def stopping(self) -> bool:
         return self.stop.is_set() or self.halt.is_set()
 
     def chain(self, step) -> None:
-        with self.lock:
+        with self.chain_lock:               # so the reports land in the order counts changed
             self.chains += step
-            chains = self.chains
-        if self.on_chains is not None:
-            self.on_chains(chains)
+            if self.on_chains is not None:
+                self.on_chains(self.chains)
 
     def commit(self, segment_id, members, next_offset, requests, bytes_fetched) -> None:
         """Write one batch, or refuse to once `--max-batches` has been reached.
@@ -840,10 +840,9 @@ def _chain_start(run, segment, concat):
         return find_chain_start(concat, segment["scan_from"],
                                 should_stop=lambda: run.stopping() or crossed() is not None)
     except ScanStopped:
-        start = crossed()
-        if start is None:
+        if run.stopping():          # even if the crossing came too: a stop reads no more
             raise _Stopped("stopped while scanning for the chain's first header") from None
-        return start
+        return crossed()
 
 
 def _walk_segment(run, segment) -> None:
