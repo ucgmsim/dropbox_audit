@@ -165,9 +165,12 @@ python -m dbaudit archive cat      --db archives.db --archive big.tar \
 pip install pytest
 python -m pytest                                     # offline; live tests are skipped
 DBAUDIT_LIVE=1 python -m pytest tests/test_live.py   # crawls DBAUDIT_LIVE_ROOT for real
+DBAUDIT_FUZZ=300 python -m pytest tests/test_confirming_reads_fuzz.py   # 300 random tars
 ```
 
 The Dropbox API sits behind small interfaces, so the crawler and the tar walker are
 tested against fakes. These replay canned pages and byte ranges, including 429s with
 `Retry-After`, cursor resets, interruption mid-crawl and reads that return the
-wrong bytes.
+wrong bytes, once or every time a request is asked a certain way. Each test draws
+its request shapes from a generator seeded by its name, so a failure repeats;
+`DBAUDIT_SEED=N` reseeds the run, and `--unshaped` asks as dbaudit did before shapes.
