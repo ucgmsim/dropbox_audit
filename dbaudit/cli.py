@@ -1835,7 +1835,9 @@ def cmd_archive_cat(args) -> int:
     # exactly what it wants. With the default window, the final fill of anything not
     # finished in one request would drag part of the *next* member along -- real
     # Dropbox traffic that never reaches the output. window_min=window_max=1 makes
-    # every fill read exactly what is asked, clamped only by the archive's own end.
+    # every fill want exactly what is asked, clamped only by the archive's own end; the
+    # request adds only the lead and tail of its shape (reader.py), up to 64 KiB each
+    # side within its part, which are thrown away.
     concat = ConcatFile(archive_set, reader, window_min=1, window_max=1)
     # What must follow the member, for the trailing anchor: the member the index says
     # starts there, or the terminator where a complete walk ended there. A walk stopped
