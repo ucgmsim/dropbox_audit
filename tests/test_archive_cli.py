@@ -420,6 +420,8 @@ def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(tmp_path, mo
                                           "a.tar", "--workers", "2"])
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(scans) == 1
+    scanned = store.segments(store.get("a.tar")["id"])[1]
+    assert (scanned["state"], scanned["error"]) == ("pending", None)   # stopped, not failed
     monkeypatch.undo()
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert ArchiveStore(db).get("a.tar")["n_members"] == 4
