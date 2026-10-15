@@ -49,6 +49,7 @@ from .crawler import Crawler
 from .limiter import AdaptiveLimiter
 from .lock import InstanceLock, LockHeld
 from .store import Store
+from .units import human_bytes, human_duration
 from .verify import verify_subtree
 from . import report as reports
 from . import tree
@@ -130,14 +131,6 @@ def free_bytes(path: str) -> int:
     return stat.f_bavail * stat.f_frsize
 
 
-def human_bytes(n: float) -> str:
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
-        if abs(n) < 1024 or unit == "PiB":
-            return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n)} B"
-        n /= 1024
-    return f"{n} B"
-
-
 SIZE_UNITS = {"": 1, "b": 1, "kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30, "tib": 1 << 40}
 
 
@@ -150,22 +143,6 @@ def parse_size(text: str) -> int:
             "or TiB")
     number, unit = match.groups()
     return int(float(number) * SIZE_UNITS[(unit or "").lower()])
-
-
-def human_duration(seconds: float) -> str:
-    if seconds != seconds or seconds in (float("inf"), float("-inf")) or seconds < 0:
-        return "unknown"
-    seconds = int(seconds)
-    days, rem = divmod(seconds, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, secs = divmod(rem, 60)
-    if days:
-        return f"{days}d {hours}h"
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
 
 
 def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
