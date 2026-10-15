@@ -37,6 +37,8 @@ class Job:
     name: str = ""
     archive_id: int | None = None
     retried: bool = False
+    #: (folder, name) of each copy of the same content, tried in turn if this one has gone.
+    copies: tuple = ()
 
 
 @dataclass

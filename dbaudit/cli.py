@@ -31,7 +31,7 @@ import tempfile
 import threading
 import time
 import zlib
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1448,16 +1448,21 @@ def _run_jobs(store, listing, workers):
 
     Every valid archive the listing names that has no verdict yet, and every archive the
     database holds without one -- imported mid-walk, or registered by hand -- once per
-    folder and name. Returns (jobs, counts, sizes), the last two keyed by kind.
+    folder and name. A job carries the places of its copies, walked instead if its own
+    has gone. Returns (jobs, counts, sizes), the last two keyed by kind.
     """
     rows = store.connect().execute(
         "SELECT a.*, (SELECT COUNT(*) FROM segments s WHERE s.archive_id = a.id"
         "             AND s.state IN ('pending', 'walking', 'error')) AS unfinished "
         "FROM archives a").fetchall()
     by_hash = {row["set_hash"]: row for row in rows}
+    copies_of = defaultdict(list)
+    for candidate in listing.candidates:
+        if candidate.status == "copy":
+            copies_of[candidate.set_hash].append((candidate.folder, candidate.name))
     jobs, counts, sizes, places, ids = [], Counter(), Counter(), set(), set()
 
-    def add(kind, folder, name, size, chains, archive_id):
+    def add(kind, folder, name, size, chains, archive_id, copies=()):
         # An archive that moved is listed where it is now, and is in the database where
         # it was registered: one walk, from where it is now, which comes first.
         if (folder, name) in places or archive_id in ids:
@@ -1467,7 +1472,7 @@ def _run_jobs(store, listing, workers):
             ids.add(archive_id)
         jobs.append(Job(key=f"{folder}/{name}", label=f"{folder}/{name}", size=size,
                         chains=max(1, min(chains, workers)), folder=folder, name=name,
-                        archive_id=archive_id))
+                        archive_id=archive_id, copies=tuple(copies)))
         counts[kind] += 1
         sizes[kind] += size
 
@@ -1483,10 +1488,11 @@ def _run_jobs(store, listing, workers):
             sizes["done"] += candidate.size
         elif row is None:
             add("new", candidate.folder, candidate.name, candidate.size, candidate.n_parts,
-                None)
+                None, copies_of[candidate.set_hash])
         else:
             add("resuming", candidate.folder, candidate.name, candidate.size,
-                row["unfinished"] or candidate.n_parts, row["id"])
+                row["unfinished"] or candidate.n_parts, row["id"],
+                copies_of[candidate.set_hash])
     for row in rows:
         if row["state"] not in VERDICTS and row["source"] == "dropbox":
             add("resuming", row["folder"], row["name"], row["total_size"],
@@ -1519,34 +1525,45 @@ class _Walking:
 def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
     """One archive at its turn. One listing of its folder registers what is there now:
     the same row, with its walk so far, if the content is unchanged -- wherever it was
-    registered before -- or a new one if not. Then the walk."""
+    registered before -- or a new one if not. Then the walk. If the archive has gone, or
+    its parts no longer make a set, the next copy the listing saw is tried instead."""
     try:
         _, lister = build_lister(args.remote, tokens)
-        try:
-            entries = _listed(lister, limiter, job.folder, job.name, stop)
-        except PathNotFound as exc:
-            store.log_event(job.archive_id, "gone", f"{job.label}: {exc}")
-            return Done("gone")
-        except ApiError as exc:
-            store.log_event(job.archive_id, "fail", f"{job.label}: could not list its "
-                                                    f"folder: {type(exc).__name__}: {exc}")
-            return Done("error")
-        if entries is None:
-            return Done("stopped")
-        if not entries:
-            store.log_event(job.archive_id, "gone", f"{job.label}: no longer in its folder")
-            return Done("gone")
-        try:
-            archive_set = ArchiveSet.from_entries(entries, job.name)
-        except ArchiveSetError as exc:
-            store.log_event(job.archive_id, "refused", f"{job.label}: {exc}")
-            return Done("refused")
+        missed = None
+        for folder, name in ((job.folder, job.name), *job.copies):
+            label = f"{folder}/{name}"
+            try:
+                entries = _listed(lister, limiter, folder, name, stop)
+            except PathNotFound as exc:
+                store.log_event(job.archive_id, "gone", f"{label}: {exc}")
+                missed = missed or "gone"
+                continue
+            except ApiError as exc:
+                store.log_event(job.archive_id, "fail", f"{label}: could not list its "
+                                                        f"folder: {type(exc).__name__}: {exc}")
+                return Done("error")
+            if entries is None:
+                return Done("stopped")
+            if not entries:
+                store.log_event(job.archive_id, "gone", f"{label}: no longer in its folder")
+                missed = missed or "gone"
+                continue
+            try:
+                archive_set = ArchiveSet.from_entries(entries, name)
+            except ArchiveSetError as exc:
+                store.log_event(job.archive_id, "refused", f"{label}: {exc}")
+                missed = missed or "refused"
+                continue
+            break
+        else:
+            return Done(missed)
+        if label != job.label:
+            log.info("%s: walking its copy at %s", job.label, label)
         set_hash = archive_set.set_hash()
         if not walking.claim(set_hash):
             return Done("done")                 # another job is walking this content
         try:
-            job.archive_id = store.register(job.name, "tar", job.folder, "dropbox",
-                                            archive_set.parts)
+            job.archive_id = store.register(name, "tar", folder, "dropbox", archive_set.parts)
             store.seed_segments(job.archive_id, archive_set.parts)
             row = store.connect().execute(
                 "SELECT * FROM archives WHERE id=?", (job.archive_id,)).fetchone()
@@ -1555,7 +1572,7 @@ def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
             walked = _walk_archive(args, store, row, tokens, limiter, stop,
                                    check_before=False)
             for line in walked.errors:
-                log.warning("%s: %s", job.label, line.removeprefix("error: "))
+                log.warning("%s: %s", label, line.removeprefix("error: "))
             stats = store.stats(row["id"])
             return Done("stopped" if walked.stopped else walked.state,
                         members=stats["n_members"], requests=stats["requests"],

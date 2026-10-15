@@ -597,6 +597,30 @@ def test_two_places_that_come_to_hold_the_same_content_walk_it_once(tmp_path, mo
     assert [r["state"] for r in rows(db).values()] == ["complete"]
 
 
+@pytest.mark.parametrize("how", ["gone", "gap"])
+def test_a_copy_is_walked_when_the_archive_standing_for_it_has_gone_or_lost_a_part(
+        tmp_path, monkeypatch, how):
+    """One place stands for each content, and its copies wait. If that place has gone by its
+    turn, or lost a part, the content is walked where a copy of it is."""
+    world = World(tmp_path)
+    data = build_tar(members(30, 9))
+    for folder in ("/R/a", "/R/b"):             # /R/a stands for both: it sorts first
+        world.add(folder, "x.tar", data, part_size=40_000)
+    world.install(monkeypatch)
+    audit = world.audit_db()
+    if how == "gone":
+        world.gone.add("/R/a")
+    else:
+        del world.folders["/R/a"][1]            # a part deleted after the listing
+    db = str(tmp_path / "archives.db")
+    assert run(db, audit) == 0
+    assert {f: (r["state"], r["n_members"]) for f, r in rows(db).items()} == {
+        "/R/b": ("complete", 30)}
+    events = ArchiveStore(db).connect().execute("SELECT kind, detail FROM events").fetchall()
+    assert any(kind == ("gone" if how == "gone" else "refused") and detail.startswith("/R/a/")
+               for kind, detail in events)
+
+
 def test_every_walk_and_listing_takes_its_turn_at_one_limiter(tmp_path, monkeypatch):
     """So one walk's rate-limit response slows every walk: the limiter pauses every
     request it gates."""
