@@ -637,6 +637,10 @@ class ArchiveStore:
         return self.connect().execute(
             "SELECT * FROM segments WHERE archive_id=? ORDER BY idx", (archive_id,)).fetchall()
 
+    def segment(self, archive_id, idx) -> sqlite3.Row | None:
+        return self.connect().execute(
+            "SELECT * FROM segments WHERE archive_id=? AND idx=?", (archive_id, idx)).fetchone()
+
     def claim_segment(self, archive_id, owner):
         """Atomically take the lowest-index pending segment, or None.
 

@@ -4,7 +4,7 @@ import pytest
 
 from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import (ALLOWED_URLS, DOWNLOAD_URL, SHAPES, ConcatFile,
-                                    DropboxRangeReader, ReaderError)
+                                    DropboxRangeReader, ReaderError, ReadStopped)
 from dbaudit.archive.tarwalk import walk
 from dbaudit.limiter import AdaptiveLimiter
 from tests.archive_fakes import build_tar
@@ -153,6 +153,35 @@ def test_transient_failures_are_retried_and_then_give_up():
     with pytest.raises(ReaderError):
         reader.read_range(0, 0, 512)
     assert len(session.calls) == 3
+
+
+def test_a_long_run_of_429s_does_not_use_up_a_reads_tries():
+    """Every reader waits out each pause together, as folder listings do: a read that
+    meets a storm of 429s is asked again until Dropbox answers, not failed after five."""
+    limited = FakeResponse(429, body={"error": {"retry_after": 0}})
+    reader, session = make(*[limited] * 6, ok(0, 512), retries=5)
+    assert len(reader.read_range(0, 0, 512)) == 512
+    assert len(session.calls) == 7
+
+
+def test_a_read_gives_way_to_its_callers_stop_while_dropbox_pushes_back():
+    """With 429s no longer counted, a stop is what ends such a read early -- as a stop,
+    not a failure, so the walk hands its segment back."""
+    stop = []
+    limited = FakeResponse(429, body={"error": {"retry_after": 0}})
+    reader, _ = make()
+
+    class Storm(FakeSession):
+        def post(self, url, headers=None, timeout=None):
+            if len(self.calls) == 2:
+                stop.append(True)               # a signal lands mid-storm
+            return super().post(url, headers, timeout)
+
+    reader.session = Storm(*[limited] * 3, ok(0, 512))
+    reader.should_stop = lambda: bool(stop)
+    with pytest.raises(ReadStopped):
+        reader.read_range(0, 0, 512)
+    assert len(reader.session.calls) == 3
 
 
 #: Dropbox stores a file in blocks of this size.

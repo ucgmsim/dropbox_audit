@@ -20,7 +20,7 @@ import threading
 import pytest
 
 from dbaudit.api import AuthExpired, Page, RateLimited, TransientError
-from dbaudit.archive.reader import LocalRangeReader, ReaderError
+from dbaudit.archive.reader import LocalRangeReader, ReaderError, ReadStopped
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
 from dbaudit import cli
@@ -1268,6 +1268,72 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(tmp_path, monkey
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert store.get("a.tar")["n_members"] == 30
     assert event_count(db, store.get("a.tar")["id"], "audit") == 1
+
+
+@pytest.mark.parametrize("phase", ["walk", "audit", "compression"])
+def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(tmp_path, monkeypatch,
+                                                                 phase):
+    """A read Dropbox kept answering 429 gives way to a stop. The walk, the audit and the
+    compression check each take that as a stop: no verdict yet, and nothing failed."""
+    data = {"walk": build_tar(MEMBERS),
+            "audit": build_tar([("run/same.bin", bytes([i]) * 700) for i in range(30)]),
+            "compression": _compressed("gzip", build_tar(RANDOM_MEMBERS))}[phase]
+    source = local_archive(tmp_path, data, part_size=len(data))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    stop, made = threading.Event(), []
+    nth = {"walk": 1, "audit": 2, "compression": 2}[phase]   # the walk's reader comes first
+
+    class GivesWay(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            if self.nth == nth:
+                stop.set()
+                raise ReadStopped("a.tar: stopped while Dropbox answered 429")
+            return super().read_range(part_idx, offset, length)
+
+    def reader_for(row, archive_set, tokens=None, limiter=None):
+        made.append(GivesWay(row["folder"], archive_set))
+        made[-1].nth = len(made)
+        return made[-1]
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
+    store = ArchiveStore(db)
+    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
+                                          "a.tar"])
+    walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
+    assert walked.stopped and len(made) == nth
+    archive_id = store.get("a.tar")["id"]
+    assert store.get("a.tar")["state"] == "walking"
+    assert [s["state"] for s in store.segments(archive_id) if s["state"] == "error"] == []
+
+
+def test_a_stopped_walk_does_not_list_its_folder_again(tmp_path, monkeypatch):
+    """The listing after a walk protects a verdict about to be recorded. A stopped walk
+    records none -- the next lists the folder before it begins -- so a stop does not wait
+    on that listing through whatever 429s Dropbox is giving."""
+    source = tmp_path / "parts"
+    source.mkdir()
+    archive_set = write_parts(source, build_tar(MEMBERS), 4096)
+    db = str(tmp_path / "archives.db")
+    register_dropbox(monkeypatch, db, archive_set)
+    build = fake_build_lister([dropbox_entries(archive_set)])
+    monkeypatch.setattr("dbaudit.cli.build_lister", build)
+    stop = threading.Event()
+
+    class Stopping(LocalRangeReader):
+        def read_range(self, part_idx, offset, length):
+            stop.set()                          # a signal, as the walk reads
+            return super().read_range(part_idx, offset, length)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
+                        limiter=None: Stopping(source, archive_set))
+    store = ArchiveStore(db)
+    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
+                                          "a.tar"])
+    walked = cli._walk_archive(args, store, store.get("a.tar"), None,
+                               cli.AdaptiveLimiter(rps=1000.0), stop)
+    assert walked.stopped
+    assert build.calls["n"] == 1                # the listing before the walk; none after
 
 
 def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(tmp_path, monkeypatch,

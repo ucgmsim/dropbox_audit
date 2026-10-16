@@ -40,7 +40,7 @@ from .api import ApiError, AuthExpired, HttpLister, PathNotFound, RateLimited, T
 from .archive.candidates import find_candidates
 from .archive.parts import ArchiveSet, ArchiveSetError
 from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeReader,
-                             LocalRangeReader, ReaderError)
+                             LocalRangeReader, ReaderError, ReadStopped)
 from .archive import report as archive_report
 from .archive.runner import Done, Job, Runner
 from .archive.store import ArchiveStore
@@ -836,7 +836,7 @@ def _chain_start(run, segment, concat):
     def crossed():
         if segment["idx"] == 0:
             return None
-        before = run.store.segments(run.archive_id)[segment["idx"] - 1]
+        before = run.store.segment(run.archive_id, segment["idx"] - 1)
         return before["exit_offset"] if before["state"] == "crossed" else None
 
     try:
@@ -852,6 +852,7 @@ def _walk_segment(run, segment) -> None:
     """One chain: find where it starts if it has none, then walk to its boundary."""
     args = run.args
     reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
+    reader.should_stop = run.stopping      # a read stuck in 429s gives way to it
     concat = ConcatFile(run.archive_set, reader, window_min=args.window_min,
                         window_max=args.window_max)
     spent = {"requests": 0, "bytes": 0}
@@ -891,7 +892,7 @@ def _walk_segment(run, segment) -> None:
             cursor = start
         result = walk(concat, cursor, commit, batch_size=args.batch,
                       stop_at=segment["stop_at"], should_stop=run.stopping)
-    except _Stopped:
+    except (_Stopped, ReadStopped):
         # The refused batch was read before it was refused.
         requests, fetched = delta()
         run.store.release_segment(segment["id"], requests, fetched)
@@ -1011,6 +1012,7 @@ def _audit_repeated_paths(run) -> list[int]:
     # Its own reader and window: every byte compared comes from a request of its own,
     # in a shape of its own -- not the walk's.
     reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
+    reader.should_stop = run.stopping
     concat = ConcatFile(run.archive_set, reader, window_min=run.args.window_min,
                         window_max=run.args.window_max)
     def disagrees(row):
@@ -1155,7 +1157,7 @@ COMPRESSION = (("gzip", b"\x1f\x8b"), ("bzip2", b"BZh"), ("xz", b"\xfd7zXZ\x00")
                ("zstd", b"\x28\xb5\x2f\xfd"))
 
 
-def _compression(row, archive_set, tokens, limiter) -> str | None:
+def _compression(row, archive_set, tokens, limiter, should_stop=None) -> str | None:
     """The compression format the archive's first bytes announce, or None.
 
     A format is named only once two readings agree, as every verdict is: the second asks
@@ -1165,6 +1167,7 @@ def _compression(row, archive_set, tokens, limiter) -> str | None:
     if size == 0:
         return None                 # Dropbox cannot answer a range of no bytes
     reader = _reader_for(row, archive_set, tokens, limiter)
+    reader.should_stop = should_stop
     head = reader.read_range(0, 0, min(6, size))
     found = next((name for name, magic in COMPRESSION if head.startswith(magic)), None)
     if found and not reader.read_range(0, 0, min(WINDOW_MIN, size)).startswith(head):
@@ -1278,7 +1281,7 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
         if kind == _OUTCOME and payload.state == "complete":
             try:
                 redo = _audit_repeated_paths(run)
-            except _Stopped:
+            except (_Stopped, ReadStopped):
                 break                     # no verdict yet, and no failure: audited next run
             except Exception as exc:
                 audit_failed = (f"could not read again the rows under repeated paths: "
@@ -1305,9 +1308,10 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
         log.error("giving up after too many join rounds; see `archive status`")
 
     stale = None
-    if dropbox:
+    if dropbox and (outcome is not None or run.unsupported):
         try:
-            # Listed even when stopping: a verdict is recorded only after this check.
+            # Listed even when stopping: a verdict is recorded only after this check. A walk
+            # with no verdict to record skips it; the next lists the folder before it begins.
             missing, changed = _fingerprint(store, row, args.remote, tokens, limiter)
         except Exception as exc:
             log.warning("could not re-list %s to fingerprint it: %s: %s",
@@ -1321,28 +1325,31 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
                 store.mark_stale(archive_id, stale)
 
     compressed = unchecked = None
+    if outcome is not None and outcome.state in ("corrupt", "truncated") \
+            and outcome.end_offset == 0:
+        # No header at the very start: perhaps no tar at all.
+        try:
+            compressed = _compression(row, archive_set, tokens, limiter, run.stopping)
+        except ReadStopped:
+            outcome = None              # stopped before the label was settled: no verdict yet
+        except Exception as exc:
+            unchecked = (f"could not read its first bytes to check for compression: "
+                         f"{type(exc).__name__}: {exc}")
+
     if run.unsupported:
         store.mark_unsupported(archive_id, run.unsupported)
     elif audit_failed is not None:
         # Every chain is walked, so the retry this invites goes straight to the audit.
         store.fail(archive_id, audit_failed)
+    elif unchecked:
+        # Every chain is walked, so the retry this invites goes straight to this check.
+        store.fail(archive_id, unchecked)
+    elif compressed:
+        store.mark_unsupported(archive_id, f"{compressed}-compressed: not a tar, so it "
+                                           f"cannot be walked header by header")
     elif outcome is not None:
-        if outcome.state in ("corrupt", "truncated") and outcome.end_offset == 0:
-            # No header at the very start: perhaps no tar at all.
-            try:
-                compressed = _compression(row, archive_set, tokens, limiter)
-            except Exception as exc:
-                unchecked = (f"could not read its first bytes to check for compression: "
-                             f"{type(exc).__name__}: {exc}")
-        if unchecked:
-            # Every chain is walked, so the retry this invites goes straight to this check.
-            store.fail(archive_id, unchecked)
-        elif compressed:
-            store.mark_unsupported(archive_id, f"{compressed}-compressed: not a tar, so it "
-                                               f"cannot be walked header by header")
-        else:
-            store.finish(archive_id, outcome)
-            store.build_indexes(archive_id)    # only once a walk is over, never during
+        store.finish(archive_id, outcome)
+        store.build_indexes(archive_id)        # only once a walk is over, never during
     elif blocked is not None and blocked["state"] == "error":
         store.fail(archive_id, f"segment {blocked['idx']}: {blocked['error'] or 'failed'}")
 

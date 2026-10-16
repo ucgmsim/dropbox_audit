@@ -68,6 +68,11 @@ class ReaderError(RuntimeError):
     """A range read could not be satisfied as asked."""
 
 
+class ReadStopped(Exception):
+    """A read gave way to its caller's stop while Dropbox kept pushing back. Not a
+    ReaderError: nothing failed, and the walk hands its work back as a stopped one."""
+
+
 class ShortRead(ReaderError):
     """Fewer bytes came back than were requested."""
 
@@ -231,6 +236,9 @@ class DropboxRangeReader:
         self.retries = retries
         self.timeout = timeout
         self.sleep = sleep or time.sleep
+        #: Set by a walk to its stop: a read that Dropbox keeps answering 429 gives way to
+        #: it between tries. A 429 costs no try, so nothing else would end such a read.
+        self.should_stop = None
         self.requests = 0
         self.bytes_fetched = 0
         if session is None:
@@ -257,8 +265,8 @@ class DropboxRangeReader:
     def _read_range(self, part_idx: int, offset: int, length: int) -> bytes:
         part = self.archive.parts[part_idx]
         target = part.dbx_id or part.path_display
-        last = None
-        for attempt in range(self.retries):
+        last, failures = None, 0
+        while failures < self.retries:
             try:
                 # The limiter is account-wide: a 429 anywhere parks every reader, and
                 # this is where a parked reader waits.
@@ -268,23 +276,31 @@ class DropboxRangeReader:
                         timeout=self.timeout)
             except Exception as exc:                      # network, DNS, read timeout
                 last = ReaderError(f"{part.name}: {type(exc).__name__}: {exc}")
-                self.sleep(min(2 ** attempt, 30))
+                self.sleep(min(2 ** failures, 30))
+                failures += 1
                 continue
 
             status = response.status_code
             if status == 206:
                 return self._validate(part, response, offset, length)
             if status == 429:
+                # Not a failure: every reader waits out the pause, as listings do. Only a
+                # stop ends the read now -- and only here, so that a stop without 429s
+                # still lets the walk commit the batch it is reading.
                 self.limiter.on_rate_limited(_retry_after(response))
                 last = ReaderError(f"{part.name}: rate limited")
+                if self.should_stop is not None and self.should_stop():
+                    raise ReadStopped(f"{part.name}: stopped while Dropbox answered 429")
                 continue
             if status == 401:
                 self.tokens.invalidate()
                 last = ReaderError(f"{part.name}: token expired")
+                failures += 1
                 continue
             if status >= 500:
                 last = ReaderError(f"{part.name}: {status} from Dropbox")
-                self.sleep(min(2 ** attempt, 30))
+                self.sleep(min(2 ** failures, 30))
+                failures += 1
                 continue
             if status == 200:
                 raise ReaderError(
