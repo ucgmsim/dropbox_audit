@@ -21,6 +21,8 @@ import tarfile
 from collections import Counter, deque
 from dataclasses import dataclass, replace
 
+from .reader import ReadStopped
+
 BLOCK = 512
 TERMINATOR = BLOCK * 2
 #: A GNU tar pads to at most one 10,240-byte record, so more zero bytes than this
@@ -342,6 +344,11 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
             info = archive.next()
         except tarfile.ReadError as exc:
             return finish(before, None, found_nothing(before, str(exc)))
+        except ReadStopped:
+            # A stop that met a 429: what has left the window is confirmed, so it is
+            # kept, as a stop between reads keeps it.
+            _commit_in_batches(commit, batch, held_from(before), batch_size)
+            raise
         if info is None:
             break
         new, own = concat.fills - rereads - own, concat.fills - rereads
@@ -360,7 +367,7 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
         fetched, settled = concat.fills, len(rescued)
         try:
             info = _settled(concat, archive, info, before, rescued)
-        except UnsettledRead:
+        except (UnsettledRead, ReadStopped):
             # A resume reads the held-back ones again.
             _commit_in_batches(commit, batch, held_from(before), batch_size)
             raise
@@ -373,7 +380,7 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
             fetched = concat.fills
             try:
                 fresh = _tie_break(concat, archive, before, key, theirs, rescued)
-            except UnsettledRead:
+            except (UnsettledRead, ReadStopped):
                 _commit_in_batches(commit, batch, held_from(before), batch_size)
                 raise
             rereads += concat.fills - fetched

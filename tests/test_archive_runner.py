@@ -241,3 +241,18 @@ def test_only_archives_walked_count_towards_what_is_done(caplog):
                clock=lambda: now[0]).run(jobs(4 << 40, 3 << 40, 2 << 40, 1 << 40))
     last = [r.getMessage() for r in caplog.records if r.getMessage().startswith("progress:")][-1]
     assert "4 done, 0 in flight, 0 queued | 1.0 TiB of 1.0 TiB" in last
+
+
+def test_a_stale_walk_counts_as_walked_and_one_that_ends_in_error_does_not(caplog):
+    """Stale: walked through, though its parts changed. Error, twice: left for the next run."""
+    now, ends = [0.0], iter(["stale", "error", "error"])
+
+    def walk(job):
+        now[0] += 60
+        return Done(next(ends))
+
+    with caplog.at_level(logging.INFO, logger="dbaudit"):
+        Runner(walk, Limiter(1), threading.Event(), margin=0, summary_every=1,
+               clock=lambda: now[0]).run(jobs(2 << 40, 1 << 40))
+    last = [r.getMessage() for r in caplog.records if r.getMessage().startswith("progress:")][-1]
+    assert "2 done, 0 in flight, 0 queued | 2.0 TiB of 2.0 TiB" in last

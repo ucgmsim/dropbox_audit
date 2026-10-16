@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from dbaudit import cli
-from dbaudit.api import RateLimited, TransientError
+from dbaudit.api import AuthExpired, RateLimited, TransientError
 from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.auth import AuthError
@@ -772,6 +772,25 @@ def test_a_rate_limited_listing_pauses_every_walk_and_is_asked_again(tmp_path, m
     assert run(db, audit) == 0
     assert {r["state"] for r in rows(db).values()} == {"complete"}
     assert (made[0].rate_limit_events, made[0].concurrency) == (1, 11)
+
+
+def test_the_run_drops_its_token_after_a_401_on_an_archives_listing(tmp_path, monkeypatch):
+    """The listing at an archive's turn uses the run's one provider, and tells it."""
+    dropped = []
+
+    class Tokens:
+        def __init__(self, remote="dropbox", **kwargs):
+            pass
+
+        def invalidate(self):
+            dropped.append(True)
+
+    world, db, audit = three(tmp_path, monkeypatch)
+    world.faults["/R/a"] = [AuthExpired("401 from Dropbox")]
+    monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
+    monkeypatch.setattr("dbaudit.cli.TokenProvider", Tokens)
+    assert run(db, audit) == 0
+    assert dropped == [True] and rows(db)["/R/a"]["state"] == "complete"
 
 
 def test_a_folder_that_cannot_be_listed_is_left_in_error_and_the_run_goes_on(tmp_path,
