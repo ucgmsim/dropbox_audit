@@ -19,7 +19,7 @@ import threading
 
 import pytest
 
-from dbaudit.api import Page, RateLimited, TransientError
+from dbaudit.api import AuthExpired, Page, RateLimited, TransientError
 from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
@@ -685,6 +685,34 @@ def test_index_gives_up_on_a_folder_listing_that_keeps_failing(tmp_path, monkeyp
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert "could not list /d: TransientError" in capsys.readouterr().err
     assert build.calls["n"] == LISTING_ATTEMPTS
+
+
+def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(monkeypatch):
+    """A 401 means Dropbox stopped accepting a token that may still look fresh here:
+    asked again with it, the listing would fail every time."""
+    monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
+    answers = iter([AuthExpired("401 from Dropbox"),
+                    Page(entries=[{".tag": "file", "name": "a.tar"}], cursor=None,
+                         has_more=False)])
+
+    class Lister:
+        def list_folder(self, path, recursive=False):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+    class Tokens:
+        dropped = 0
+
+        def invalidate(self):
+            self.dropped += 1
+
+    tokens = Tokens()
+    limiter = cli.AdaptiveLimiter(rps=1000.0)
+    assert cli._listed(Lister(), limiter, "/d", "a.tar", tokens=tokens) == [
+        {".tag": "file", "name": "a.tar"}]
+    assert tokens.dropped == 1
 
 
 # ---- outcomes ----------------------------------------------------------------

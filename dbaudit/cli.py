@@ -600,9 +600,10 @@ LISTING_ATTEMPTS = 8
 LISTING_BACKOFF = 2.0
 
 
-def _listed(lister, limiter, folder, name, stop=None):
+def _listed(lister, limiter, folder, name, stop=None, tokens=None):
     """`_folder_entries` through the shared limiter, the way the crawl lists, or None if
-    ``stop`` is set first."""
+    ``stop`` is set first. After a 401 the token is dropped from ``tokens`` before the
+    listing is asked again: Dropbox can refuse a token that still looks fresh here."""
     tries = 0
     while stop is None or not stop.is_set():
         try:
@@ -614,6 +615,8 @@ def _listed(lister, limiter, folder, name, stop=None):
         except (AuthExpired, TransientError) as exc:
             if isinstance(exc.__cause__, AuthError):
                 raise exc.__cause__ from None   # no credentials: asking again cannot help
+            if isinstance(exc, AuthExpired) and tokens is not None:
+                tokens.invalidate()
             tries += 1
             if tries >= LISTING_ATTEMPTS:
                 raise
@@ -669,7 +672,7 @@ def _fingerprint(store, row, remote, tokens, limiter, stop=None):
     is listed.
     """
     _, lister = build_lister(remote, tokens)
-    entries = _listed(lister, limiter, row["folder"], row["name"], stop)
+    entries = _listed(lister, limiter, row["folder"], row["name"], stop, tokens)
     if entries is None:
         return None
     by_id = {e["id"]: e for e in entries if e.get("id")}
@@ -1574,7 +1577,7 @@ def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
         for folder, name in ((job.folder, job.name), *job.copies):
             label = f"{folder}/{name}"
             try:
-                entries = _listed(lister, limiter, folder, name, stop)
+                entries = _listed(lister, limiter, folder, name, stop, tokens)
             except PathNotFound as exc:
                 store.log_event(job.archive_id, "gone", f"{label}: {exc}")
                 missed = missed or "gone"

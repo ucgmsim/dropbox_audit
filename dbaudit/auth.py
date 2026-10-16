@@ -68,6 +68,11 @@ def _fetch_account(access_token: str) -> dict:
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=60,
     )
+    if resp.status_code == 429 or resp.status_code >= 500:
+        # Dropbox cannot answer just now, which says nothing of the token: not an
+        # AuthError, which callers take for dead credentials and never ask again.
+        raise RuntimeError(f"users/get_current_account: {resp.status_code} from Dropbox; "
+                           f"ask again later: {resp.text[:300]}")
     if resp.status_code != 200:
         raise AuthError(f"users/get_current_account failed: {resp.status_code} {resp.text[:300]}")
     return resp.json()

@@ -195,3 +195,30 @@ def test_invalidate_forces_a_reread_of_the_token():
     assert provider.access_token() == "t1"       # cached
     provider.invalidate()
     assert provider.access_token() == "t2"
+
+
+class _Answer:
+    def __init__(self, status):
+        self.status_code, self.text = status, "{}"
+
+    def json(self):
+        return {}
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_an_account_lookup_dropbox_cannot_answer_now_is_not_dead_credentials(monkeypatch,
+                                                                             status):
+    """A rate limit or a server error at the start of a run says nothing about the token:
+    called dead credentials, it stopped the run within seconds."""
+    from dbaudit import auth
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: _Answer(status))
+    with pytest.raises(RuntimeError) as raised:
+        auth._fetch_account("tok")
+    assert not isinstance(raised.value, AuthError)
+
+
+def test_an_account_lookup_that_refuses_the_token_is_an_auth_error(monkeypatch):
+    from dbaudit import auth
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: _Answer(401))
+    with pytest.raises(AuthError):
+        auth._fetch_account("tok")
