@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 from .parts import ArchiveSet, ArchiveSetError
 
@@ -42,7 +43,8 @@ class Listing:
 
 def find_candidates(audit_db) -> Listing:
     """Every candidate in the audit database at ``audit_db``, largest first."""
-    audit = sqlite3.connect(f"file:{audit_db}?mode=ro", uri=True)
+    # As a URI, so that a ?, # or % in the path is escaped rather than read as syntax.
+    audit = sqlite3.connect(Path(audit_db).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         return _find(audit)
     finally:

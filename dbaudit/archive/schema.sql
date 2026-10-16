@@ -89,3 +89,5 @@ CREATE TABLE IF NOT EXISTS events (
     kind       TEXT,
     detail     TEXT
 );
+-- stats() reads an archive's run starts as each walk ends.
+CREATE INDEX IF NOT EXISTS events_archive ON events(archive_id, kind);

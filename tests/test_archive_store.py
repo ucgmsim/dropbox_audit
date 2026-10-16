@@ -610,3 +610,13 @@ def test_recheck_leaves_a_stale_archive_to_register(tmp_path):
     assert store.get("a.tar")["state"] == "stale"
     assert [r["hdr_offset"] for r in store.query_members(archive_id)] == [0, 120, 150, 210,
                                                                           420]
+
+
+def test_the_events_of_one_archive_are_found_by_an_index(tmp_path):
+    """stats() reads an archive's run starts as each walk ends: across thousands of
+    archives a scan of every event each time adds up."""
+    store = new_store(tmp_path)
+    plan = " ".join(row[-1] for row in store.connect().execute(
+        "EXPLAIN QUERY PLAN SELECT ts, detail FROM events WHERE archive_id=? "
+        "AND kind='run_start'", (1,)))
+    assert "INDEX events_archive" in plan

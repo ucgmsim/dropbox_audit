@@ -1662,11 +1662,23 @@ def _print_run_plan(jobs, counts, sizes) -> None:
             print(f"    {human_bytes(job.size):>10}  {job.label}")
 
 
+def _no_folder_for(path) -> str | None:
+    """The folder a database at ``path`` would be made in, if that folder does not exist."""
+    folder = os.path.dirname(os.path.abspath(path))
+    return None if os.path.isdir(folder) else folder
+
+
 def cmd_archive_run(args) -> int:
     setup_logging(args.verbose)
     if not 1 <= args.streams <= args.max_streams:
         print(f"error: --streams {args.streams} must lie between 1 and --max-streams "
               f"{args.max_streams}", file=sys.stderr)
+        return 2
+    if args.limit < 0:
+        print(f"error: --limit {args.limit}: give 0 for no limit, or more", file=sys.stderr)
+        return 2
+    if (folder := _no_folder_for(args.db)) is not None:
+        print(f"error: no folder {folder} to hold {args.db}", file=sys.stderr)
         return 2
     if not os.path.exists(args.audit_db):
         print(f"error: no audit database at {args.audit_db}", file=sys.stderr)
@@ -1759,6 +1771,9 @@ def cmd_archive_import(args) -> int:
         print(f"error: {args.source} holds no registered archives", file=sys.stderr)
         return 2
     source.close()
+    if (folder := _no_folder_for(args.db)) is not None:
+        print(f"error: no folder {folder} to hold {args.db}", file=sys.stderr)
+        return 2
     if _other_kind_of_database(args.db):
         print(f"error: {args.db} is not an archive database", file=sys.stderr)
         return 2

@@ -71,3 +71,12 @@ def test_names_that_are_neither_a_tar_nor_a_part_are_counted(tmp_path):
     found = find_candidates(listing(tmp_path, file("/R/a/old.tar.1", 3)))
     assert found.candidates == []
     assert found.other == (1, 3)
+
+
+def test_an_audit_database_at_an_awkward_path_still_opens(tmp_path):
+    """It is opened read-only through a file: URI, which a `?`, `#` or `%` in its path
+    would otherwise cut short or change."""
+    awkward = tmp_path / "odd ?#%"
+    awkward.mkdir()
+    found = find_candidates(listing(awkward, file("/R/a/one.tar", 10)))
+    assert [c.name for c in found.candidates] == ["one.tar"]

@@ -329,6 +329,22 @@ def test_streams_beyond_their_ceiling_are_a_usage_error(tmp_path, monkeypatch):
     assert run(db, str(tmp_path / "no-such.db")) == 2
 
 
+def test_a_negative_limit_is_a_usage_error(tmp_path, monkeypatch):
+    world, db, audit = three(tmp_path, monkeypatch)
+    assert run(db, audit, "--limit", "-1") == 2
+
+
+def test_a_db_in_a_folder_that_does_not_exist_is_a_usage_error(tmp_path, monkeypatch,
+                                                               capsys):
+    """Said plainly, not as a traceback from SQLite."""
+    world, db, audit = three(tmp_path, monkeypatch)
+    missing = str(tmp_path / "nowhere" / "a.db")
+    assert run(missing, audit) == 2
+    assert run(db, audit) == 0
+    assert main(["archive", "import", "--db", missing, "--from", db]) == 2
+    assert capsys.readouterr().err.count("error: no folder") == 2
+
+
 def test_a_db_that_is_not_an_archive_database_is_refused_untouched(tmp_path, monkeypatch):
     """The audit database given as --db by mistake gains no tables."""
     world, db, audit = three(tmp_path, monkeypatch)
