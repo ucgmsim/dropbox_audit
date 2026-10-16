@@ -1005,6 +1005,15 @@ class ArchiveStore:
         if note is not None:
             conn.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)",
                          (f"recheck:{new}", note["value"]))
+        # As `register` does: of the archives of one name in one folder, the latest
+        # registered is what the folder holds, and other content there is stale.
+        latest = conn.execute(
+            "SELECT id, set_hash FROM main.archives WHERE name=? AND folder IS ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1", (row["name"], row["folder"])).fetchone()
+        conn.execute("UPDATE main.archives SET state='stale', detail=? "
+                     "WHERE name=? AND folder IS ? AND set_hash!=? AND id!=?",
+                     (f"superseded by archive {latest['id']}", row["name"], row["folder"],
+                      latest["set_hash"], latest["id"]))
         replaced = f", replacing archive {old['id']}" if old is not None else ""
         self.log_event(new, "import", f"archive {row['id']} of {source}{replaced}")
         return row["id"], new, old["id"] if old is not None else None

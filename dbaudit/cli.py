@@ -1761,7 +1761,7 @@ def cmd_archive_import(args) -> int:
     store = ArchiveStore(args.db)
     try:
         # The source's lock too: a walk still writing to it would be copied half-done.
-        with InstanceLock(f"{args.db}.lock"), InstanceLock(f"{args.source}.lock"):
+        with InstanceLock(args.lock or f"{args.db}.lock"), InstanceLock(f"{args.source}.lock"):
             store.init_schema()
             moved = store.import_from(args.source)
     except LockHeld as exc:
@@ -1782,7 +1782,7 @@ def cmd_archive_forget(args) -> int:
         print(f"error: {args.db} holds no registered archives", file=sys.stderr)
         return 2
     try:
-        with InstanceLock(f"{args.db}.lock"):
+        with InstanceLock(args.lock or f"{args.db}.lock"):
             found = store.query("SELECT id, state, n_members FROM archives "
                                 "WHERE name=? AND folder=?", (args.archive, args.folder))
             if not found:
@@ -2568,6 +2568,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_aimp.add_argument("--db", required=True)
     p_aimp.add_argument("--from", dest="source", required=True,
                         help="the archive database to copy from; it is left as it is")
+    p_aimp.add_argument("--lock", help="the lock the database's run holds, if not DB.lock")
     p_aimp.set_defaults(func=cmd_archive_import)
 
     p_afgt = asub.add_parser(
@@ -2575,6 +2576,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_afgt.add_argument("--db", required=True)
     p_afgt.add_argument("--archive", required=True)
     p_afgt.add_argument("--folder", required=True)
+    p_afgt.add_argument("--lock", help="the lock the database's run holds, if not DB.lock")
     p_afgt.set_defaults(func=cmd_archive_forget)
 
     p_ast = asub.add_parser("status", help="show archive indexing progress")

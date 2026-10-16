@@ -8,7 +8,7 @@ import pytest
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.cli import main
 from dbaudit.lock import InstanceLock
-from tests.archive_fakes import World, build_tar, members
+from tests.archive_fakes import World, build_tar, members, write_parts
 
 
 def three(tmp_path, monkeypatch):
@@ -228,3 +228,39 @@ def test_forget_refuses_an_archive_that_is_not_there_and_a_held_database(tmp_pat
     with InstanceLock(f"{db}.lock"):
         assert forget(db, "one.tar", "/R/a") == 3
     assert set(archives(db)) == {"/R/a", "/R/b", "/R/c"}
+
+
+@pytest.mark.parametrize("imported", ["newer", "older"])
+def test_import_leaves_only_the_latest_content_of_one_name_in_one_folder(tmp_path, imported):
+    """As register does: of the archives of one name in one folder, the latest registered
+    is what the folder holds, and other content there is stale -- whichever database held
+    which."""
+    folder = tmp_path / "parts"
+    folder.mkdir()
+    first, second = str(tmp_path / "first.db"), str(tmp_path / "second.db")
+    for db, seed in ((first, 1), (second, 2)):            # one name, one folder, new content
+        for old in folder.iterdir():
+            old.unlink()
+        write_parts(folder, build_tar(members(5, seed)), 1 << 20)
+        assert main(["archive", "register", "--db", db, "--local-dir", str(folder),
+                     "--name", "a.tar"]) == 0
+    target, source = (first, second) if imported == "newer" else (second, first)
+    assert db_import(target, source) == 0
+    older, latest = ArchiveStore(target).connect().execute(
+        "SELECT id, state, detail FROM archives ORDER BY created_at").fetchall()
+    assert (older["state"], older["detail"]) == ("stale", f"superseded by archive "
+                                                          f"{latest['id']}")
+    assert latest["state"] != "stale"
+
+
+def test_import_and_forget_take_the_lock_a_run_was_given(tmp_path, monkeypatch):
+    """A run started with --lock PATH holds PATH, not DB.lock: import and forget take
+    --lock too, so they wait for that run rather than write beside it."""
+    world, audit = three(tmp_path, monkeypatch)
+    db, other = str(tmp_path / "a.db"), str(tmp_path / "b.db")
+    assert run(db, audit) == 0 and run(other, audit) == 0
+    lock = str(tmp_path / "elsewhere.lock")
+    with InstanceLock(lock):
+        assert main(["archive", "import", "--db", db, "--from", other, "--lock", lock]) == 3
+        assert main(["archive", "forget", "--db", db, "--archive", "one.tar", "--folder",
+                     "/R/a", "--lock", lock]) == 3
