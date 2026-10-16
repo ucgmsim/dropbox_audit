@@ -25,6 +25,11 @@ from dbaudit.units import human_bytes, human_duration
 
 log = logging.getLogger("dbaudit")
 
+#: How a walk ends having read its archive: only these count towards the TiB done, and
+#: the pace. Gone, refused and done archives were not walked here; stopped and error ones
+#: are left for the next run.
+WALKED = frozenset({"complete", "truncated", "corrupt", "unsupported", "stale"})
+
 
 @dataclass
 class Job:
@@ -78,6 +83,7 @@ class Runner:
 
     def run(self, jobs) -> Report:
         waiting = deque(sorted(jobs, key=lambda job: -job.size))
+        estimate = {job.key: job.chains for job in waiting}     # a second try starts here
         flying = {}                         # job key -> (job, when it started)
         finished = queue.Queue()
         outcomes, bugs, started = Counter(), 0, 0
@@ -86,6 +92,7 @@ class Runner:
         last_summary, failed = started_at, False
 
         def work(job):
+            done = Done("error", bug=True)  # unless the walk returns: even SystemExit reports
             try:
                 done = self.walk(job)
             except Exception as exc:
@@ -95,8 +102,8 @@ class Runner:
                         self.on_bug(job, exc)
                     except Exception:
                         log.exception("%s: could not record the failure", job.label)
-                done = Done("error", bug=True)
-            finished.put((job, done))
+            finally:
+                finished.put((job, done))
 
         while waiting or flying:
             if self.limit and started >= self.limit:
@@ -129,13 +136,13 @@ class Runner:
                         log.error("stopping: %d walks failed unexpectedly", bugs)
                         self.stop.set()
                 if done.state == "error" and not job.retried and not done.bug:
-                    job.retried = True
+                    job.retried, job.chains = True, estimate[job.key]
                     waiting.append(job)
                     log.info("%s: error after %s; trying it once more at the end of the "
                              "queue", job.label, took)
                 else:
                     outcomes[done.state] += 1
-                    if done.state != "stopped":
+                    if done.state in WALKED:
                         done_size += job.size
                         recent.append((self.clock(), job.size))
                     log.info("%s: %s (%s members, %s requests, %s)", job.label, done.state,

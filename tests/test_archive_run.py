@@ -658,6 +658,22 @@ def test_the_next_archive_starts_while_another_finishes_its_last_chain(tmp_path,
     assert order.index(("start", "b.tar")) < order.index(("end", "a.tar"))
 
 
+def test_an_archive_between_rounds_still_counts_as_one_chain(tmp_path, monkeypatch):
+    """Once its workers have all finished it is still in flight -- joining, auditing,
+    listing its folder again -- and uses a stream for that."""
+    world, db, audit = three(tmp_path, monkeypatch)
+    made, real = [], cli._run_jobs
+
+    def run_jobs(*args):
+        found = real(*args)
+        made.extend(found[0])
+        return found
+
+    monkeypatch.setattr("dbaudit.cli._run_jobs", run_jobs)
+    assert run(db, audit) == 0
+    assert len(made) == 3 and all(job.chains >= 1 for job in made)
+
+
 def test_a_run_goes_on_with_a_walk_from_its_cursors_not_from_the_start(tmp_path, monkeypatch):
     """What the switch rests on: a walk half done in the database goes on from where it
     stopped. A walk from scratch would read the first header again."""

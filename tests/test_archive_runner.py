@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+import pytest
+
 from dbaudit.archive.runner import Done, Job, Runner
 
 
@@ -116,6 +118,39 @@ def test_the_third_unexpected_failure_stops_the_run():
     assert report.outcomes == {"error": 3} and report.started == 3
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_walk_that_dies_of_more_than_an_exception_still_reports_back():
+    """SystemExit, say: unreported, the archive would stay in flight and the run would wait
+    for it for ever."""
+    walking = []
+
+    def walk(job):
+        walking.append(threading.current_thread())
+        raise SystemExit(1)
+
+    result = {}
+    waiting = threading.Thread(target=lambda: result.update(report=run(walk, jobs(10))),
+                               daemon=True)
+    waiting.start()
+    waiting.join(timeout=10)
+    assert not waiting.is_alive()
+    assert result["report"].outcomes == {"error": 1}
+    walking[0].join(timeout=10)             # it dies here, with its warning, not in the next test
+
+
+def test_an_archive_tried_again_counts_as_its_estimate_until_its_walk_reports():
+    """Its last walk ended reporting one chain; the second begins wanting its estimate."""
+    seen = []
+
+    def walk(job):
+        seen.append(job.chains)
+        job.chains = 1                      # as a walk reports while its chains finish
+        return Done("error" if len(seen) == 1 else "complete")
+
+    run(walk, jobs(10, chains=3), concurrency=8, margin=0)
+    assert seen == [3, 3]
+
+
 def test_a_walk_that_reports_a_bug_counts_as_one_and_is_not_retried():
     tries = []
     report = run(lambda job: tries.append(job.label) or Done("error", bug=True),
@@ -190,3 +225,19 @@ def test_each_archive_logs_its_time_and_the_etas_divide_what_is_left_by_the_pace
     first = next(m for m in messages if m.startswith("progress:"))
     assert "1 done, 0 in flight, 2 queued | 3.0 TiB of 6.0 TiB" in first
     assert "eta 2h 0m by count, 1h 0m by size" in first
+
+
+def test_only_archives_walked_count_towards_what_is_done(caplog):
+    """An archive that had gone, had lost a part, or held content walked before was never
+    walked here: its size is neither done nor left, and the pace leaves it out."""
+    now, ends = [0.0], iter(["gone", "refused", "done", "complete"])
+
+    def walk(job):
+        now[0] += 60
+        return Done(next(ends))
+
+    with caplog.at_level(logging.INFO, logger="dbaudit"):
+        Runner(walk, Limiter(1), threading.Event(), margin=0, summary_every=1,
+               clock=lambda: now[0]).run(jobs(4 << 40, 3 << 40, 2 << 40, 1 << 40))
+    last = [r.getMessage() for r in caplog.records if r.getMessage().startswith("progress:")][-1]
+    assert "4 done, 0 in flight, 0 queued | 1.0 TiB of 1.0 TiB" in last
