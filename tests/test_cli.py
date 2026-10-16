@@ -89,3 +89,17 @@ def test_report_calls_a_crawl_with_failed_shards_incomplete(tmp_path, capsys, mo
     monkeypatch.setattr("dbaudit.cli._space_usage", offline)
     main(["report", "--db", str(db)])
     assert "incomplete" in capsys.readouterr().out
+
+
+def test_init_says_when_dropbox_cannot_look_up_the_account_just_now(tmp_path, monkeypatch,
+                                                                    capsys):
+    """A 429 or a server error on the account lookup is not a listing that failed."""
+    class Tokens:
+        def account(self):
+            raise RuntimeError("users/get_current_account: 429 from Dropbox; ask again later")
+
+    monkeypatch.setattr("dbaudit.cli.free_bytes", lambda path: 1 << 50)
+    monkeypatch.setattr("dbaudit.cli.build_lister", lambda remote, tokens=None: (Tokens(), None))
+    assert main(["init", "--db", str(tmp_path / "a.db"), "--root", "/R"]) == 2
+    err = capsys.readouterr().err
+    assert "could not look up the account" in err and "could not list" not in err

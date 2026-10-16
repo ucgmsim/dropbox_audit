@@ -1,6 +1,7 @@
 """`archive import` and `archive forget`: walks moved from one database into another,
 and an archive dropped so that the next run walks it from scratch."""
 
+import shutil
 import sqlite3
 
 import pytest
@@ -264,3 +265,49 @@ def test_import_and_forget_take_the_lock_a_run_was_given(tmp_path, monkeypatch):
         assert main(["archive", "import", "--db", db, "--from", other, "--lock", lock]) == 3
         assert main(["archive", "forget", "--db", db, "--archive", "one.tar", "--folder",
                      "/R/a", "--lock", lock]) == 3
+
+
+def test_import_keeps_the_live_content_of_a_folder_that_went_back(tmp_path):
+    """A fourth part appears, then goes again: X, then Y, then X once more. register leaves
+    X live and Y stale, though X was registered first; an import must agree."""
+    folder = tmp_path / "parts"
+    folder.mkdir()
+    data = build_tar(members(40, 7))
+    write_parts(folder, data, len(data) // 4 + 1)
+    last = sorted(folder.iterdir())[-1]
+    aside = tmp_path / last.name
+    db, fresh = str(tmp_path / "a.db"), str(tmp_path / "fresh.db")
+    for move in ((last, aside), (aside, last), (last, aside)):  # X: 3 parts, Y: 4, X again
+        shutil.move(*move)
+        assert main(["archive", "register", "--db", db, "--local-dir", str(folder),
+                     "--name", "a.tar"]) == 0
+    assert db_import(fresh, db) == 0
+    states = {row["n_parts"]: row["state"] for row in ArchiveStore(fresh).connect().execute(
+        "SELECT n_parts, state FROM archives")}
+    assert states[3] != "stale" and states[4] == "stale"
+
+
+def test_import_waits_for_a_source_run_started_with_its_own_lock(tmp_path, monkeypatch):
+    world, audit = three(tmp_path, monkeypatch)
+    db, other = str(tmp_path / "a.db"), str(tmp_path / "b.db")
+    assert run(db, audit) == 0 and run(other, audit) == 0
+    lock = str(tmp_path / "elsewhere.lock")
+    with InstanceLock(lock):
+        assert main(["archive", "import", "--db", db, "--from", other,
+                     "--from-lock", lock]) == 3
+
+
+def test_a_lock_in_a_folder_that_does_not_exist_is_a_usage_error(tmp_path, monkeypatch,
+                                                                 capsys):
+    """Said plainly, not as a traceback from opening the lock file."""
+    world, audit = three(tmp_path, monkeypatch)
+    db, other = str(tmp_path / "a.db"), str(tmp_path / "b.db")
+    assert run(db, audit) == 0 and run(other, audit) == 0
+    lock = str(tmp_path / "nowhere" / "x.lock")
+    assert run(db, audit, "--lock", lock) == 2
+    assert main(["archive", "index", "--db", db, "--archive", "one.tar", "--lock", lock]) == 2
+    assert main(["archive", "import", "--db", db, "--from", other, "--lock", lock]) == 2
+    assert main(["archive", "import", "--db", db, "--from", other, "--from-lock", lock]) == 2
+    assert main(["archive", "forget", "--db", db, "--archive", "one.tar", "--folder", "/R/a",
+                 "--lock", lock]) == 2
+    assert capsys.readouterr().err.count("error: no folder") == 5

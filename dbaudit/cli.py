@@ -185,10 +185,15 @@ def cmd_init(args) -> int:
     try:
         tokens, lister = build_lister(args.remote)
         account = tokens.account()
-        page = lister.list_folder(root, recursive=False)
     except AuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        print(f"error: could not look up the account: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 2
+    try:
+        page = lister.list_folder(root, recursive=False)
     except Exception as exc:
         print(f"error: could not list {root}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -1099,6 +1104,8 @@ def _join(store, archive_id):
 
 def cmd_archive_index(args) -> int:
     setup_logging(args.verbose)
+    if _no_folder(args.lock):
+        return 2
     store = _open_archive_store(args.db)
     if store is None:
         print(f"error: {args.db} holds no registered archives; "
@@ -1662,10 +1669,15 @@ def _print_run_plan(jobs, counts, sizes) -> None:
             print(f"    {human_bytes(job.size):>10}  {job.label}")
 
 
-def _no_folder_for(path) -> str | None:
-    """The folder a database at ``path`` would be made in, if that folder does not exist."""
-    folder = os.path.dirname(os.path.abspath(path))
-    return None if os.path.isdir(folder) else folder
+def _no_folder(*paths) -> bool:
+    """Say so, and return True, if any of ``paths`` -- a database or a lock a command
+    would create -- lies in a folder that does not exist."""
+    for path in filter(None, paths):
+        folder = os.path.dirname(os.path.abspath(path))
+        if not os.path.isdir(folder):
+            print(f"error: no folder {folder} to hold {path}", file=sys.stderr)
+            return True
+    return False
 
 
 def cmd_archive_run(args) -> int:
@@ -1677,8 +1689,7 @@ def cmd_archive_run(args) -> int:
     if args.limit < 0:
         print(f"error: --limit {args.limit}: give 0 for no limit, or more", file=sys.stderr)
         return 2
-    if (folder := _no_folder_for(args.db)) is not None:
-        print(f"error: no folder {folder} to hold {args.db}", file=sys.stderr)
+    if _no_folder(args.db, args.lock):
         return 2
     if not os.path.exists(args.audit_db):
         print(f"error: no audit database at {args.audit_db}", file=sys.stderr)
@@ -1771,8 +1782,7 @@ def cmd_archive_import(args) -> int:
         print(f"error: {args.source} holds no registered archives", file=sys.stderr)
         return 2
     source.close()
-    if (folder := _no_folder_for(args.db)) is not None:
-        print(f"error: no folder {folder} to hold {args.db}", file=sys.stderr)
+    if _no_folder(args.db, args.lock, args.from_lock):
         return 2
     if _other_kind_of_database(args.db):
         print(f"error: {args.db} is not an archive database", file=sys.stderr)
@@ -1783,7 +1793,8 @@ def cmd_archive_import(args) -> int:
     store = ArchiveStore(args.db)
     try:
         # The source's lock too: a walk still writing to it would be copied half-done.
-        with InstanceLock(args.lock or f"{args.db}.lock"), InstanceLock(f"{args.source}.lock"):
+        with InstanceLock(args.lock or f"{args.db}.lock"), \
+                InstanceLock(args.from_lock or f"{args.source}.lock"):
             store.init_schema()
             moved = store.import_from(args.source)
     except LockHeld as exc:
@@ -1799,6 +1810,8 @@ def cmd_archive_import(args) -> int:
 
 
 def cmd_archive_forget(args) -> int:
+    if _no_folder(args.lock):
+        return 2
     store = _open_archive_store(args.db)
     if store is None:
         print(f"error: {args.db} holds no registered archives", file=sys.stderr)
@@ -2591,6 +2604,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_aimp.add_argument("--from", dest="source", required=True,
                         help="the archive database to copy from; it is left as it is")
     p_aimp.add_argument("--lock", help="the lock the database's run holds, if not DB.lock")
+    p_aimp.add_argument("--from-lock", dest="from_lock",
+                        help="the lock the source's run holds, if not SOURCE.lock")
     p_aimp.set_defaults(func=cmd_archive_import)
 
     p_afgt = asub.add_parser(

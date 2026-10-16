@@ -1010,10 +1010,13 @@ class ArchiveStore:
             conn.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)",
                          (f"recheck:{new}", note["value"]))
         # As `register` does: of the archives of one name in one folder, the latest
-        # registered is what the folder holds, and other content there is stale.
+        # registered is what the folder holds, and other content there is stale. One
+        # already live stands first: register keeps the time a content was first seen,
+        # so a folder that went back to it is live under the older time.
         latest = conn.execute(
             "SELECT id, set_hash FROM main.archives WHERE name=? AND folder IS ? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1", (row["name"], row["folder"])).fetchone()
+            "ORDER BY state='stale', created_at DESC, id DESC LIMIT 1",
+            (row["name"], row["folder"])).fetchone()
         conn.execute("UPDATE main.archives SET state='stale', detail=? "
                      "WHERE name=? AND folder IS ? AND set_hash!=? AND id!=?",
                      (f"superseded by archive {latest['id']}", row["name"], row["folder"],
