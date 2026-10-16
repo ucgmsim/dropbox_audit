@@ -1214,6 +1214,34 @@ def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
 
 
+def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(tmp_path, monkeypatch):
+    """The audit reads every row under a repeated path again -- up to AUDIT_LIMIT, a couple
+    of thousand requests -- so a stop must reach it between rows. Stopped, the archive has
+    no verdict yet: it is not `error`, and the next run goes straight to the audit."""
+    data = build_tar([("run/same.bin", bytes([i]) * 700) for i in range(30)])
+    source = local_archive(tmp_path, data, part_size=len(data))
+    db = str(tmp_path / "archives.db")
+    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    stop, audited, real_read = threading.Event(), [], cli.read_member
+
+    def read_member(concat, offset):           # only the audit reads members this way
+        audited.append(offset)
+        stop.set()                             # a signal, as the audit begins
+        return real_read(concat, offset)
+
+    monkeypatch.setattr("dbaudit.cli.read_member", read_member)
+    store = ArchiveStore(db)
+    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
+                                          "a.tar"])
+    walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
+    assert walked.stopped and len(audited) == 1
+    assert store.get("a.tar")["state"] == "walking"
+    monkeypatch.undo()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    assert store.get("a.tar")["n_members"] == 30
+    assert event_count(db, store.get("a.tar")["id"], "audit") == 1
+
+
 def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(tmp_path, monkeypatch,
                                                                   capsys):
     """A path truly in the archive twice, and the audit's own read of one copy comes

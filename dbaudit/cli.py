@@ -992,6 +992,9 @@ def _audit_repeated_paths(run) -> list[int]:
     What it cannot see: a copied header whose path is recorded nowhere else -- a member
     of a tarball stored inside the archive, or a long-named member's header read
     without its long-name block.
+
+    A stop reaches it before every read, and raises `_Stopped`: the walk then ends with no
+    verdict, and the next run audits again.
     """
     store, archive_id = run.store, run.archive_id
     rows = store.repeated_paths(archive_id, AUDIT_LIMIT + 1)
@@ -1008,6 +1011,8 @@ def _audit_repeated_paths(run) -> list[int]:
     concat = ConcatFile(run.archive_set, reader, window_min=run.args.window_min,
                         window_max=run.args.window_max)
     def disagrees(row):
+        if run.stopping():
+            raise _Stopped("stopped during the audit")
         return _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)
 
     def confirmed(row):
@@ -1270,6 +1275,8 @@ def _walk_archive(args, store, row, tokens, limiter, stop, check_before=True,
         if kind == _OUTCOME and payload.state == "complete":
             try:
                 redo = _audit_repeated_paths(run)
+            except _Stopped:
+                break                     # no verdict yet, and no failure: audited next run
             except Exception as exc:
                 audit_failed = (f"could not read again the rows under repeated paths: "
                                 f"{type(exc).__name__}: {exc}")
