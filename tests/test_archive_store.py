@@ -315,6 +315,19 @@ def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path)
     assert stats["covered"] == 150  # 100 (seg0, whole span) + 50 (seg1, 150 - 100)
 
 
+def test_a_segment_ended_from_a_start_not_yet_confirmed_covers_only_what_it_walked(tmp_path):
+    """A scan can find a false start, walk a few headers and end `corrupt`: the join will
+    walk its part again from the exit before it. Until a segment's start is joined to the
+    chain, it covers what it walked, not its whole part."""
+    store, archive_id, _ = registered(tmp_path, count=3)
+    segments = store.segments(archive_id)
+    seg0, seg1 = segments[0]["id"], segments[1]["id"]
+    store.finish_segment(seg0, WalkResult("crossed", 100, 1, ""))   # joined: [0, 100)
+    store.set_segment_start(seg1, 110)                              # a scan's start
+    store.finish_segment(seg1, WalkResult("corrupt", 130, 2, "bad header"))
+    assert store.stats(archive_id)["covered"] == 100 + 30           # not 100 + 100
+
+
 # ---- Tests added by fix round 1 (task review Important findings 1 & 2, plus minor gaps) ----
 
 

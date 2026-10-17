@@ -440,21 +440,31 @@ class ArchiveStore:
         *confirmed* frontier) only moves when a segment becomes `joined`. Every
         term is clamped at 0, in case a segment's cursor sits before its own scan
         start (it should not, but this reports rather than crashes if it ever did).
+
+        A finished segment covers its whole part only once that is settled: its start
+        is joined to the chain, or the archive ended before it. One that finished from
+        a start not yet joined covers what it walked, to where it ended: a scan's false
+        start can end `corrupt` a few headers in, and the join walks that part again.
         """
         total_size = conn.execute(
             "SELECT total_size FROM archives WHERE id=?", (archive_id,)).fetchone()[0]
         segments = conn.execute(
-            "SELECT scan_from, stop_at, first_header, cursor_offset, state "
-            "FROM segments WHERE archive_id=?", (archive_id,)).fetchall()
+            "SELECT scan_from, stop_at, first_header, cursor_offset, exit_offset, joined, "
+            "state FROM segments WHERE archive_id=?", (archive_id,)).fetchall()
         covered = 0
         for seg in segments:
             span_end = seg["stop_at"] if seg["stop_at"] is not None else total_size
-            if seg["state"] in FINISHED_SEGMENT_STATES:
-                covered += max(span_end - seg["scan_from"], 0)
+            if seg["state"] == "beyond" or (seg["state"] in FINISHED_SEGMENT_STATES
+                                            and seg["joined"]):
+                reached = span_end
+            elif seg["state"] in FINISHED_SEGMENT_STATES:
+                reached = seg["exit_offset"]
             elif seg["cursor_offset"] is not None:
-                covered += max(min(seg["cursor_offset"], span_end) - seg["scan_from"], 0)
-            elif seg["first_header"] is not None:
-                covered += max(min(seg["first_header"], span_end) - seg["scan_from"], 0)
+                reached = seg["cursor_offset"]
+            else:
+                reached = seg["first_header"]
+            if reached is not None:
+                covered += max(min(reached, span_end) - seg["scan_from"], 0)
         return covered
 
     def build_indexes(self, archive_id) -> None:
