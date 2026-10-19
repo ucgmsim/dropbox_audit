@@ -15,9 +15,9 @@ once the chain before it walks into exactly the offset it started from.
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import hashlib
+import inspect
 import io
 import logging
 import os
@@ -35,6 +35,10 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Annotated, NoReturn
+
+import typer
 
 from .api import ApiError, AuthExpired, HttpLister, PathNotFound, RateLimited, TransientError
 from .archive.candidates import find_candidates
@@ -118,7 +122,7 @@ DEFAULT_SPLIT_DEPTH = 6
 DEFAULT_QUEUE_TARGET = None  # => 2 x workers; see Crawler._should_split
 # `tree`: at 1 GiB the October 2026 listing made a page of about 51k rows, and 100,000
 # rows keeps a page to roughly 50 MB.
-DEFAULT_TREE_MIN_SIZE = 1 << 30
+DEFAULT_TREE_MIN_SIZE = "1GiB"
 DEFAULT_TREE_MAX_ROWS = 100_000
 
 
@@ -137,10 +141,10 @@ SIZE_UNITS = {"": 1, "b": 1, "kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30, "ti
 
 
 def parse_size(text: str) -> int:
-    """'1GiB', '100MiB' or a plain byte count, for argparse."""
+    """'1GiB', '100MiB' or a plain byte count, for --min-size."""
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGT]iB|B)?\s*", text, re.IGNORECASE)
     if not match:
-        raise argparse.ArgumentTypeError(
+        raise typer.BadParameter(
             f"{text!r} is not a size: give a byte count or a number with B, KiB, MiB, GiB "
             "or TiB")
     number, unit = match.groups()
@@ -2468,190 +2472,266 @@ def cmd_archive_cat(args) -> int:
                 pass
 
 
-# ---- argument parsing ---------------------------------------------------
+# ---- the command line -----------------------------------------------------
+#
+# Typer reads the options. Each command gathers them into one arguments object, the shape
+# argparse gave the bodies, and exits with what its body returns.
+
+app = typer.Typer(add_completion=False, no_args_is_help=True,
+                  help="Read-only audit of a Dropbox subtree.")
+archive_app = typer.Typer(no_args_is_help=True, help="index what is inside tar archives")
+app.add_typer(archive_app, name="archive")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="dbaudit", description="Read-only audit of a Dropbox subtree."
-    )
-    parser.add_argument("--verbose", action="store_true")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    p_init = sub.add_parser("init", help="create the database and seed the root shard")
-    p_init.add_argument("--db", required=True)
-    p_init.add_argument("--root", required=True, help="e.g. /TeamSpace")
-    p_init.add_argument("--remote", default="dropbox", help="rclone remote to borrow credentials from")
-    p_init.add_argument("--min-free-gb", type=float, default=30.0)
-    p_init.set_defaults(func=cmd_init)
-
-    p_run = sub.add_parser("run", help="crawl until finished; safe to interrupt and re-run")
-    p_run.add_argument("--db", required=True)
-    p_run.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
-    p_run.add_argument("--rps", type=float, default=DEFAULT_RPS,
-                       help="request rate to start at")
-    p_run.add_argument("--max-rps", type=float, default=DEFAULT_MAX_RPS,
-                       help="ceiling the request rate climbs to while Dropbox allows it")
-    p_run.add_argument("--split-depth", type=int, default=DEFAULT_SPLIT_DEPTH,
-                       help="max levels a shard may be split into children to keep "
-                            "workers busy (a bound, not a target; a listing Dropbox "
-                            "keeps failing is split regardless)")
-    p_run.add_argument("--queue-target", type=int, default=DEFAULT_QUEUE_TARGET,
-                       help="shards to keep pending (default: 2 x workers). Raising "
-                            "this splits more aggressively and measured much slower")
-    p_run.add_argument("--max-shards", type=int, default=2_000_000)
-    p_run.add_argument("--progress-interval", type=float, default=30.0)
-    p_run.add_argument("--no-index", action="store_true",
-                       help="skip building analysis indexes when the crawl completes")
-    p_run.add_argument("--log", help="also write logs to this file")
-    p_run.add_argument("--lock", help="lockfile path (default: <db>.lock)")
-    p_run.set_defaults(func=cmd_run)
-
-    p_status = sub.add_parser("status", help="show progress")
-    p_status.add_argument("--db", required=True)
-    p_status.set_defaults(func=cmd_status)
-
-    p_verify = sub.add_parser(
-        "verify", help="re-walk a subtree with rclone and diff it against the database")
-    p_verify.add_argument("--db", required=True)
-    p_verify.add_argument("path", nargs="?", help="subtree to check (default: the crawl root)")
-    p_verify.set_defaults(func=cmd_verify)
-
-    p_report = sub.add_parser("report", help="storage-reduction report")
-    p_report.add_argument("--db", required=True)
-    p_report.add_argument("--top", type=int, default=25)
-    p_report.add_argument("--hotspot-min-files", type=int, default=100_000)
-    p_report.add_argument("--hotspot-max-mean", type=int, default=65536)
-    p_report.set_defaults(func=cmd_report)
-
-    p_export = sub.add_parser("export", help="write the reports as CSV")
-    p_export.add_argument("--db", required=True)
-    p_export.add_argument("--out", required=True)
-    p_export.set_defaults(func=cmd_export)
-
-    p_index = sub.add_parser("index", help="build analysis indexes")
-    p_index.add_argument("--db", required=True)
-    p_index.set_defaults(func=cmd_index)
-
-    p_tree = sub.add_parser("tree", help="write a browsable HTML page of where the space goes")
-    p_tree.add_argument("--db", required=True)
-    p_tree.add_argument("--out", required=True, help="the HTML file to write")
-    p_tree.add_argument("--subtree", help="cover this folder instead of the whole crawl root")
-    p_tree.add_argument("--min-size", type=parse_size, default=DEFAULT_TREE_MIN_SIZE,
-                        help="fold entries smaller than this, e.g. 100MiB (default 1GiB)")
-    p_tree.add_argument("--max-rows", type=int, default=DEFAULT_TREE_MAX_ROWS,
-                        help="double --min-size until the page has at most this many rows")
-    p_tree.set_defaults(func=cmd_tree)
-
-    p_archive = sub.add_parser("archive", help="index what is inside tar archives")
-    asub = p_archive.add_subparsers(dest="archive_cmd", required=True)
-
-    p_reg = asub.add_parser("register", help="record an archive, its parts and its segments")
-    p_reg.add_argument("--db", required=True)
-    p_reg.add_argument("--name", required=True, help="the archive's own name, e.g. big.tar")
-    where = p_reg.add_mutually_exclusive_group(required=True)
-    where.add_argument("--folder", help="Dropbox folder holding the parts")
-    where.add_argument("--local-dir", help="local directory holding the parts")
-    p_reg.add_argument("--remote", default="dropbox")
-    p_reg.set_defaults(func=cmd_archive_register)
-
-    p_idx = asub.add_parser("index", help="walk the header chains; safe to interrupt and re-run")
-    p_idx.add_argument("--db", required=True)
-    p_idx.add_argument("--archive", required=True)
-    p_idx.add_argument("--remote", default="dropbox")
-    p_idx.add_argument("--workers", type=int, default=ARCHIVE_WORKERS)
-    p_idx.add_argument("--rps", type=float, default=DEFAULT_RPS,
-                       help="request rate to start at")
-    # Measured in Task 1: a request costs 1.60 s + 0.044 s/MiB, so the cap is generous
-    # and the floor is small because it is paid on every jump.
-    p_idx.add_argument("--window-min", type=int, default=WINDOW_MIN)
-    p_idx.add_argument("--window-max", type=int, default=WINDOW_MAX)
-    p_idx.add_argument("--batch", type=int, default=2000)
-    p_idx.add_argument("--max-batches", type=int, default=0, help="stop early; 0 means no limit")
-    p_idx.add_argument("--recheck", action="store_true",
-                       help="ask a corrupt, truncated or unsupported verdict again: walk the "
-                            "chain again from the start of the segment before it -- and, "
-                            "asked again about the same verdict, a segment further back "
-                            "each time")
-    p_idx.add_argument("--lock")
-    p_idx.set_defaults(func=cmd_archive_index)
-
-    p_arun = asub.add_parser(
-        "run", help="walk every archive still to be walked, many at once; safe to "
-                    "interrupt and re-run")
-    p_arun.add_argument("--db", required=True)
-    p_arun.add_argument("--audit-db", required=True,
-                        help="the audit database whose tar archives to walk")
-    p_arun.add_argument("--remote", default="dropbox")
-    p_arun.add_argument("--streams", type=int, default=12, help="streams to start at")
-    p_arun.add_argument("--max-streams", type=int, default=24,
-                        help="most streams to climb to while Dropbox allows")
-    p_arun.add_argument("--workers", type=int, default=ARCHIVE_WORKERS,
-                        help="most chains one archive may have")
-    p_arun.add_argument("--limit", type=int, default=0,
-                        help="most archives to start; 0 means no limit")
-    p_arun.add_argument("--dry-run", action="store_true",
-                        help="print what would be walked, without contacting Dropbox")
-    p_arun.add_argument("--window-min", type=int, default=WINDOW_MIN)
-    p_arun.add_argument("--window-max", type=int, default=WINDOW_MAX)
-    p_arun.add_argument("--batch", type=int, default=2000)
-    p_arun.add_argument("--lock")
-    p_arun.set_defaults(func=cmd_archive_run, max_batches=0)
-
-    p_aimp = asub.add_parser(
-        "import", help="copy every archive of another archive database into this one")
-    p_aimp.add_argument("--db", required=True)
-    p_aimp.add_argument("--from", dest="source", required=True,
-                        help="the archive database to copy from; it is left as it is")
-    p_aimp.add_argument("--lock", help="the lock the database's run holds, if not DB.lock")
-    p_aimp.add_argument("--from-lock", dest="from_lock",
-                        help="the lock the source's run holds, if not SOURCE.lock")
-    p_aimp.set_defaults(func=cmd_archive_import)
-
-    p_afgt = asub.add_parser(
-        "forget", help="drop an archive and all its rows, so the next run walks it afresh")
-    p_afgt.add_argument("--db", required=True)
-    p_afgt.add_argument("--archive", required=True)
-    p_afgt.add_argument("--folder", required=True)
-    p_afgt.add_argument("--lock", help="the lock the database's run holds, if not DB.lock")
-    p_afgt.set_defaults(func=cmd_archive_forget)
-
-    p_ast = asub.add_parser("status", help="show archive indexing progress")
-    p_ast.add_argument("--db", required=True)
-    p_ast.add_argument("--archive")
-    p_ast.set_defaults(func=cmd_archive_status)
-
-    p_areport = asub.add_parser("report", help="rollups over one archive's manifest")
-    p_areport.add_argument("--db", required=True)
-    p_areport.add_argument("--archive", required=True)
-    p_areport.add_argument("--top", type=int, default=25)
-    p_areport.set_defaults(func=cmd_archive_report)
-
-    p_aexport = asub.add_parser(
-        "export", help="write one archive's manifest and rollups as CSV")
-    p_aexport.add_argument("--db", required=True)
-    p_aexport.add_argument("--archive", required=True)
-    p_aexport.add_argument("--out", required=True)
-    p_aexport.set_defaults(func=cmd_archive_export)
-
-    p_cat = asub.add_parser(
-        "cat", help="extract one member's bytes by path, in the fewest range reads")
-    p_cat.add_argument("--db", required=True)
-    p_cat.add_argument("--archive", required=True)
-    p_cat.add_argument("--member", required=True, help="the member's path inside the archive")
-    p_cat.add_argument("--offset", type=int, default=None,
-                       help="disambiguate a path matching more than one member, by "
-                            "hdr_offset (a bare ambiguous cat prints the candidates)")
-    p_cat.add_argument("--out", help="write to this file instead of stdout")
-    p_cat.add_argument("--remote", default="dropbox")
-    p_cat.set_defaults(func=cmd_archive_cat)
-
-    return parser
+def _run(ctx: typer.Context, body, params: dict) -> NoReturn:
+    options = {name: value for name, value in params.items() if name != "ctx"}
+    verbose = ctx.find_root().params["verbose"]
+    raise typer.Exit(body(SimpleNamespace(**options, verbose=verbose)))
 
 
-def main(argv=None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if not hasattr(args, "verbose"):
-        args.verbose = False
-    return args.func(args)
+def arguments(command, **given) -> SimpleNamespace:
+    """What `command`'s body would get: its defaults, with `given` over them."""
+    defaults = {name: parameter.default
+                for name, parameter in inspect.signature(command).parameters.items()
+                if parameter.default is not inspect.Parameter.empty}
+    return SimpleNamespace(**{**defaults, **given, "verbose": False})
+
+
+@app.callback()
+def _options(verbose: Annotated[bool, typer.Option("--verbose")] = False) -> None:
+    pass
+
+
+@app.command("init", help="create the database and seed the root shard")
+def init_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        root: Annotated[str, typer.Option(help="e.g. /TeamSpace")],
+        remote: Annotated[str, typer.Option(
+            help="rclone remote to borrow credentials from")] = "dropbox",
+        min_free_gb: Annotated[float, typer.Option()] = 30.0) -> None:
+    _run(ctx, cmd_init, locals())
+
+
+@app.command("run", help="crawl until finished; safe to interrupt and re-run")
+def run_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        workers: Annotated[int, typer.Option()] = DEFAULT_WORKERS,
+        rps: Annotated[float, typer.Option(help="request rate to start at")] = DEFAULT_RPS,
+        max_rps: Annotated[float, typer.Option(
+            help="ceiling the request rate climbs to while Dropbox allows it")]
+        = DEFAULT_MAX_RPS,
+        split_depth: Annotated[int, typer.Option(
+            help="max levels a shard may be split into children to keep workers busy (a "
+                 "bound, not a target; a listing Dropbox keeps failing is split "
+                 "regardless)")] = DEFAULT_SPLIT_DEPTH,
+        queue_target: Annotated[int | None, typer.Option(
+            help="shards to keep pending (default: 2 x workers). Raising this splits more "
+                 "aggressively and measured much slower")] = DEFAULT_QUEUE_TARGET,
+        max_shards: Annotated[int, typer.Option()] = 2_000_000,
+        progress_interval: Annotated[float, typer.Option()] = 30.0,
+        no_index: Annotated[bool, typer.Option(
+            "--no-index", help="skip building analysis indexes when the crawl completes")]
+        = False,
+        log: Annotated[str | None, typer.Option(help="also write logs to this file")] = None,
+        lock: Annotated[str | None, typer.Option(
+            help="lockfile path (default: <db>.lock)")] = None) -> None:
+    _run(ctx, cmd_run, locals())
+
+
+@app.command("status", help="show progress")
+def status_command(ctx: typer.Context, db: Annotated[str, typer.Option()]) -> None:
+    _run(ctx, cmd_status, locals())
+
+
+@app.command("verify",
+             help="re-walk a subtree with rclone and diff it against the database")
+def verify_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        path: Annotated[str | None, typer.Argument(
+            help="subtree to check (default: the crawl root)")] = None) -> None:
+    _run(ctx, cmd_verify, locals())
+
+
+@app.command("report", help="storage-reduction report")
+def report_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        top: Annotated[int, typer.Option()] = 25,
+        hotspot_min_files: Annotated[int, typer.Option()] = 100_000,
+        hotspot_max_mean: Annotated[int, typer.Option()] = 65536) -> None:
+    _run(ctx, cmd_report, locals())
+
+
+@app.command("export", help="write the reports as CSV")
+def export_command(ctx: typer.Context, db: Annotated[str, typer.Option()],
+                   out: Annotated[str, typer.Option()]) -> None:
+    _run(ctx, cmd_export, locals())
+
+
+@app.command("index", help="build analysis indexes")
+def index_command(ctx: typer.Context, db: Annotated[str, typer.Option()]) -> None:
+    _run(ctx, cmd_index, locals())
+
+
+@app.command("tree", help="write a browsable HTML page of where the space goes")
+def tree_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        out: Annotated[str, typer.Option(help="the HTML file to write")],
+        subtree: Annotated[str | None, typer.Option(
+            help="cover this folder instead of the whole crawl root")] = None,
+        min_size: Annotated[int, typer.Option(
+            parser=parse_size, metavar="SIZE", show_default=False,
+            help="fold entries smaller than this, e.g. 100MiB (default 1GiB)")]
+        = DEFAULT_TREE_MIN_SIZE,
+        max_rows: Annotated[int, typer.Option(
+            help="double --min-size until the page has at most this many rows")]
+        = DEFAULT_TREE_MAX_ROWS) -> None:
+    _run(ctx, cmd_tree, locals())
+
+
+@archive_app.command("register", help="record an archive, its parts and its segments")
+def archive_register_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        name: Annotated[str, typer.Option(help="the archive's own name, e.g. big.tar")],
+        folder: Annotated[str | None, typer.Option(
+            help="Dropbox folder holding the parts")] = None,
+        local_dir: Annotated[str | None, typer.Option(
+            help="local directory holding the parts")] = None,
+        remote: Annotated[str, typer.Option()] = "dropbox") -> None:
+    if (folder is None) == (local_dir is None):
+        raise typer.BadParameter("give exactly one of --folder and --local-dir")
+    _run(ctx, cmd_archive_register, locals())
+
+
+# Measured in Task 1: a request costs 1.60 s + 0.044 s/MiB, so the cap is generous
+# and the floor is small because it is paid on every jump.
+@archive_app.command("index",
+                     help="walk the header chains; safe to interrupt and re-run")
+def archive_index_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        archive: Annotated[str, typer.Option()],
+        remote: Annotated[str, typer.Option()] = "dropbox",
+        workers: Annotated[int, typer.Option()] = ARCHIVE_WORKERS,
+        rps: Annotated[float, typer.Option(help="request rate to start at")] = DEFAULT_RPS,
+        window_min: Annotated[int, typer.Option()] = WINDOW_MIN,
+        window_max: Annotated[int, typer.Option()] = WINDOW_MAX,
+        batch: Annotated[int, typer.Option()] = 2000,
+        max_batches: Annotated[int, typer.Option(
+            help="stop early; 0 means no limit")] = 0,
+        recheck: Annotated[bool, typer.Option(
+            "--recheck",
+            help="ask a corrupt, truncated or unsupported verdict again: walk the chain "
+                 "again from the start of the segment before it -- and, asked again about "
+                 "the same verdict, a segment further back each time")] = False,
+        lock: Annotated[str | None, typer.Option()] = None) -> None:
+    _run(ctx, cmd_archive_index, locals())
+
+
+@archive_app.command("run", help="walk every archive still to be walked, many at once; "
+                                 "safe to interrupt and re-run")
+def archive_run_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        audit_db: Annotated[str, typer.Option(
+            help="the audit database whose tar archives to walk")],
+        remote: Annotated[str, typer.Option()] = "dropbox",
+        streams: Annotated[int, typer.Option(help="streams to start at")] = 12,
+        max_streams: Annotated[int, typer.Option(
+            help="most streams to climb to while Dropbox allows")] = 24,
+        workers: Annotated[int, typer.Option(
+            help="most chains one archive may have")] = ARCHIVE_WORKERS,
+        limit: Annotated[int, typer.Option(
+            help="most archives to start; 0 means no limit")] = 0,
+        dry_run: Annotated[bool, typer.Option(
+            "--dry-run",
+            help="print what would be walked, without contacting Dropbox")] = False,
+        window_min: Annotated[int, typer.Option()] = WINDOW_MIN,
+        window_max: Annotated[int, typer.Option()] = WINDOW_MAX,
+        batch: Annotated[int, typer.Option()] = 2000,
+        lock: Annotated[str | None, typer.Option()] = None) -> None:
+    _run(ctx, cmd_archive_run, {**locals(), "max_batches": 0})
+
+
+@archive_app.command("import",
+                     help="copy every archive of another archive database into this one")
+def archive_import_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        source: Annotated[str, typer.Option(
+            "--from", help="the archive database to copy from; it is left as it is")],
+        lock: Annotated[str | None, typer.Option(
+            help="the lock the database's run holds, if not DB.lock")] = None,
+        from_lock: Annotated[str | None, typer.Option(
+            help="the lock the source's run holds, if not SOURCE.lock")] = None) -> None:
+    _run(ctx, cmd_archive_import, locals())
+
+
+@archive_app.command(
+    "forget", help="drop an archive and all its rows, so the next run walks it afresh")
+def archive_forget_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        archive: Annotated[str, typer.Option()],
+        folder: Annotated[str, typer.Option()],
+        lock: Annotated[str | None, typer.Option(
+            help="the lock the database's run holds, if not DB.lock")] = None) -> None:
+    _run(ctx, cmd_archive_forget, locals())
+
+
+@archive_app.command("status", help="show archive indexing progress")
+def archive_status_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        archive: Annotated[str | None, typer.Option()] = None) -> None:
+    _run(ctx, cmd_archive_status, locals())
+
+
+@archive_app.command("report", help="rollups over one archive's manifest")
+def archive_report_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        archive: Annotated[str, typer.Option()],
+        top: Annotated[int, typer.Option()] = 25) -> None:
+    _run(ctx, cmd_archive_report, locals())
+
+
+@archive_app.command("export", help="write one archive's manifest and rollups as CSV")
+def archive_export_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        archive: Annotated[str, typer.Option()],
+        out: Annotated[str, typer.Option()]) -> None:
+    _run(ctx, cmd_archive_export, locals())
+
+
+@archive_app.command(
+    "cat", help="extract one member's bytes by path, in the fewest range reads")
+def archive_cat_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        archive: Annotated[str, typer.Option()],
+        member: Annotated[str, typer.Option(help="the member's path inside the archive")],
+        offset: Annotated[int | None, typer.Option(
+            help="disambiguate a path matching more than one member, by hdr_offset (a "
+                 "bare ambiguous cat prints the candidates)")] = None,
+        out: Annotated[str | None, typer.Option(
+            help="write to this file instead of stdout")] = None,
+        remote: Annotated[str, typer.Option()] = "dropbox") -> None:
+    _run(ctx, cmd_archive_cat, locals())
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        typer.main.get_command(app).main(args=argv, prog_name="dbaudit")
+    except SystemExit as stop:
+        if stop.code is None or isinstance(stop.code, int):
+            return stop.code or 0
+        print(stop.code, file=sys.stderr)
+        return 1
+    return 0

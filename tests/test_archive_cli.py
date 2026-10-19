@@ -214,8 +214,7 @@ def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ArchiveStore, "claim_segment", claim_segment)
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar", "--workers", "4"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=4)
     seen = []
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None,
                                threading.Event(), on_chains=seen.append)
@@ -433,8 +432,7 @@ def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(tmp_path, mo
     monkeypatch.setattr("dbaudit.cli._reader_for",
                         lambda row, s, t=None, l=None: Stopping(row["folder"], s))
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar", "--workers", "2"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=2)
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(scans) == 1
     scanned = store.segments(store.get("a.tar")["id"])[1]
@@ -525,8 +523,7 @@ def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(tmp_p
     monkeypatch.setattr("dbaudit.cli._reader_for",
                         lambda row, s, t=None, l=None: Ordered(row["folder"], s))
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar", "--workers", "2"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=2)
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and after == []
 
@@ -980,7 +977,7 @@ def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(tmp_p
     db = str(tmp_path / "archives.db")
     main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive", "a.tar"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     stop = threading.Event()
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.state == "unsupported" and not stop.is_set()
@@ -1259,8 +1256,7 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(tmp_path, monkey
 
     monkeypatch.setattr("dbaudit.cli.read_member", read_member)
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(audited) == 1
     assert store.get("a.tar")["state"] == "walking"
@@ -1298,8 +1294,7 @@ def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(tmp_path, monke
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(made) == nth
     archive_id = store.get("a.tar")["id"]
@@ -1329,8 +1324,8 @@ def test_a_read_that_gives_way_to_a_stop_still_commits_what_the_walk_confirmed(
                         limiter=None: GivesWay(row["folder"], archive_set))
     store = ArchiveStore(db)
     # One fetch per header, so the walk has confirmed members by the 60th read.
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar", "--window-min", "512", "--window-max", "512"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar",
+                         window_min=512, window_max=512)
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped
     assert store.stats(store.get("a.tar")["id"])["n_members"] > 0
@@ -1393,8 +1388,8 @@ def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(tmp_path, monkeypat
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar", "--window-min", "512", "--window-max", "512"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar",
+                         window_min=512, window_max=512)
     walked = {}
     walking = threading.Thread(target=lambda: walked.update(
         result=cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)),
@@ -1472,8 +1467,7 @@ def test_a_stopped_walk_does_not_list_its_folder_again(tmp_path, monkeypatch):
     monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
                         limiter=None: Stopping(source, archive_set))
     store = ArchiveStore(db)
-    args = cli.build_parser().parse_args(["archive", "index", "--db", db, "--archive",
-                                          "a.tar"])
+    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     walked = cli._walk_archive(args, store, store.get("a.tar"), None,
                                cli.AdaptiveLimiter(rps=1000.0), stop)
     assert walked.stopped

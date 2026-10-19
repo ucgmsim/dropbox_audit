@@ -20,6 +20,8 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Every command lists its options with `--help`, e.g. `python -m dbaudit tree --help`.
+
 ## Auditing a folder tree
 
 ```bash

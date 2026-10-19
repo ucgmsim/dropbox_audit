@@ -471,13 +471,9 @@ def test_sizes_are_read_in_binary_units():
 
 
 def test_a_size_that_cannot_be_read_is_refused(capsys):
-    import pytest
-
     from dbaudit.cli import main
 
-    with pytest.raises(SystemExit) as stopped:
-        main(["tree", "--db", "a.db", "--out", "t.html", "--min-size", "1GB"])
-    assert stopped.value.code == 2
+    assert main(["tree", "--db", "a.db", "--out", "t.html", "--min-size", "1GB"]) == 2
     assert "is not a size" in capsys.readouterr().err
 
 
