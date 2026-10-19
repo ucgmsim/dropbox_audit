@@ -521,24 +521,28 @@ import pytest
 from dbaudit import kinds
 from tests.listing_fakes import archive, archive_index as index_file
 
-VM, SIM, OTHER = (kinds.GROUPS.index(g) for g in ("velocity models", "simulated waveforms", "other"))
-
-
 def page_html(store, page="/R", **kw):
     out = io.StringIO()
     tree.render(out, *tree.build(store, page, 1, 1000, "audit.db", **kw))
     return out.getvalue()
 
 
-def test_measure_kinds_rolls_group_bytes_up_the_tree(tmp_path):
+def test_each_folder_row_gets_the_largest_kind_below_it(tmp_path):
     store = listing(tmp_path, file("/R/a/vp3dfile.p", 100), file("/R/a/b/faultsz03_bb.bin", 300),
-                    file("/R/c/notes.txt", 50))
-    f = measured(store)
-    t = tree.measure_kinds(f, kinds.walk(store, kinds.Rules()), LISTED)
-    r, a = at(store, "/R"), at(store, "/R/a")
-    assert (f.groups[VM][a], f.groups[SIM][a], f.groups[SIM][r], f.groups[OTHER][r]) \
-        == (100, 300, 300, 50)
-    assert t.total() == 450
+                    file("/R/c/notes.txt", 50), file("/R/c/d/vp3dfile.p", 55))
+    f = measured(store, min_size=60)
+    page = tree.layout(store, f, 60, 1000)
+    t = tree.measure_kinds(f, page, kinds.walk(store, kinds.Rules()), LISTED)
+    folders, stack = {}, [page.root]
+    while stack:
+        row = stack.pop()
+        stack.extend(row.children)
+        if row.kind == "dir":
+            folders[row.path] = (row.group, row.group_bytes)
+    assert folders == {"": ("simulated waveforms", 300), "a": ("simulated waveforms", 300),
+                       "a/b": ("simulated waveforms", 300),
+                       "c": ("velocity models", 55)}    # c/d is folded into c
+    assert t.total() == 505
 
 
 def test_a_folder_mostly_of_one_kind_wears_its_badge(tmp_path):

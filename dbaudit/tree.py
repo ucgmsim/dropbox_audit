@@ -53,7 +53,6 @@ class Figures:
     page_root: int
     copies: array = field(default_factory=lambda: array("I"))  # by files.rowid: copies, or 0
     reclaimable: int = 0  # page bytes deletable while one copy of everything stays
-    groups: list = field(default_factory=list)  # bytes of each kinds.GROUPS entry, by dir id
 
 
 def find_dir(store, path: str):
@@ -176,28 +175,6 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
     return f
 
 
-def measure_kinds(figures: Figures, rows, listed: float) -> kinds.Tally:
-    """Add the bytes of each kind of data to its folder, a group at a time, and return
-    their tally. `rows` is a kinds.walk, read once."""
-    top = len(figures.size)
-    figures.groups = [array("d", [0.0]) * top for _ in kinds.GROUPS]
-    slot = {kind: kinds.GROUPS.index(group) for kind, (_, group) in kinds.KINDS.items()}
-
-    def counted():
-        for row in rows:
-            if 0 < row[0] < top:
-                figures.groups[slot[row[1]]][row[0]] += row[2]
-            yield row
-
-    found = kinds.tally(counted(), listed)
-    for sizes in figures.groups:
-        for dir_id in figures.order:  # deepest first, so each folder is complete before its parent
-            up = figures.parent[dir_id]
-            if up:
-                sizes[up] += sizes[dir_id]
-    return found
-
-
 # ---- layout: which entries get a row ----------------------------------------
 
 
@@ -266,15 +243,9 @@ def past(threshold: int, size: int) -> int:
 
 
 def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
-    row = Row("dir", name, path, f.size[d], files=f.files[d], folders=f.folders[d],
-              date=f.newest[d], dir_id=d, held=f.held[d], cold=f.cold[d],
-              tiny=is_tiny(f, d))
-    if f.groups:
-        sizes = [group[d] for group in f.groups]
-        largest = max(range(len(sizes)), key=sizes.__getitem__)
-        if sizes[largest] > 0:
-            row.group, row.group_bytes = kinds.GROUPS[largest], sizes[largest]
-    return row
+    return Row("dir", name, path, f.size[d], files=f.files[d], folders=f.folders[d],
+               date=f.newest[d], dir_id=d, held=f.held[d], cold=f.cold[d],
+               tiny=is_tiny(f, d))
 
 
 def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
@@ -345,6 +316,46 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
     page_row = folder_row(f, root, name, below(path, crawl_root))
     assemble(page_row)
     return Page(page_row, threshold, rows, shown | {root})
+
+
+def measure_kinds(figures: Figures, page: Page, rows, listed: float) -> kinds.Tally:
+    """Give each folder row on the page its largest kind of data, and return the tally of
+    `rows`, a kinds.walk read once.
+
+    Only the folders with a row keep totals, so memory follows --max-rows: each byte counts
+    toward the nearest of them at or above its folder, and the totals roll up from there.
+    """
+    shown = [d for d in figures.order if d in page.shown]  # deepest first
+    at = {d: i for i, d in enumerate(shown)}
+    near = array("i", [-1]) * len(figures.size)  # the nearest folder row, as an index in shown
+    for d in reversed(figures.order):  # shallowest first, so a parent is settled before its folders
+        near[d] = at[d] if d in at else near[figures.parent[d]]
+    width = len(kinds.GROUPS)
+    totals = array("d", [0.0]) * (width * len(shown))
+    slot = {kind: kinds.GROUPS.index(group) for kind, (_, group) in kinds.KINDS.items()}
+
+    def counted():
+        for row in rows:
+            if 0 < row[0] < len(near) and near[row[0]] >= 0:
+                totals[near[row[0]] * width + slot[row[1]]] += row[2]
+            yield row
+
+    found = kinds.tally(counted(), listed)
+    for d in shown:  # deepest first, so each folder is complete before the row above it
+        up = near[figures.parent[d]]
+        if up >= 0:
+            for g in range(width):
+                totals[up * width + g] += totals[at[d] * width + g]
+    stack = [page.root]
+    while stack:
+        row = stack.pop()
+        stack.extend(row.children)
+        if row.kind == "dir" and row.dir_id in at:
+            sizes = totals[at[row.dir_id] * width:(at[row.dir_id] + 1) * width]
+            largest = max(range(width), key=sizes.__getitem__)
+            if sizes[largest] > 0:
+                row.group, row.group_bytes = kinds.GROUPS[largest], sizes[largest]
+    return found
 
 
 # ---- tables: the folders worth a closer look --------------------------------
@@ -498,9 +509,9 @@ def build(store, page_path: str, min_size: int, max_rows: int, db_name: str,
             counted = kinds.Tally(listed)
         else:
             figures = measure(store, listed, min_size, found[0])
-            counted = measure_kinds(
-                figures, kinds.walk(store, rules or kinds.Rules(), index, under), listed)
             page = layout(store, figures, min_size, max_rows)
+            counted = measure_kinds(
+                figures, page, kinds.walk(store, rules or kinds.Rules(), index, under), listed)
             chosen = tables(store, figures, page)
             reclaimable = figures.reclaimable
         summary = Summary(
