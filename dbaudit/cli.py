@@ -34,6 +34,7 @@ import zlib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, NoReturn
@@ -58,6 +59,7 @@ from .lock import InstanceLock, LockHeld
 from .store import Store
 from .units import human_bytes, human_duration
 from .verify import verify_subtree
+from . import kinds
 from . import report as reports
 from . import tree
 
@@ -430,9 +432,7 @@ def cmd_report(args) -> int:
     root = store.get_meta("root")
     print(f"# Storage audit of {root}")
     if unfinished:
-        print(f"\n  WARNING: the crawl is incomplete -- {unfinished} shard(s) unfinished "
-              f"or failed.")
-        print("  Every figure below is a lower bound.")
+        _warn_incomplete(unfinished)
     print(f"\n{prog['files']:,} files, {prog['dirs']:,} directories, "
           f"{human_bytes(prog['bytes'])} of live data\n")
 
@@ -494,6 +494,12 @@ def cmd_report(args) -> int:
     return 0
 
 
+def _warn_incomplete(unfinished: int) -> None:
+    print(f"\n  WARNING: the crawl is incomplete -- {unfinished} shard(s) unfinished "
+          f"or failed.")
+    print("  Every figure below is a lower bound.")
+
+
 def cmd_export(args) -> int:
     store = Store(args.db)
     if not store.is_initialised():
@@ -543,6 +549,122 @@ def cmd_tree(args) -> int:
     print(f"wrote {args.out}: {page.rows:,} rows, {human_bytes(os.path.getsize(args.out))}, "
           f"entries under {human_bytes(page.threshold)} folded "
           f"({human_duration(time.time() - started)})")
+    return 0
+
+
+# ---- kinds: what the bytes are --------------------------------------------
+
+ARCHIVE_DB_HELP = "the archive index (`archive run`), to look inside tarballs"
+RULES_HELP = "a TOML file of the folder names that mark kinds on this Dropbox"
+KINDS_DATING = ("Each byte is dated by its oldest copy, or inside a tarball by its member's "
+                "own time.")
+KINDS_AGES = ((0.5, "> 6 months"), (1, "> 1 year"), (2, "> 2 years"), (5, "> 5 years"))
+
+
+def _kinds_inputs(args) -> tuple[kinds.Rules, sqlite3.Connection | None]:
+    """The site rules and the archive index a command was given. Raises KindsError when
+    either cannot be used."""
+    rules = kinds.load_rules(args.rules)
+    return rules, kinds.archive_index(args.archive_db) if args.archive_db else None
+
+
+def _sized(n: float) -> str:
+    """human_bytes for a figure that shares out a tarball and so may not be whole."""
+    return human_bytes(round(n))
+
+
+def _tarball_note(counted: kinds.Tally, looked_inside: bool) -> str:
+    if looked_inside:
+        return (f"In tarballs: {_sized(counted.members)} shared out over the members the "
+                f"archive index lists, {_sized(counted.by_name)} judged by their names.")
+    return (f"In tarballs: {_sized(counted.members + counted.by_name)}, all judged by their "
+            "names (give --archive-db to look inside them).")
+
+
+def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
+    groups = counted.groups()
+    total = counted.total()
+    shown = {group: [kind for kind in kinds.KINDS if kinds.KINDS[kind][1] == group
+                     and sum(counted.kinds.get(kind, (0, 0)))] for group in groups}
+    width = max([26] + [len(group) for group in groups]
+                + [len(kinds.KINDS[kind][0]) + 2 for found in shown.values() for kind in found])
+
+    def row(label, loose, tarred, share=True):
+        part = f"{(loose + tarred) / total:.1%}" if share and total else ""
+        return (f"  {label:<{width}}{_sized(loose + tarred):>12}{part:>8}"
+                f"{_sized(loose):>12}{_sized(tarred):>13}")
+
+    print("\n## By kind")
+    print(f"  {'':<{width}}{'size':>12}{'share':>8}{'loose':>12}{'in tarballs':>13}")
+    for group, (loose, tarred) in groups.items():
+        print(row(group, loose, tarred))
+        if len(shown[group]) > 1:
+            for kind in shown[group]:
+                print(row("  " + kinds.KINDS[kind][0], *counted.kinds[kind]))
+    print(row("total", sum(f[0] for f in groups.values()), sum(f[1] for f in groups.values()),
+              share=False))
+    print(f"\n  {_tarball_note(counted, looked_inside)}")
+
+    print("\n## By age")
+    print(f"  {KINDS_DATING}")
+    print(f"  {'':<{width}}" + "".join(f"{label:>12}" for _, label in KINDS_AGES))
+    older = {years: counted.group_older(years) for years, _ in KINDS_AGES}
+    for group, (_, tarred) in groups.items():
+        print(f"  {group:<{width}}"
+              + "".join(f"{_sized(sum(older[years][group])):>12}" for years, _ in KINDS_AGES))
+        if tarred:
+            print(f"  {'  in tarballs':<{width}}"
+                  + "".join(f"{_sized(older[years][group][1]):>12}" for years, _ in KINDS_AGES))
+
+    print("\n## By year")
+    by_year = counted.group_years()
+    print("  year" + "".join(f"{kinds.SHORT[group]:>12}" for group in groups))
+    for year in sorted({year for group in groups for year in by_year.get(group, {})}):
+        print(f"  {year}" + "".join(f"{_sized(by_year.get(group, {}).get(year, 0)):>12}"
+                                    for group in groups))
+
+
+def cmd_kinds(args) -> int:
+    store = Store(args.db)
+    if not store.is_initialised():
+        print(f"error: {args.db} is not initialised", file=sys.stderr)
+        return 2
+    found = tree.find_dir(store, args.subtree) if args.subtree else None
+    if args.subtree and found is None:
+        print(f"error: {args.subtree} is not in {args.db}", file=sys.stderr)
+        return 2
+    if args.out and os.path.exists(args.out) and not os.path.isdir(args.out):
+        print(f"error: {args.out} is not a folder", file=sys.stderr)
+        return 2
+    try:
+        rules, index = _kinds_inputs(args)
+    except kinds.KindsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    listed, finished = tree.crawl_time(store)
+    unfinished = store.pending_count() + store.running_count() + store.progress()["shards_error"]
+    root = store.get_meta("root")
+    print(f"# Kinds of data in {found[1] if found else root}")
+    looked = (f"tarballs looked up in {os.path.basename(args.archive_db)}" if index is not None
+              else "tarballs judged by their names (no --archive-db)")
+    named = f"rules {os.path.basename(args.rules)}" if args.rules else "rules built in"
+    print(f"  listed {time.strftime('%Y-%m-%d', time.gmtime(listed))} · {looked} · {named}")
+    if unfinished:
+        _warn_incomplete(unfinished)
+    try:
+        counted = kinds.tally(kinds.walk(store, rules, index, args.subtree), listed)
+    finally:
+        if index is not None:
+            index.close()
+    _print_kinds(counted, index is not None)
+    if args.out:
+        about = {"root": root, "subtree": found[1] if found else "",
+                 "listed": datetime.fromtimestamp(listed, timezone.utc).isoformat(),
+                 "finished": "true" if finished else "false", "audit_db": args.db,
+                 "archive_db": args.archive_db or "", "rules": args.rules or ""}
+        for path in kinds.write_csv(counted, args.out, about):
+            print(f"wrote {path}")
     return 0
 
 
@@ -2583,6 +2705,20 @@ def tree_command(
             help="double --min-size until the page has at most this many rows")]
         = DEFAULT_TREE_MAX_ROWS) -> None:
     _run(ctx, cmd_tree, locals())
+
+
+@app.command("kinds",
+             help="what kinds of data the listing holds, loose and in tarballs, and how old")
+def kinds_command(
+        ctx: typer.Context,
+        db: Annotated[str, typer.Option()],
+        archive_db: Annotated[str | None, typer.Option(help=ARCHIVE_DB_HELP)] = None,
+        rules: Annotated[str | None, typer.Option(help=RULES_HELP)] = None,
+        subtree: Annotated[str | None, typer.Option(
+            help="cover this folder instead of the whole crawl root")] = None,
+        out: Annotated[str | None, typer.Option(
+            help="also write the figures as CSV files into this folder")] = None) -> None:
+    _run(ctx, cmd_kinds, locals())
 
 
 @archive_app.command("register", help="record an archive, its parts and its segments")

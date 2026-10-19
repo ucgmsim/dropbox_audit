@@ -17,7 +17,9 @@ name. `tally` adds the bytes up by kind, by month and by age.
 
 from __future__ import annotations
 
+import csv
 import functools
+import os
 import re
 import sqlite3
 import time
@@ -431,3 +433,34 @@ def _months():
             return None
 
     return lambda date: of_day(int(date // 86400))
+
+
+def write_csv(counted: Tally, outdir: str, about: dict[str, str]) -> list[str]:
+    """Write the tally into `outdir` as four CSV files, in whole bytes, one row per kind
+    that holds bytes; `about` says what listing it came from. Returns the paths."""
+    os.makedirs(outdir, exist_ok=True)
+    held = [kind for kind in KINDS if sum(counted.kinds.get(kind, (0, 0)))]
+    tables = {
+        "kinds": (["kind", "label", "group", "bytes", "loose", "tarred"],
+                  [(kind, *KINDS[kind], round(sum(counted.kinds[kind])),
+                    *map(round, counted.kinds[kind])) for kind in held]),
+        "kinds_by_month": (["kind", "group", "month", "loose", "tarred"],
+                           [(kind, KINDS[kind][1], month, *map(round, figures))
+                            for kind in held
+                            for (of, month), figures in sorted(counted.months.items())
+                            if of == kind]),
+        "kinds_older_than": (["kind", "group", "years", "loose", "tarred"],
+                             [(kind, KINDS[kind][1], years,
+                               *map(round, counted.older[kind, years]))
+                              for kind in held for years in AGES]),
+        "kinds_listing": (list(about), [list(about.values())]),
+    }
+    written = []
+    for name, (header, rows) in tables.items():
+        path = os.path.join(outdir, f"{name}.csv")
+        with open(path, "w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            writer.writerows(rows)
+        written.append(path)
+    return written

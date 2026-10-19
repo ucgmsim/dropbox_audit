@@ -194,6 +194,61 @@ database into TARGET, finished or mid-walk, and replaces one already there with 
 same content. `archive forget --db DB --archive NAME --folder FOLDER` drops an archive
 and everything recorded about it, so that the next run walks it from scratch.
 
+## Kinds of data
+
+`kinds` says what kinds of data a listing holds (simulated and recorded waveforms,
+velocity models, xyts, rupture sources, IM and hazard results), whether each byte sits in
+a loose file or inside a tarball, and how old it is:
+
+```bash
+python -m dbaudit kinds --db audit.db --archive-db archives.db --rules site.toml
+python -m dbaudit kinds --db audit.db --subtree /TeamSpace/proj00001 --out kinds-csv
+```
+
+It prints each group's size, share, loose bytes and bytes in tarballs, with the group's
+kinds below it when it has more than one; the bytes in each group older than 6 months and
+1, 2 and 5 years; and the bytes per group per year. It reads both databases, writes
+neither, and never contacts Dropbox. A walk over 15 M files and 7 M tar members takes
+about two minutes.
+
+- `--archive-db` is the archive index that `archive run` writes. Without it, every
+  tarball is judged by its name.
+- `--rules` names a TOML file of the folder words that only mean something on your
+  Dropbox. Every key is optional, and without the file the built-in rules apply alone:
+
+  ```toml
+  recorded = ["observed_db"]                # words in a folder path that mark recorded waveforms
+  im_folders = ["im_results", "hazard"]     # folders that hold IM and hazard results
+  lf_converted = ["lf_netcdf"]              # words that mark LF converted to netCDF
+  vm_folders = ["velmodels"]                # more folder names that hold velocity models
+  keep = ["/teamspace/scratch/proj00001/"]  # path prefixes whose velocity models are kept
+  ```
+
+- `--subtree` covers one folder instead of the crawl root.
+- `--out DIR` also writes four CSV files, in whole bytes: `kinds.csv` (each kind, loose
+  and in tarballs), `kinds_by_month.csv` (each kind by month), `kinds_older_than.csv`
+  (each kind older than 0.5, 1, 2, 3, 5 and 10 years) and `kinds_listing.csv` (the root,
+  when it was listed, whether the crawl finished, and which databases and rules file were
+  read).
+
+How the figures are made:
+
+- **Kinds come from names and folders only.** The file-name rules follow the outputs of
+  EMOD3D-based simulations. They run in order, so a file named like an xyts or a velocity
+  model wins over its folder. Every byte gets a kind, but it is a first cut.
+- **Every copy counts,** wherever it sits.
+- **Tarballs.** A tarball, or a part of one, whose content hash the archive index knows is
+  shared out over the archive's listed members by size, when that listing can be trusted:
+  the walk finished (`complete`, or `truncated` because the tar itself ends early), or it
+  lists at least half the archive's bytes. Any other tarball is judged by its name and
+  folder, and an LF tarball among them is split 30% seis, 68% xyts and 1% other, as the
+  listed ones were. Bytes in a tarball count toward the folder that holds it.
+- **Dates.** A loose file is dated by its `client_modified`, moved back to the oldest copy
+  of the same content. (Dropbox's own `server_modified` is reset when a folder moves.) A
+  member of a tarball is dated by its own time in the tar, and a tarball judged by its
+  name by its `client_modified`. Ages count back from when the listing was finished.
+- **Kept velocity models,** those under a `keep` prefix, are a group of their own.
+
 ## Known limits
 
 - **Team folders the account has not joined are invisible.** rclone's token has no

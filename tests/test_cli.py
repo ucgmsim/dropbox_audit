@@ -109,8 +109,9 @@ import dbaudit.cli as cli
 from dbaudit.archive.reader import WINDOW_MAX, WINDOW_MIN
 
 COMMANDS = [["init"], ["run"], ["status"], ["verify"], ["report"], ["export"], ["index"],
-            ["tree"], *(["archive", c] for c in ("register", "index", "run", "import",
-                                                   "forget", "status", "report", "export", "cat"))]
+            ["tree"], ["kinds"],
+            *(["archive", c] for c in ("register", "index", "run", "import", "forget", "status",
+                                       "report", "export", "cat"))]
 
 
 @pytest.mark.parametrize("command", COMMANDS, ids=" ".join)
@@ -134,6 +135,8 @@ BEFORE = [
     (["index", "--db", "a.db"], "cmd_index", dict(db="a.db")),
     (["tree", "--db", "a.db", "--out", "t.html", "--min-size", "100MiB"], "cmd_tree",
      dict(db="a.db", out="t.html", subtree=None, min_size=100 << 20, max_rows=100_000)),
+    (["kinds", "--db", "a.db"], "cmd_kinds",
+     dict(db="a.db", archive_db=None, rules=None, subtree=None, out=None)),
     (["archive", "register", "--db", "x.db", "--name", "a.tar", "--folder", "/R"],
      "cmd_archive_register",
      dict(db="x.db", name="a.tar", folder="/R", local_dir=None, remote="dropbox")),
