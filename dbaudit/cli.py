@@ -426,6 +426,11 @@ def cmd_report(args) -> int:
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
         return 2
+    try:
+        rules, index = _kinds_inputs(args)
+    except kinds.KindsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     prog = store.progress()
     unfinished = store.pending_count() + store.running_count() + prog["shards_error"]
@@ -491,6 +496,22 @@ def cmd_report(args) -> int:
     for row in reports.extension_profile(store, limit=args.top):
         label = "(no extension)" if row.ext == "(none)" else f".{row.ext}"
         print(f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {label}")
+
+    print("\n## By kind")
+    print(f"  {KINDS_DATING}")
+    try:
+        counted = kinds.tally(kinds.walk(store, rules, index), tree.crawl_time(store)[0])
+    finally:
+        if index is not None:
+            index.close()
+    total = counted.total()
+    older = {years: counted.group_older(years) for years in REPORT_KIND_AGES}
+    print(f"  {'':<26}{KINDS_HEAD}" + "".join(f"{f'> {years} years':>12}"
+                                              for years in REPORT_KIND_AGES))
+    for group, (loose, tarred) in counted.groups().items():
+        print(_kinds_row(group, loose, tarred, total, 26)
+              + "".join(f"{_sized(sum(older[years][group])):>12}" for years in REPORT_KIND_AGES))
+    print(f"\n  {_tarball_note(counted, index is not None)}")
     return 0
 
 
@@ -559,6 +580,7 @@ RULES_HELP = "a TOML file of the folder names that mark kinds on this Dropbox"
 KINDS_DATING = ("Each byte is dated by its oldest copy, or inside a tarball by its member's "
                 "own time.")
 KINDS_AGES = ((0.5, "> 6 months"), (1, "> 1 year"), (2, "> 2 years"), (5, "> 5 years"))
+REPORT_KIND_AGES = (2, 5, 10)   # the years Cold data uses
 
 
 def _kinds_inputs(args) -> tuple[kinds.Rules, sqlite3.Connection | None]:
@@ -581,6 +603,17 @@ def _tarball_note(counted: kinds.Tally, looked_inside: bool) -> str:
             "names (give --archive-db to look inside them).")
 
 
+KINDS_HEAD = f"{'size':>12}{'share':>8}{'loose':>12}{'in tarballs':>13}"
+
+
+def _kinds_row(label: str, loose: float, tarred: float, total: float, width: int,
+               share: bool = True) -> str:
+    """A row of size, share of `total`, loose bytes and bytes in tarballs."""
+    part = f"{(loose + tarred) / total:.1%}" if share and total else ""
+    return (f"  {label:<{width}}{_sized(loose + tarred):>12}{part:>8}{_sized(loose):>12}"
+            f"{_sized(tarred):>13}")
+
+
 def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
     groups = counted.groups()
     total = counted.total()
@@ -589,20 +622,15 @@ def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
     width = max([26] + [len(group) for group in groups]
                 + [len(kinds.KINDS[kind][0]) + 2 for found in shown.values() for kind in found])
 
-    def row(label, loose, tarred, share=True):
-        part = f"{(loose + tarred) / total:.1%}" if share and total else ""
-        return (f"  {label:<{width}}{_sized(loose + tarred):>12}{part:>8}"
-                f"{_sized(loose):>12}{_sized(tarred):>13}")
-
     print("\n## By kind")
-    print(f"  {'':<{width}}{'size':>12}{'share':>8}{'loose':>12}{'in tarballs':>13}")
+    print(f"  {'':<{width}}{KINDS_HEAD}")
     for group, (loose, tarred) in groups.items():
-        print(row(group, loose, tarred))
+        print(_kinds_row(group, loose, tarred, total, width))
         if len(shown[group]) > 1:
             for kind in shown[group]:
-                print(row("  " + kinds.KINDS[kind][0], *counted.kinds[kind]))
-    print(row("total", sum(f[0] for f in groups.values()), sum(f[1] for f in groups.values()),
-              share=False))
+                print(_kinds_row("  " + kinds.KINDS[kind][0], *counted.kinds[kind], total, width))
+    print(_kinds_row("total", sum(f[0] for f in groups.values()),
+                     sum(f[1] for f in groups.values()), total, width, share=False))
     print(f"\n  {_tarball_note(counted, looked_inside)}")
 
     print("\n## By age")
@@ -2675,7 +2703,9 @@ def report_command(
         db: Annotated[str, typer.Option()],
         top: Annotated[int, typer.Option()] = 25,
         hotspot_min_files: Annotated[int, typer.Option()] = 100_000,
-        hotspot_max_mean: Annotated[int, typer.Option()] = 65536) -> None:
+        hotspot_max_mean: Annotated[int, typer.Option()] = 65536,
+        archive_db: Annotated[str | None, typer.Option(help=ARCHIVE_DB_HELP)] = None,
+        rules: Annotated[str | None, typer.Option(help=RULES_HELP)] = None) -> None:
     _run(ctx, cmd_report, locals())
 
 

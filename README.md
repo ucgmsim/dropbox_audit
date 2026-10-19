@@ -58,6 +58,9 @@ The report covers:
   (`client_modified`). Dropbox's `server_modified` can be years newer than the
   content.
 - **Largest directories, small-file hotspots and bytes by file type.**
+- **By kind:** each kind of data's size, loose and in tarballs, and how much of it is
+  older than 2, 5 and 10 years, as [`kinds`](#kinds-of-data) works it out. Give it
+  `--archive-db` to look inside tarballs and `--rules` for your Dropbox's folder words.
 
 ### A browsable page
 

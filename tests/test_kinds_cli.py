@@ -97,3 +97,28 @@ def test_kinds_refuses_what_it_cannot_use(tmp_path, capsys, extra, says):
 def test_kinds_on_an_uninitialised_database_is_an_error(tmp_path, capsys):
     assert main(["kinds", "--db", str(tmp_path / "missing.db")]) == 2
     assert "is not initialised" in capsys.readouterr().err
+
+
+def offline(monkeypatch):
+    def no_network(remote):
+        raise RuntimeError("no network in tests")
+    monkeypatch.setattr("dbaudit.cli._space_usage", no_network)
+
+
+def test_report_ends_with_a_by_kind_section(tmp_path, capsys, monkeypatch):
+    offline(monkeypatch)
+    db, index = sample(tmp_path)
+    assert main(["report", "--db", db, "--archive-db", index]) == 0
+    out = capsys.readouterr().out
+    assert out.index("## By kind") > out.index("## By file type")
+    section = out[out.index("## By kind"):]
+    assert "> 10 years" in section and "simulated waveforms" in section
+    assert "shared out over the members the archive index lists" in section
+
+
+def test_report_refuses_a_bad_rules_file_before_printing(tmp_path, capsys, monkeypatch):
+    offline(monkeypatch)
+    db, _ = sample(tmp_path)
+    assert main(["report", "--db", db, "--rules", str(tmp_path / "missing.toml")]) == 2
+    captured = capsys.readouterr()
+    assert "missing.toml" in captured.err and captured.out == ""
