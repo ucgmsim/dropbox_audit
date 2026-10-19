@@ -29,6 +29,17 @@ TERMINATOR = BLOCK * 2
 #: after a terminator means the chain stopped somewhere unexpected.
 TRAILING_LIMIT = 1 << 20
 
+#: The member types whose bytes are one plain range: what `archive cat` extracts, and what
+#: kinds shares a tarball's bytes over. Decoded the way Member.from_tarinfo decodes them --
+#: a single header byte through decode("ascii", "replace"). Mirrors tarfile.REGULAR_TYPES
+#: minus GNUTYPE_SPARSE: a sparse member's data region is not a plain byte range (it
+#: interleaves a sparse map with the real data), so reading [data_offset, data_offset +
+#: size) for one would not reconstruct the file's bytes -- excluding it is a correctness
+#: fix, not a narrowing for its own sake.
+REGULAR_MEMBER_TYPES = frozenset(
+    b.decode("ascii", "replace")
+    for b in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE))
+
 #: tarfile's wording when a header sequence runs off the end of the data, as opposed to
 #: finding something there that is not a header. Stable across CPython versions; the tests
 #: pin both branches.

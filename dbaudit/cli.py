@@ -48,8 +48,9 @@ from .archive.reader import (WINDOW_MAX, WINDOW_MIN, ConcatFile, DropboxRangeRea
 from .archive import report as archive_report
 from .archive.runner import Done, Job, Runner
 from .archive.store import ArchiveStore
-from .archive.tarwalk import (BLOCK, REREAD_LIMIT, Member, ScanStopped, UnsupportedArchive,
-                              WalkResult, find_chain_start, read_member, walk)
+from .archive.tarwalk import (BLOCK, REGULAR_MEMBER_TYPES, REREAD_LIMIT, Member, ScanStopped,
+                              UnsupportedArchive, WalkResult, find_chain_start, read_member,
+                              walk)
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
 from .limiter import AdaptiveLimiter
@@ -102,15 +103,6 @@ AMBIGUOUS_BELOW = 512
 # an archive grown by `tar -r` can repeat thousands of paths legitimately, and at one
 # request per scattered row an unbounded audit could cost hours.
 AUDIT_LIMIT = 1000
-# The file types `cat` will extract, decoded the same way Member.from_tarinfo
-# (tarwalk.py) decodes them -- a single header byte through decode("ascii", "replace").
-# Mirrors tarfile.REGULAR_TYPES minus GNUTYPE_SPARSE: a sparse member's data region is
-# not a plain byte range (it interleaves a sparse map with the real data), so reading
-# [data_offset, data_offset + size) for one would not reconstruct the file's bytes --
-# excluding it is a correctness fix, not a narrowing for its own sake.
-REGULAR_MEMBER_TYPES = frozenset(
-    b.decode("ascii", "replace")
-    for b in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE))
 # A bound, not the primary control. Splitting is gated on the queue actually
 # starving, so it is self-limiting; the depth only needs to be deep enough to let
 # that gate act. At 2, big subtrees could not be split at all and the tail of a
