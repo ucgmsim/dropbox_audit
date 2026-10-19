@@ -1,5 +1,6 @@
 import calendar
 import hashlib
+import os
 import sqlite3
 
 import pytest
@@ -109,6 +110,14 @@ def test_a_tarball_the_index_does_not_know_is_judged_by_name(tmp_path):
         {(kind, BY_NAME): 1000 * w for kind, w in LF_SPLIT.items()})
 
 
+def test_archives_the_index_does_not_know_are_dated_by_their_own_time(tmp_path):
+    store = listing(tmp_path, file("/R/t/big.tar.aa", 5, "A", "2025-01-01T00:00:00Z"),
+                    file("/R/u/big.tar.aa", 5, "A", "2019-01-01T00:00:00Z"),
+                    file("/R/t/x.tar.zst", 7, modified="2025-01-01T00:00:00Z"))
+    assert sorted((size, how, date) for _, _, size, how, date in rows(store)) \
+        == [(5, BY_NAME, T[2019]), (5, BY_NAME, T[2025]), (7, BY_NAME, T[2025])]
+
+
 def test_split_parts_the_index_does_not_know_count_as_tarred(tmp_path):
     store = listing(tmp_path, file("/R/t/big.tar.partaa", 1), file("/R/t/data.partab", 2),
                     file("/R/t/x_part_ac", 4), file("/R/t/notes.txt", 8))
@@ -150,12 +159,17 @@ def test_a_walk_leaves_both_databases_as_they_were(tmp_path):
                                          [("", "x.srf", 10, T[2021])]))
     store.connect().execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-    def digest(path):
-        return hashlib.sha256(open(path, "rb").read()).hexdigest()
+    def state():
+        # A write lands in the write-ahead log first, so the logs count as much as the files.
+        # A reader may leave an empty log behind, which holds nothing.
+        files = (store.path, store.path + "-wal", index, index + "-wal")
+        return ([hashlib.sha256(open(f, "rb").read()).hexdigest()
+                 if os.path.exists(f) and os.path.getsize(f) else None for f in files],
+                store.connect().total_changes)
 
-    before = digest(store.path), digest(index)
+    before = state()
     rows(store, index=index)
-    assert (digest(store.path), digest(index)) == before
+    assert state() == before
 
 
 def test_tally_adds_bytes_by_kind_month_and_age_back_from_the_listing():

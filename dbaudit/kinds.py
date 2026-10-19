@@ -71,8 +71,10 @@ VM_FOLDERS = ("vm", "vms", "velocity_model", "velocity_models", "velocitymodel",
 # What the LF tarballs the index could list held, by bytes, in October 2026. An LF tarball it
 # could not list (`lf_mix`) is shared out the same way.
 LF_SPLIT = {"wf_seis_tar": 0.303, "xyts": 0.684, "other": 0.013}
-# Tarballs, and split parts of one, by name.
-TARLIKE = re.compile(r"\.tar$|\.tar\.part|\.part[a-z]{2}$|_part_[a-z]{2}$")
+# Tarballs, and split parts of one, by name: every name classify judges as an archive
+# (.tar, or .tar. anywhere, as in .tar.aa, .tar.gz or .tar.zst), and parts named .partaa
+# or _part_aa.
+TARLIKE = re.compile(r"\.tar$|\.tar\.|\.part[a-z]{2}$|_part_[a-z]{2}$")
 # How each byte was placed: a loose file, shared out over the members the archive index
 # lists, or a tarball judged by its name.
 LOOSE, MEMBERS, BY_NAME = "loose", "members", "name"
