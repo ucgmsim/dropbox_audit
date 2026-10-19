@@ -91,6 +91,18 @@ def test_a_trusted_row_beats_an_untrusted_one_and_the_latest_trusted_row_wins(tm
     assert by_kind(rows(store, index=index)) == {("src", MEMBERS): 1000}
 
 
+def test_a_finished_listing_beats_a_stale_one_registered_later(tmp_path):
+    # A stale row lists the archive as it was, before a part went: the finished walk of the
+    # parts still there shows what they hold.
+    store = listing(tmp_path, file("/R/t/a.tar.aa", 1000, "A"))
+    index = index_file(tmp_path,
+                       archive("a.tar", "/R/t", [("a.tar.aa", 1000, "A")],
+                               [("", "x.srf", 1000, T[2021])], state="truncated"),
+                       archive("a.tar", "/R/t", [("a.tar.aa", 1000, "A"), ("a.tar.ab", 500, "B")],
+                               [("", "vp3dfile.p", 1500, T[2021])], state="stale"))
+    assert by_kind(rows(store, index=index)) == {("src", MEMBERS): 1000}
+
+
 def test_a_tarball_the_index_does_not_know_is_judged_by_name(tmp_path):
     store = listing(tmp_path, file("/R/t/faultsz03_lf.tar", 1000))
     assert by_kind(rows(store)) == pytest.approx(
@@ -167,3 +179,9 @@ def test_months_are_utc_and_odd_dates_still_count():
     assert t.older["vm", 10] == [0, 4]                   # mtime 0 is older than everything
     assert t.months["vm", "2027-10"] == [2, 0]           # a date after the listing is older than nothing
     assert t.group_years()["velocity models"] == {1970: 4, 2025: 1, 2027: 2}
+
+
+def test_files_with_no_bytes_leave_no_mark():
+    t = tally([(1, "vm", 0, LOOSE, T[2019]), (1, "vm", 5, LOOSE, T[2020])], LISTED)
+    assert t.group_years() == {"velocity models": {2020: 5}}
+    assert list(t.months) == [("vm", "2020-01")]

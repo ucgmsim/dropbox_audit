@@ -267,24 +267,26 @@ def _archives(index):
     when it holds at least half the archive's bytes. Below half it might hold only an
     archive's small first files (its parameters and logs) and not the binary whose header
     stopped the walk. A part can belong to more than one archive row: a trusted row wins
-    over one that is not, and between equals the latest row wins.
+    over one that is not, a finished walk over any other (a stale row lists the archive as
+    it was before a part went), and between equals the latest row wins.
     """
     listed = dict(index.execute(
         f"SELECT archive_id, SUM(size) FROM members WHERE {_REGULAR} GROUP BY archive_id",
         _TYPES))
-    archives = {}
+    archives, rank = {}, {}
     for archive_id, state, total, name, folder in index.execute(
             "SELECT id, state, total_size, name, folder FROM archives"):
         held = listed.get(archive_id, 0)
         trusted = held > 0 and (state in FINISHED or held >= total / 2)
         archives[archive_id] = (trusted, name, folder or "", held)
+        rank[archive_id] = (trusted, state in FINISHED, archive_id)
     owner = {}
     for archive_id, digest in index.execute(
             "SELECT archive_id, content_hash FROM parts WHERE content_hash IS NOT NULL "
-            "AND content_hash != '' ORDER BY archive_id"):
+            "AND content_hash != ''"):
         key = bytes.fromhex(digest)
         held = owner.get(key)
-        if held is None or archives[archive_id][0] >= archives[held][0]:
+        if held is None or rank[archive_id] > rank[held]:
             owner[key] = archive_id
     return archives, owner
 
@@ -395,6 +397,8 @@ def tally(rows, listed: float) -> Tally:
     out = Tally(listed)
     month_of = _months()
     for _, kind, size, how, date in rows:
+        if not size:  # an empty file: nothing to count, and no month to show
+            continue
         side = 0 if how == LOOSE else 1
         figures = out.kinds.get(kind)
         if figures is None:
