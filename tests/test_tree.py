@@ -382,7 +382,8 @@ def test_the_page_holds_together(tmp_path):
     assert outline.links and all(link in outline.ids for link in outline.links)
     assert outline.headings == [
         "Biggest duplicated folders", "Coldest big folders", "Folders made of tiny files",
-        "Where the bytes are, by file type", "Bytes by year last modified", "Reading this"]
+        "Where the bytes are, by file type", "Where the bytes are, by kind",
+        "Bytes by year last modified", "Bytes by kind and year", "Reading this"]
 
 
 def test_an_incomplete_listing_says_so(tmp_path):
@@ -513,3 +514,72 @@ def test_the_page_gets_the_permissions_the_umask_allows(tmp_path):
     finally:
         os.umask(umask)
     assert oct(out.stat().st_mode & 0o777) == oct(0o600)
+
+
+import pytest
+
+from dbaudit import kinds
+from tests.listing_fakes import archive, archive_index as index_file
+
+VM, SIM, OTHER = (kinds.GROUPS.index(g) for g in ("velocity models", "simulated waveforms", "other"))
+
+
+def page_html(store, page="/R", **kw):
+    out = io.StringIO()
+    tree.render(out, *tree.build(store, page, 1, 1000, "audit.db", **kw))
+    return out.getvalue()
+
+
+def test_measure_kinds_rolls_group_bytes_up_the_tree(tmp_path):
+    store = listing(tmp_path, file("/R/a/vp3dfile.p", 100), file("/R/a/b/faultsz03_bb.bin", 300),
+                    file("/R/c/notes.txt", 50))
+    f = measured(store)
+    t = tree.measure_kinds(f, kinds.walk(store, kinds.Rules()), LISTED)
+    r, a = at(store, "/R"), at(store, "/R/a")
+    assert (f.groups[VM][a], f.groups[SIM][a], f.groups[SIM][r], f.groups[OTHER][r]) \
+        == (100, 300, 300, 50)
+    assert t.total() == 450
+
+
+def test_a_folder_mostly_of_one_kind_wears_its_badge(tmp_path):
+    store = listing(tmp_path, file("/R/a/vp3dfile.p", 300), file("/R/a/notes.txt", 100),
+                    file("/R/m/vp3dfile.p", 40, "m"), file("/R/m/x.srf", 30),
+                    file("/R/m/notes.txt", 30, "n"))
+    html = page_html(store)
+    a = html[html.index('data-path="a"'):]
+    assert '<span class="badge kind">vm 75%</span>' in a[:a.index("</summary>")]
+    m = html[html.index('data-path="m"'):]
+    assert 'badge kind' not in m[:m.index("</summary>")]
+
+
+def test_the_page_has_two_kinds_tables_and_says_how_to_read_them(tmp_path):
+    store = listing(tmp_path, file("/R/a/vp3dfile.p", 300))
+    html = page_html(store)
+    assert "Where the bytes are, by kind" in html and "Bytes by kind and year" in html
+    assert "velocity models" in html and "kind badge" in html
+
+
+def test_a_tarballs_members_count_toward_its_folder_by_kind(tmp_path):
+    store = listing(tmp_path, file("/R/t/a.tar", 1000, "A"))
+    index = index_file(tmp_path, archive("a.tar", "/R/t", [("a.tar", 1000, "A")],
+                                         [("", "vp3dfile.p", 1000, LISTED)]))
+    html = page_html(store, index=kinds.archive_index(index))
+    t = html[html.index('data-path="t"'):]
+    assert '<span class="badge kind">vm 100%</span>' in t[:t.index("</summary>")]
+
+
+def test_a_subtree_page_counts_kinds_below_it_only(tmp_path):
+    store = listing(tmp_path, file("/R/a/vp3dfile.p", 300), file("/R/b/x.srf", 700))
+    page, summary, _ = tree.build(store, "/R/a", 1, 1000, "audit.db")
+    assert summary.kinds.total() == 300
+
+
+@pytest.mark.parametrize("extra,says", [(["--rules", "missing.toml"], "missing.toml"),
+                                        (["--archive-db", "AUDIT"], "holds no archive index")])
+def test_the_tree_command_refuses_what_kinds_cannot_use(tmp_path, capsys, extra, says):
+    from dbaudit.cli import main
+
+    store = listing(tmp_path, file("/R/a/x", 1))
+    extra = [store.path if a == "AUDIT" else a for a in extra]
+    assert main(["tree", "--db", store.path, "--out", str(tmp_path / "t.html"), *extra]) == 2
+    assert says in capsys.readouterr().err and not (tmp_path / "t.html").exists()

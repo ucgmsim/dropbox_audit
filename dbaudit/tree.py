@@ -15,7 +15,7 @@ from array import array
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
-from . import report
+from . import kinds, report
 
 YEAR = 365.25 * 86400
 COLD_YEARS = 2
@@ -25,6 +25,7 @@ DUP_TABLE_SHARE = 0.5
 COLD_TABLE_SHARE = 0.9
 DUP_BADGE = 0.10
 COLD_BADGE = 0.50
+KIND_BADGE = 0.50
 TABLE_ROWS = 25
 TYPE_ROWS = 20
 BAR_WIDTH = 28
@@ -52,6 +53,7 @@ class Figures:
     page_root: int
     copies: array = field(default_factory=lambda: array("I"))  # by files.rowid: copies, or 0
     reclaimable: int = 0  # page bytes deletable while one copy of everything stays
+    groups: list = field(default_factory=list)  # bytes of each kinds.GROUPS entry, by dir id
 
 
 def find_dir(store, path: str):
@@ -174,6 +176,28 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
     return f
 
 
+def measure_kinds(figures: Figures, rows, listed: float) -> kinds.Tally:
+    """Add the bytes of each kind of data to its folder, a group at a time, and return
+    their tally. `rows` is a kinds.walk, read once."""
+    top = len(figures.size)
+    figures.groups = [array("d", [0.0]) * top for _ in kinds.GROUPS]
+    slot = {kind: kinds.GROUPS.index(group) for kind, (_, group) in kinds.KINDS.items()}
+
+    def counted():
+        for row in rows:
+            if 0 < row[0] < top:
+                figures.groups[slot[row[1]]][row[0]] += row[2]
+            yield row
+
+    found = kinds.tally(counted(), listed)
+    for sizes in figures.groups:
+        for dir_id in figures.order:  # deepest first, so each folder is complete before its parent
+            up = figures.parent[dir_id]
+            if up:
+                sizes[up] += sizes[dir_id]
+    return found
+
+
 # ---- layout: which entries get a row ----------------------------------------
 
 
@@ -197,6 +221,8 @@ class Row:
     cold: int = 0
     tiny: bool = False
     entries: int = 0          # a fold row: the folder's direct children folded into it
+    group: str = ""           # a folder's largest kind of data (kinds.GROUPS), and its bytes
+    group_bytes: float = 0.0
     children: list = field(default_factory=list)
 
 
@@ -240,9 +266,15 @@ def past(threshold: int, size: int) -> int:
 
 
 def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
-    return Row("dir", name, path, f.size[d], files=f.files[d], folders=f.folders[d],
-               date=f.newest[d], dir_id=d, held=f.held[d], cold=f.cold[d],
-               tiny=is_tiny(f, d))
+    row = Row("dir", name, path, f.size[d], files=f.files[d], folders=f.folders[d],
+              date=f.newest[d], dir_id=d, held=f.held[d], cold=f.cold[d],
+              tiny=is_tiny(f, d))
+    if f.groups:
+        sizes = [group[d] for group in f.groups]
+        largest = max(range(len(sizes)), key=sizes.__getitem__)
+        if sizes[largest] > 0:
+            row.group, row.group_bytes = kinds.GROUPS[largest], sizes[largest]
+    return row
 
 
 def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
@@ -443,10 +475,13 @@ class Summary:
     min_size: int
     types: list               # report.ExtRow
     years: list               # report.YearRow
+    kinds: kinds.Tally | None = None
 
 
-def build(store, page_path: str, min_size: int, max_rows: int, db_name: str):
-    """(page, summary, tables) for the folder at `page_path`."""
+def build(store, page_path: str, min_size: int, max_rows: int, db_name: str,
+          rules: kinds.Rules | None = None, index=None):
+    """(page, summary, tables) for the folder at `page_path`. `rules` and `index` (an
+    archive index, see kinds.archive_index) say what kinds of data the files are."""
     conn = store.connect()
     # One read transaction for every query below: read separately, a crawl still writing
     # could show measure one listing and layout another.
@@ -454,24 +489,27 @@ def build(store, page_path: str, min_size: int, max_rows: int, db_name: str):
     try:
         listed, finished = crawl_time(store)
         crawl_root = store.get_meta("root") or ""
+        whole = page_path.rstrip("/").lower() == crawl_root.rstrip("/").lower()
+        under = None if whole else page_path
         found = find_dir(store, page_path)
         if found is None:  # nothing listed yet
             page, chosen, reclaimable = (Page(Row("dir", page_path, "", 0), min_size, 1, {0}),
                                          {"dup": [], "cold": [], "tiny": []}, 0)
+            counted = kinds.Tally(listed)
         else:
             figures = measure(store, listed, min_size, found[0])
+            counted = measure_kinds(
+                figures, kinds.walk(store, rules or kinds.Rules(), index, under), listed)
             page = layout(store, figures, min_size, max_rows)
             chosen = tables(store, figures, page)
             reclaimable = figures.reclaimable
-        whole = page_path.rstrip("/").lower() == crawl_root.rstrip("/").lower()
-        under = None if whole else page_path
         summary = Summary(
             title=found[1] if found else page_path, db_name=db_name, listed=listed,
             finished=finished, generated=time.time(), reclaimable=reclaimable,
             pending=store.pending_count(), running=store.running_count(),
             failed=store.progress()["shards_error"], min_size=min_size,
             types=report.extension_profile(store, limit=TYPE_ROWS, under=under),
-            years=report.cold_bytes(store, under=under))
+            years=report.cold_bytes(store, under=under), kinds=counted)
         return page, summary, chosen
     finally:
         if conn.in_transaction:
@@ -528,6 +566,9 @@ def _cells(size: int, total: int, tree: str) -> str:
 
 def _badges(row: Row) -> str:
     out = ""
+    if row.group_bytes >= KIND_BADGE * row.size > 0:
+        out += (f'<span class="badge kind">{kinds.SHORT[row.group]} '
+                f'{row.group_bytes / row.size:.0%}</span>')
     if row.size and row.held / row.size >= DUP_BADGE:
         out += f'<span class="badge dup">dup {row.held / row.size:.0%}</span>'
     if row.size and row.cold / row.size >= COLD_BADGE:
@@ -640,10 +681,26 @@ def _tables(out, page: Page, summary: Summary, chosen: dict) -> None:
     _table(out, ["type", "size", "share", "files"],
            [["(no extension)" if r.ext == "(none)" else esc("." + r.ext), compact(r.bytes),
              share(r.bytes), f"{r.files:,}"] for r in summary.types])
+    counted = summary.kinds or kinds.Tally(summary.listed)
+    out.write("<h2>Where the bytes are, by kind</h2>\n"
+              f'<p class="note">In tarballs: {compact(round(counted.members))} shared out over '
+              'the members the archive index lists, and '
+              f'{compact(round(counted.by_name))} judged by the tarball\'s name.</p>\n')
+    _table(out, ["kind", "size", "share", "loose", "in tarballs"],
+           [[esc(group), compact(round(loose + tarred)), share(loose + tarred),
+             compact(round(loose)), compact(round(tarred))]
+            for group, (loose, tarred) in counted.groups().items()])
     out.write("<h2>Bytes by year last modified</h2>\n")
     _table(out, ["year", "size", "share", "files"],
            [[str(r.year), compact(r.bytes), share(r.bytes), f"{r.files:,}"]
             for r in summary.years])
+    by_year = counted.group_years()
+    groups = list(counted.groups())
+    out.write("<h2>Bytes by kind and year</h2>\n<p class=\"note\">Each byte is dated by its "
+              "oldest copy, or inside a tarball by its member's own time.</p>\n")
+    _table(out, ["year", *(esc(kinds.SHORT[group]) for group in groups)],
+           [[str(year), *(compact(round(by_year.get(group, {}).get(year, 0))) for group in groups)]
+            for year in sorted({year for group in groups for year in by_year.get(group, {})})])
 
 
 def _reading(out, page: Page) -> None:
@@ -661,6 +718,12 @@ lose none of them. <b>cold N%</b>, shown from {COLD_BADGE:.0%}: the share last m
 than {COLD_YEARS} years before the listing. <b>tiny</b>: {TINY_FILES:,} files or more,
 averaging {TINY_MEAN >> 20} MiB or less. <b>&times;N</b>: the file's content is stored N times
 in the listing, this copy included.</p>
+<p class="note"><b>vm N%</b> and the other kind badges, shown from {KIND_BADGE:.0%}: the kind
+of data that makes up that share of a folder's bytes (sim wf for simulated waveforms, rec wf
+for recorded ones, src for rupture sources, im for IM and hazard results). Kinds come from file
+and folder names only, so they are a first cut. A tarball's bytes count toward the folder that
+holds it: shared out over its members when the archive index lists them, otherwise judged by
+the tarball's name.</p>
 <p class="note"><b>Reclaimable duplicates</b> is what deleting duplicates could free on this
 page while one copy of everything stays somewhere in the listing. In the folder tables, a folder
 inside or above one already listed is skipped, so no two listed folders overlap.</p>
@@ -690,12 +753,14 @@ HEAD = """<!doctype html>
   --bg: #12141a; --fg: #d7dae0; --dim: #6f7683; --line: #262a33; --dir: #6fb3ff;
   --file: #cfd4dc; --fold: #6f7683; --bar-dir: #3d6ea8; --bar-file: #4c5563;
   --accent: #79d17d; --warn: #e5c07b; --dup: #d9a35b; --cold: #7fb7d9; --tiny: #c38fd6;
+  --kind: #5cc8b8;
 }
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #fbfbfa; --fg: #24262b; --dim: #767b86; --line: #e4e5e9; --dir: #1f6bc0;
     --file: #3b3f47; --fold: #8a8f99; --bar-dir: #a8c8ee; --bar-file: #d3d6dc;
     --accent: #237a37; --warn: #8a6100; --dup: #9a5b12; --cold: #1f6f9a; --tiny: #7d3d99;
+    --kind: #1f7a6f;
   }
 }
 * { box-sizing: border-box; }
@@ -738,6 +803,7 @@ details:not([open]) > summary .caret::before { content: "+"; }
 .badge.dup, .badge.copies { color: var(--dup); }
 .badge.cold { color: var(--cold); }
 .badge.tiny { color: var(--tiny); }
+.badge.kind { color: var(--kind); }
 .hidden { display: none !important; }
 .flash > summary, .row.flash { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 h2 { font-size: 13px; margin: 34px 24px 4px; padding-top: 18px; border-top: 1px solid var(--line); }

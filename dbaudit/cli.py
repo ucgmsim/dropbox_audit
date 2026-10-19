@@ -549,9 +549,19 @@ def cmd_tree(args) -> int:
     if not os.path.isdir(folder):
         print(f"error: {folder} is not a folder", file=sys.stderr)
         return 2
+    try:
+        rules, index = _kinds_inputs(args)
+    except kinds.KindsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     started = time.time()
-    page, summary, chosen = tree.build(store, args.subtree or store.get_meta("root") or "/",
-                                       args.min_size, args.max_rows, os.path.basename(args.db))
+    try:
+        page, summary, chosen = tree.build(store, args.subtree or store.get_meta("root") or "/",
+                                           args.min_size, args.max_rows,
+                                           os.path.basename(args.db), rules, index)
+    finally:
+        if index is not None:
+            index.close()
     # Written beside the target and renamed into place, so a failed run never leaves
     # half a page behind.
     fd, partial = tempfile.mkstemp(dir=folder, prefix=".tree-", suffix=".html")
@@ -2733,7 +2743,9 @@ def tree_command(
         = DEFAULT_TREE_MIN_SIZE,
         max_rows: Annotated[int, typer.Option(
             help="double --min-size until the page has at most this many rows")]
-        = DEFAULT_TREE_MAX_ROWS) -> None:
+        = DEFAULT_TREE_MAX_ROWS,
+        archive_db: Annotated[str | None, typer.Option(help=ARCHIVE_DB_HELP)] = None,
+        rules: Annotated[str | None, typer.Option(help=RULES_HELP)] = None) -> None:
     _run(ctx, cmd_tree, locals())
 
 
