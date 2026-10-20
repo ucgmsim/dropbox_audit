@@ -1,5 +1,7 @@
 import pytest
 
+import dbaudit.cli as cli
+from dbaudit.archive.reader import WINDOW_MAX, WINDOW_MIN
 from dbaudit.cli import human_bytes, human_duration, main
 from dbaudit.store import Store
 
@@ -104,9 +106,6 @@ def test_init_says_when_dropbox_cannot_look_up_the_account_just_now(tmp_path, mo
     err = capsys.readouterr().err
     assert "could not look up the account" in err and "could not list" not in err
 
-
-import dbaudit.cli as cli
-from dbaudit.archive.reader import WINDOW_MAX, WINDOW_MIN
 
 COMMANDS = [["init"], ["run"], ["status"], ["verify"], ["report"], ["export"], ["index"],
             ["tree"], ["kinds"],

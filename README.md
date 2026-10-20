@@ -82,7 +82,7 @@ kind, by year, and by kind and year.
   the threshold until the page fits.
 - `--archive-db` and `--rules` work as they do for [`kinds`](#kinds-of-data): bytes inside
   a tarball count toward the folder that holds it, by the kinds of its members. Working
-  out kinds adds about two minutes on 15 M files.
+  out kinds adds about three minutes on 15 M files.
 - The page holds real folder names, so share it as carefully as the database.
 
 Anything else is one SQL query away. Directories are stored once, so full paths
@@ -236,8 +236,8 @@ about two minutes.
 - `--out DIR` also writes four CSV files, in whole bytes: `kinds.csv` (each kind, loose
   and in tarballs), `kinds_by_month.csv` (each kind by month), `kinds_older_than.csv`
   (each kind older than 0.5, 1, 2, 3, 5 and 10 years) and `kinds_listing.csv` (the root,
-  when it was listed, whether the crawl finished, and which databases and rules file were
-  read).
+  when it was listed, whether the crawl finished, which databases and rules file were
+  read, and the bytes with no date, which the age and month figures leave out).
 
 How the figures are made:
 

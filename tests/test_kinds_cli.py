@@ -27,6 +27,19 @@ def test_kinds_prints_each_group_with_its_loose_and_tarred_bytes(tmp_path, capsy
     line = next(l for l in out.splitlines() if l.strip().startswith("simulated waveforms"))
     assert line.split()[2:] == ["700", "B", "70.0%", "0", "B", "700", "B"]
     assert "shared out over the members the archive index lists" in out
+    assert "Undated" not in out
+
+
+def test_kinds_says_how_much_it_could_not_date(tmp_path, capsys):
+    store = listing(tmp_path, file("/R/t/a.tar", 100, "A"))
+    index = index_file(tmp_path, archive("a.tar", "/R/t", [("a.tar", 100, "A")],
+                                         [("", "x.srf", 100, None)]))
+    out = tmp_path / "csv"
+    assert main(["kinds", "--db", store.path, "--archive-db", index, "--out", str(out)]) == 0
+    assert "Undated: 100 B" in capsys.readouterr().out
+    with open(out / "kinds_listing.csv") as f:
+        (about,) = list(csv.DictReader(f))
+    assert about["undated"] == "100"
 
 
 def test_without_an_index_tarballs_are_judged_by_name(tmp_path, capsys):

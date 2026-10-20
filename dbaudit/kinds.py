@@ -286,7 +286,10 @@ def _archives(index):
     for archive_id, digest in index.execute(
             "SELECT archive_id, content_hash FROM parts WHERE content_hash IS NOT NULL "
             "AND content_hash != ''"):
-        key = bytes.fromhex(digest)
+        try:
+            key = bytes.fromhex(digest)
+        except ValueError:  # no file's hash can match it
+            continue
         held = owner.get(key)
         if held is None or rank[archive_id] > rank[held]:
             owner[key] = archive_id
@@ -391,6 +394,15 @@ class Tally:
             year = int(month[:4])
             years[year] = years.get(year, 0) + loose + tarred
         return out
+
+
+def tarball_note(counted: Tally, looked_inside: bool, size) -> str:
+    """One sentence on how the tarballs' bytes were placed; `size` formats a byte count."""
+    if looked_inside:
+        return (f"In tarballs: {size(counted.members)} shared out over the members the archive "
+                f"index lists, {size(counted.by_name)} judged by their names.")
+    return (f"In tarballs: {size(counted.members + counted.by_name)}, all judged by their names "
+            "(give --archive-db to look inside them).")
 
 
 def tally(rows, listed: float) -> Tally:

@@ -4,8 +4,12 @@ import io
 import os
 from html.parser import HTMLParser
 
-from dbaudit import report, tree
+import pytest
+
+from dbaudit import kinds, report, tree
 from dbaudit.store import Store
+from tests.listing_fakes import archive
+from tests.listing_fakes import archive_index as index_file
 
 LISTED = calendar.timegm((2026, 10, 1, 0, 0, 0, 0, 0, 0))
 
@@ -516,11 +520,6 @@ def test_the_page_gets_the_permissions_the_umask_allows(tmp_path):
     assert oct(out.stat().st_mode & 0o777) == oct(0o600)
 
 
-import pytest
-
-from dbaudit import kinds
-from tests.listing_fakes import archive, archive_index as index_file
-
 def page_html(store, page="/R", **kw):
     out = io.StringIO()
     tree.render(out, *tree.build(store, page, 1, 1000, "audit.db", **kw))
@@ -587,3 +586,16 @@ def test_the_tree_command_refuses_what_kinds_cannot_use(tmp_path, capsys, extra,
     extra = [store.path if a == "AUDIT" else a for a in extra]
     assert main(["tree", "--db", store.path, "--out", str(tmp_path / "t.html"), *extra]) == 2
     assert says in capsys.readouterr().err and not (tmp_path / "t.html").exists()
+
+
+def test_a_page_says_whether_it_looked_inside_the_tarballs(tmp_path):
+    store = listing(tmp_path, file("/R/t/faultsz03_bb.tar", 1000, "A"))
+    judged = page_html(store)
+    assert "give --archive-db to look inside them" in judged
+    assert "shared out over the members the archive index lists" not in judged
+    index = index_file(tmp_path, archive("faultsz03_bb.tar", "/R/t",
+                                         [("faultsz03_bb.tar", 1000, "A")],
+                                         [("", "bb.bin", 1000, LISTED)]))
+    looked = page_html(store, index=kinds.archive_index(index))
+    assert "shared out over the members the archive index lists" in looked
+    assert "give --archive-db" not in looked

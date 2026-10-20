@@ -1,4 +1,5 @@
-"""Command line: init, run, status, index, and the `archive` group.
+"""Command line, on Typer: init, run, status, verify, report, export, index, tree, kinds,
+and the `archive` group.
 
 `run` is the long-lived command. It is designed to be started under nohup, tmux or
 systemd and left alone: it takes an exclusive lock, reclaims any shards orphaned by
@@ -511,7 +512,7 @@ def cmd_report(args) -> int:
     for group, (loose, tarred) in counted.groups().items():
         print(_kinds_row(group, loose, tarred, total, 26)
               + "".join(f"{_sized(sum(older[years][group])):>12}" for years in REPORT_KIND_AGES))
-    print(f"\n  {_tarball_note(counted, index is not None)}")
+    print(f"\n  {kinds.tarball_note(counted, index is not None, _sized)}")
     return 0
 
 
@@ -605,14 +606,6 @@ def _sized(n: float) -> str:
     return human_bytes(round(n))
 
 
-def _tarball_note(counted: kinds.Tally, looked_inside: bool) -> str:
-    if looked_inside:
-        return (f"In tarballs: {_sized(counted.members)} shared out over the members the "
-                f"archive index lists, {_sized(counted.by_name)} judged by their names.")
-    return (f"In tarballs: {_sized(counted.members + counted.by_name)}, all judged by their "
-            "names (give --archive-db to look inside them).")
-
-
 KINDS_HEAD = f"{'size':>12}{'share':>8}{'loose':>12}{'in tarballs':>13}"
 
 
@@ -641,7 +634,7 @@ def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
                 print(_kinds_row("  " + kinds.KINDS[kind][0], *counted.kinds[kind], total, width))
     print(_kinds_row("total", sum(f[0] for f in groups.values()),
                      sum(f[1] for f in groups.values()), total, width, share=False))
-    print(f"\n  {_tarball_note(counted, looked_inside)}")
+    print(f"\n  {kinds.tarball_note(counted, looked_inside, _sized)}")
 
     print("\n## By age")
     print(f"  {KINDS_DATING}")
@@ -653,6 +646,9 @@ def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
         if tarred:
             print(f"  {'  in tarballs':<{width}}"
                   + "".join(f"{_sized(older[years][group][1]):>12}" for years, _ in KINDS_AGES))
+    if counted.undated:
+        print(f"\n  Undated: {_sized(counted.undated)} has no time in the listing or the tar, so "
+              "By age and By year leave it out.")
 
     print("\n## By year")
     by_year = counted.group_years()
@@ -700,7 +696,8 @@ def cmd_kinds(args) -> int:
         about = {"root": root, "subtree": found[1] if found else "",
                  "listed": datetime.fromtimestamp(listed, timezone.utc).isoformat(),
                  "finished": "true" if finished else "false", "audit_db": args.db,
-                 "archive_db": args.archive_db or "", "rules": args.rules or ""}
+                 "archive_db": args.archive_db or "", "rules": args.rules or "",
+                 "undated": str(round(counted.undated))}
         for path in kinds.write_csv(counted, args.out, about):
             print(f"wrote {path}")
     return 0

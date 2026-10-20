@@ -487,6 +487,7 @@ class Summary:
     types: list               # report.ExtRow
     years: list               # report.YearRow
     kinds: kinds.Tally | None = None
+    looked_inside: bool = False   # an archive index was given, to look inside tarballs
 
 
 def build(store, page_path: str, min_size: int, max_rows: int, db_name: str,
@@ -520,7 +521,8 @@ def build(store, page_path: str, min_size: int, max_rows: int, db_name: str,
             pending=store.pending_count(), running=store.running_count(),
             failed=store.progress()["shards_error"], min_size=min_size,
             types=report.extension_profile(store, limit=TYPE_ROWS, under=under),
-            years=report.cold_bytes(store, under=under), kinds=counted)
+            years=report.cold_bytes(store, under=under), kinds=counted,
+            looked_inside=index is not None)
         return page, summary, chosen
     finally:
         if conn.in_transaction:
@@ -693,10 +695,8 @@ def _tables(out, page: Page, summary: Summary, chosen: dict) -> None:
            [["(no extension)" if r.ext == "(none)" else esc("." + r.ext), compact(r.bytes),
              share(r.bytes), f"{r.files:,}"] for r in summary.types])
     counted = summary.kinds or kinds.Tally(summary.listed)
-    out.write("<h2>Where the bytes are, by kind</h2>\n"
-              f'<p class="note">In tarballs: {compact(round(counted.members))} shared out over '
-              'the members the archive index lists, and '
-              f'{compact(round(counted.by_name))} judged by the tarball\'s name.</p>\n')
+    note = kinds.tarball_note(counted, summary.looked_inside, lambda n: compact(round(n)))
+    out.write(f'<h2>Where the bytes are, by kind</h2>\n<p class="note">{esc(note)}</p>\n')
     _table(out, ["kind", "size", "share", "loose", "in tarballs"],
            [[esc(group), compact(round(loose + tarred)), share(loose + tarred),
              compact(round(loose)), compact(round(tarred))]

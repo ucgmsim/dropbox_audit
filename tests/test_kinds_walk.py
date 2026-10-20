@@ -199,3 +199,15 @@ def test_files_with_no_bytes_leave_no_mark():
     t = tally([(1, "vm", 0, LOOSE, T[2019]), (1, "vm", 5, LOOSE, T[2020])], LISTED)
     assert t.group_years() == {"velocity models": {2020: 5}}
     assert list(t.months) == [("vm", "2020-01")]
+
+
+def test_a_part_hash_that_is_not_hex_is_passed_over(tmp_path):
+    store = listing(tmp_path, file("/R/t/faultsz03_bb.tar", 10, "A"))
+    index = index_file(tmp_path, archive("faultsz03_bb.tar", "/R/t",
+                                         [("faultsz03_bb.tar", 10, "A")],
+                                         [("", "x.srf", 10, T[2021])]))
+    conn = sqlite3.connect(index)
+    conn.execute("UPDATE parts SET content_hash = 'not a hash'")
+    conn.commit()
+    conn.close()
+    assert by_kind(rows(store, index=index)) == {("wf_bin_bb", BY_NAME): 10}
