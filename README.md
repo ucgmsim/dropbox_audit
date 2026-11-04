@@ -15,12 +15,15 @@ refresh them, so there is no OAuth app to register and no secret stored here. Th
 remote is assumed to be called `dropbox`; `init` and the `archive` commands take
 `--remote` to use another.
 
+It's a [uv](https://docs.astral.sh/uv/) project: `pyproject.toml` lists what it needs, `uv.lock` pins every
+version, and `.python-version` the Python.
+
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
+uv sync     # makes .venv with that Python and the locked packages
 ```
 
-Every command lists its options with `--help`, e.g. `python -m dbaudit tree --help`.
+Run the commands below with `uv run`, as in `uv run python -m dbaudit status --db audit.db`, or after
+`. .venv/bin/activate`. Every command lists its options with `--help`, e.g. `python -m dbaudit tree --help`.
 
 ## Auditing a folder tree
 
@@ -273,10 +276,9 @@ How the figures are made:
 ## Development
 
 ```bash
-pip install pytest
-python -m pytest                                     # offline; live tests are skipped
-DBAUDIT_LIVE=1 python -m pytest tests/test_live.py   # crawls DBAUDIT_LIVE_ROOT for real
-DBAUDIT_FUZZ=300 python -m pytest tests/test_confirming_reads_fuzz.py   # 300 random tars
+uv run pytest                                        # offline; live tests are skipped
+DBAUDIT_LIVE=1 uv run pytest tests/test_live.py      # crawls DBAUDIT_LIVE_ROOT for real
+DBAUDIT_FUZZ=300 uv run pytest tests/test_confirming_reads_fuzz.py   # 300 random tars
 ```
 
 The Dropbox API sits behind small interfaces, so the crawler and the tar walker are

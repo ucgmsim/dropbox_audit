@@ -5,6 +5,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.lock
+!uv.lock
 *.log
 .venv/
 exports/
