@@ -127,7 +127,9 @@ class HttpLister:
                 timeout=REQUEST_TIMEOUT,
             )
         except Exception as exc:  # connection reset, DNS, read timeout
-            raise TransientError(f"request failed: {type(exc).__name__}: {exc}") from exc
+            raise TransientError(
+                f"request failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
         if resp.status_code == 200:
             body = resp.json()

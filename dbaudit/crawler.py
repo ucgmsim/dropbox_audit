@@ -76,7 +76,9 @@ class Crawler:
         self.split_depth = int(split_depth)
         # Default 2 x workers: just enough pending shards to keep every worker fed,
         # and deliberately no more. See _should_split for why more is worse.
-        self.queue_target = max(1, int(queue_target)) if queue_target else 2 * self.workers
+        self.queue_target = (
+            max(1, int(queue_target)) if queue_target else 2 * self.workers
+        )
         self.max_shards = int(max_shards)
         self.max_page_attempts = int(max_page_attempts)
         self.backoff_base = float(backoff_base)
@@ -89,7 +91,7 @@ class Crawler:
         self._page_counter = itertools.count(1)
         self._counter_lock = threading.Lock()
         self._errors = 0
-        self._siblings = {}             # parent path -> (subfolders listed, how many had folders)
+        self._siblings = {}  # parent path -> (subfolders listed, how many had folders)
         self._siblings_lock = threading.Lock()
 
     # ---- seeding --------------------------------------------------------
@@ -181,12 +183,17 @@ class Crawler:
             self._siblings[parent] = (listed, with_folders)
             after = self._leafy(listed, with_folders)
         if after and not before:
-            self.store.log_event("one_level_on", f"{parent}: {with_folders} of {listed} "
-                                                 f"subfolders held folders; listing the rest "
-                                                 f"one level")
+            self.store.log_event(
+                "one_level_on",
+                f"{parent}: {with_folders} of {listed} "
+                f"subfolders held folders; listing the rest "
+                f"one level",
+            )
         elif before and not after:
-            self.store.log_event("one_level_off", f"{parent}: {with_folders} of {listed} "
-                                                  f"subfolders hold folders")
+            self.store.log_event(
+                "one_level_off",
+                f"{parent}: {with_folders} of {listed} subfolders hold folders",
+            )
 
     # ---- per-shard work -------------------------------------------------
 
@@ -210,7 +217,9 @@ class Crawler:
                     page = (
                         self.lister.continue_(cursor)
                         if cursor
-                        else self.lister.list_folder(shard.path, recursive=(mode == "recursive"))
+                        else self.lister.list_folder(
+                            shard.path, recursive=(mode == "recursive")
+                        )
                     )
             except RateLimited as exc:
                 self.limiter.on_rate_limited(exc.retry_after)
@@ -245,9 +254,11 @@ class Crawler:
                 # would otherwise fail if it has, since splitting drops the pages it
                 # holds. This ignores split_depth, which bounds only the splitting done
                 # to keep workers busy.
-                if (mode == "recursive"
-                        and attempts >= (2 if cursor is None else self.max_page_attempts)
-                        and self.store.shard_count() < self.max_shards):
+                if (
+                    mode == "recursive"
+                    and attempts >= (2 if cursor is None else self.max_page_attempts)
+                    and self.store.shard_count() < self.max_shards
+                ):
                     self.store.log_event("split_after_failure", f"{shard.path}: {exc}")
                     if cursor is not None:
                         self.store.clear_cursor(shard.id)
@@ -258,7 +269,7 @@ class Crawler:
                     self._fail(shard, f"transient failures exhausted: {exc}")
                     return
                 self.store.log_event("transient", f"{shard.path}: {exc}")
-                time.sleep(min(self.backoff_base ** attempts, 60.0))
+                time.sleep(min(self.backoff_base**attempts, 60.0))
                 continue
             except ApiError as exc:
                 self._fail(shard, f"{type(exc).__name__}: {exc}")
@@ -275,7 +286,8 @@ class Crawler:
                 for entry in page.entries
                 if entry.get(".tag") == "folder"
                 and entry.get("path_display")
-                and entry["path_display"].rstrip("/").lower() != shard.path.rstrip("/").lower()
+                and entry["path_display"].rstrip("/").lower()
+                != shard.path.rstrip("/").lower()
             ]
             had_folders = had_folders or bool(subfolders)
             children = (
@@ -344,12 +356,18 @@ class Crawler:
             log.info("reclaimed %d shard(s) from a previous run", reclaimed)
         retried = self.store.retry_failed_shards()
         if retried:
-            log.info("retrying %d shard(s) that failed in a previous run, from scratch",
-                     retried)
+            log.info(
+                "retrying %d shard(s) that failed in a previous run, from scratch",
+                retried,
+            )
 
         threads = [
-            threading.Thread(target=self._worker, args=(f"w{i}", stop, _after_page),
-                             name=f"dbaudit-w{i}", daemon=True)
+            threading.Thread(
+                target=self._worker,
+                args=(f"w{i}", stop, _after_page),
+                name=f"dbaudit-w{i}",
+                daemon=True,
+            )
             for i in range(self.workers)
         ]
         for thread in threads:

@@ -20,9 +20,11 @@ from dbaudit.archive.store import ArchiveStore
 from dbaudit.cli import main
 from tests.archive_fakes import build_tar, write_parts
 
-MEMBERS = ([(f"run/fault_a/rel{i:02d}/out.bin", b"x" * 1000) for i in range(5)]
-           + [(f"run/fault_b/rel{i:02d}/out.bin", b"y" * 2000) for i in range(3)]
-           + [("run/notes.txt", b"hello\n")])
+MEMBERS = (
+    [(f"run/fault_a/rel{i:02d}/out.bin", b"x" * 1000) for i in range(5)]
+    + [(f"run/fault_b/rel{i:02d}/out.bin", b"y" * 2000) for i in range(3)]
+    + [("run/notes.txt", b"hello\n")]
+)
 
 
 def indexed(tmp_path):
@@ -30,19 +32,34 @@ def indexed(tmp_path):
     source.mkdir()
     write_parts(source, build_tar(MEMBERS), part_size=8192)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     store = ArchiveStore(db)
     return store, store.get("a.tar")["id"], db
 
 
-def build_and_index(tmp_path, members, part_size=8192, name="a.tar", db_name="archives.db"):
+def build_and_index(
+    tmp_path, members, part_size=8192, name="a.tar", db_name="archives.db"
+):
     """Like `indexed`, but with a caller-supplied member list."""
     source = tmp_path / "parts"
     source.mkdir()
     write_parts(source, build_tar(members), part_size, base=name)
     db = str(tmp_path / db_name)
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", name])
+    main(
+        ["archive", "register", "--db", db, "--local-dir", str(source), "--name", name]
+    )
     main(["archive", "index", "--db", db, "--archive", name])
     store = ArchiveStore(db)
     return store, store.get(name)["id"], db
@@ -85,20 +102,48 @@ def test_report_and_export_on_unknown_archive_or_missing_db_exit_2(tmp_path, cap
     assert main(["archive", "report", "--db", missing, "--archive", "a.tar"]) == 2
 
     out_dir = tmp_path / "out1"
-    assert main(["archive", "export", "--db", db, "--archive", "nope.tar",
-                 "--out", str(out_dir)]) == 2
+    assert (
+        main(
+            [
+                "archive",
+                "export",
+                "--db",
+                db,
+                "--archive",
+                "nope.tar",
+                "--out",
+                str(out_dir),
+            ]
+        )
+        == 2
+    )
     assert "nope.tar" in capsys.readouterr().err
     assert not out_dir.exists()
 
     out_dir2 = tmp_path / "out2"
-    assert main(["archive", "export", "--db", missing, "--archive", "a.tar",
-                 "--out", str(out_dir2)]) == 2
+    assert (
+        main(
+            [
+                "archive",
+                "export",
+                "--db",
+                missing,
+                "--archive",
+                "a.tar",
+                "--out",
+                str(out_dir2),
+            ]
+        )
+        == 2
+    )
 
 
 # ---- T9-8: a non-complete or stale archive warns before the figures --------------
 
 
-def test_report_on_a_partially_walked_archive_warns_before_the_figures(tmp_path, capsys):
+def test_report_on_a_partially_walked_archive_warns_before_the_figures(
+    tmp_path, capsys
+):
     # A deliberately interrupted walk: real, non-zero figures attached to a state that
     # is not 'complete' -- the exact shape of Task 11's smoke test (a manifest that is
     # 12% walked must not read like a finished archive's).
@@ -107,14 +152,37 @@ def test_report_on_a_partially_walked_archive_warns_before_the_figures(tmp_path,
     source.mkdir()
     write_parts(source, build_tar(members), part_size=8192)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
-    main(["archive", "index", "--db", db, "--archive", "a.tar",
-          "--batch", "5", "--max-batches", "1"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
+    main(
+        [
+            "archive",
+            "index",
+            "--db",
+            db,
+            "--archive",
+            "a.tar",
+            "--batch",
+            "5",
+            "--max-batches",
+            "1",
+        ]
+    )
     store = ArchiveStore(db)
     row = store.get("a.tar")
     n_members = store.stats(row["id"])["n_members"]
-    assert row["state"] != "complete"          # sanity: the walk really did stop early
-    assert n_members > 0                       # ... and it isn't merely unindexed
+    assert row["state"] != "complete"  # sanity: the walk really did stop early
+    assert n_members > 0  # ... and it isn't merely unindexed
     capsys.readouterr()
 
     assert main(["archive", "report", "--db", db, "--archive", "a.tar"]) == 0
@@ -148,7 +216,18 @@ def test_report_on_an_unindexed_archive_says_so_and_returns_0(tmp_path, capsys):
     source.mkdir()
     write_parts(source, build_tar(MEMBERS), part_size=8192)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     capsys.readouterr()
 
     assert main(["archive", "report", "--db", db, "--archive", "a.tar"]) == 0
@@ -179,8 +258,10 @@ def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(tmp_path, monkeyp
     """
     earliest_ts = int(datetime(2001, 9, 9, 23, 30, 0, tzinfo=timezone.utc).timestamp())
     latest_ts = int(datetime(2020, 1, 1, 23, 30, 0, tzinfo=timezone.utc).timestamp())
-    members = [("run/a.bin", b"a", {"mtime": earliest_ts}),
-               ("run/b.bin", b"b", {"mtime": latest_ts})]
+    members = [
+        ("run/a.bin", b"a", {"mtime": earliest_ts}),
+        ("run/b.bin", b"b", {"mtime": latest_ts}),
+    ]
     store, archive_id, db = build_and_index(tmp_path, members)
 
     monkeypatch.setenv("TZ", "Pacific/Kiritimati")  # UTC+14, no DST
@@ -191,8 +272,10 @@ def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(tmp_path, monkeyp
         monkeypatch.delenv("TZ", raising=False)
         time_mod.tzset()
 
-    expected = (datetime.fromtimestamp(earliest_ts, tz=timezone.utc).date().isoformat(),
-                datetime.fromtimestamp(latest_ts, tz=timezone.utc).date().isoformat())
+    expected = (
+        datetime.fromtimestamp(earliest_ts, tz=timezone.utc).date().isoformat(),
+        datetime.fromtimestamp(latest_ts, tz=timezone.utc).date().isoformat(),
+    )
     assert result["mtime_span"] == expected
 
 
@@ -204,9 +287,21 @@ def test_owners_and_types_report_directories_symlinks_and_two_owners(tmp_path):
         ("run/file_a.bin", b"a" * 100, {"uname": "alice", "gname": "teamA"}),
         ("run/file_b.bin", b"b" * 200, {"uname": "alice", "gname": "teamA"}),
         ("run/file_c.bin", b"c" * 300, {"uname": "bob", "gname": "teamB"}),
-        ("run/subdir/", b"", {"type": tarfile.DIRTYPE, "uname": "bob", "gname": "teamB"}),
-        ("run/link_to_a", b"", {"type": tarfile.SYMTYPE, "linkname": "file_a.bin",
-                                 "uname": "alice", "gname": "teamA"}),
+        (
+            "run/subdir/",
+            b"",
+            {"type": tarfile.DIRTYPE, "uname": "bob", "gname": "teamB"},
+        ),
+        (
+            "run/link_to_a",
+            b"",
+            {
+                "type": tarfile.SYMTYPE,
+                "linkname": "file_a.bin",
+                "uname": "alice",
+                "gname": "teamA",
+            },
+        ),
     ]
     store, archive_id, _ = build_and_index(tmp_path, members)
 
@@ -287,8 +382,21 @@ def test_export_command_creates_the_out_dir_and_names_what_it_wrote(tmp_path, ca
     assert not out_dir.exists()
     capsys.readouterr()
 
-    assert main(["archive", "export", "--db", db, "--archive", "a.tar",
-                 "--out", str(out_dir)]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "export",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--out",
+                str(out_dir),
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert out_dir.is_dir()
     for filename in ("manifest.csv", "by_dir.csv", "by_extension.csv"):
@@ -325,8 +433,18 @@ GOLDEN_MEMBERS = (
     + [(f"run/fault_b/rel{i:02d}/out.bin", b"y" * 2000) for i in range(3)]
     + [("run/notes.txt", b"hello\n")]
     + [("run/dup1.bin", b"d" * 1500), ("run/dup2.bin", b"e" * 1500)]
-    + [("run/link_to_notes", b"", {"type": tarfile.SYMTYPE, "linkname": "notes.txt",
-                                    "uname": "bob", "gname": "teamB"})]
+    + [
+        (
+            "run/link_to_notes",
+            b"",
+            {
+                "type": tarfile.SYMTYPE,
+                "linkname": "notes.txt",
+                "uname": "bob",
+                "gname": "teamB",
+            },
+        )
+    ]
 )
 
 # Captured verbatim from `summary(store, archive_id, top=5)` against GOLDEN_MEMBERS
@@ -342,10 +460,13 @@ EXPECTED_SUMMARY = {
     "by_top_dir": [("run", {"count": 12, "bytes": 14006})],
     "by_depth": {
         1: [("run", {"count": 12, "bytes": 14006})],
-        2: [("run/fault_b", {"count": 3, "bytes": 6000}),
+        2: [
+            ("run/fault_b", {"count": 3, "bytes": 6000}),
             ("run/fault_a", {"count": 5, "bytes": 5000}),
-            ("run", {"count": 4, "bytes": 3006})],
-        3: [("run", {"count": 4, "bytes": 3006}),
+            ("run", {"count": 4, "bytes": 3006}),
+        ],
+        3: [
+            ("run", {"count": 4, "bytes": 3006}),
             ("run/fault_b/rel00", {"count": 1, "bytes": 2000}),
             ("run/fault_b/rel01", {"count": 1, "bytes": 2000}),
             ("run/fault_b/rel02", {"count": 1, "bytes": 2000}),
@@ -353,21 +474,27 @@ EXPECTED_SUMMARY = {
             ("run/fault_a/rel01", {"count": 1, "bytes": 1000}),
             ("run/fault_a/rel02", {"count": 1, "bytes": 1000}),
             ("run/fault_a/rel03", {"count": 1, "bytes": 1000}),
-            ("run/fault_a/rel04", {"count": 1, "bytes": 1000})],
+            ("run/fault_a/rel04", {"count": 1, "bytes": 1000}),
+        ],
     },
-    "by_extension": [("bin", {"count": 10, "bytes": 14000}),
-                      ("txt", {"count": 1, "bytes": 6}),
-                      ("(none)", {"count": 1, "bytes": 0})],
-    "largest": [("run/fault_b/rel00", "out.bin", 2000),
-                ("run/fault_b/rel01", "out.bin", 2000),
-                ("run/fault_b/rel02", "out.bin", 2000),
-                ("run", "dup1.bin", 1500),
-                ("run", "dup2.bin", 1500)],
+    "by_extension": [
+        ("bin", {"count": 10, "bytes": 14000}),
+        ("txt", {"count": 1, "bytes": 6}),
+        ("(none)", {"count": 1, "bytes": 0}),
+    ],
+    "largest": [
+        ("run/fault_b/rel00", "out.bin", 2000),
+        ("run/fault_b/rel01", "out.bin", 2000),
+        ("run/fault_b/rel02", "out.bin", 2000),
+        ("run", "dup1.bin", 1500),
+        ("run", "dup2.bin", 1500),
+    ],
     "mtime_span": ("2023-11-14", "2023-11-14"),
-    "owners": [(("user", "proj00001"), {"count": 11, "bytes": 14006}),
-               (("bob", "teamB"), {"count": 1, "bytes": 0})],
-    "types": [("0", {"count": 11, "bytes": 14006}),
-              ("2", {"count": 1, "bytes": 0})],
+    "owners": [
+        (("user", "proj00001"), {"count": 11, "bytes": 14006}),
+        (("bob", "teamB"), {"count": 1, "bytes": 0}),
+    ],
+    "types": [("0", {"count": 11, "bytes": 14006}), ("2", {"count": 1, "bytes": 0})],
 }
 
 # Same capture, for write_csv(). Transcribed via repr() to pin whitespace/newlines
@@ -400,12 +527,7 @@ EXPECTED_BY_DIR_CSV = (
     "run/fault_a/rel03,1,1000\n"
     "run/fault_a/rel04,1,1000\n"
 )
-EXPECTED_BY_EXTENSION_CSV = (
-    "extension,count,bytes\n"
-    "bin,10,14000\n"
-    "txt,1,6\n"
-    "(none),1,0\n"
-)
+EXPECTED_BY_EXTENSION_CSV = "extension,count,bytes\nbin,10,14000\ntxt,1,6\n(none),1,0\n"
 
 
 def test_summary_and_csv_output_is_unchanged_by_the_streaming_refactor(tmp_path):
@@ -522,7 +644,9 @@ def test_largest_query_uses_the_size_index_not_a_full_scan(tmp_path):
         store.connect().set_trace_callback(None)
 
     candidates = [sql for sql in statements if "order by size desc" in sql.lower()]
-    assert candidates, f"expected a query ordering by size descending; saw: {statements}"
+    assert candidates, (
+        f"expected a query ordering by size descending; saw: {statements}"
+    )
 
     # The traced text already has its `?` placeholders expanded to literal values
     # (that is what `set_trace_callback` hands back), so it is run as-is.
@@ -582,14 +706,40 @@ def test_export_warns_on_a_non_complete_archive_but_not_on_a_complete_one(
     capsys.readouterr()
 
     out_complete = tmp_path / "out_complete"
-    assert main(["archive", "export", "--db", db, "--archive", "a.tar",
-                 "--out", str(out_complete)]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "export",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--out",
+                str(out_complete),
+            ]
+        )
+        == 0
+    )
     assert "may be missing members" not in capsys.readouterr().out.lower()
 
     store.mark_stale(archive_id, "parts changed underneath the index")
     out_stale = tmp_path / "out_stale"
-    assert main(["archive", "export", "--db", db, "--archive", "a.tar",
-                 "--out", str(out_stale)]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "export",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--out",
+                str(out_stale),
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert "may be missing members" in out
     assert "no longer there" in out.lower()
@@ -603,17 +753,53 @@ def test_export_warns_on_a_partially_walked_archive_before_the_wrote_lines(
     source.mkdir()
     write_parts(source, build_tar(members), part_size=8192)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
-    main(["archive", "index", "--db", db, "--archive", "a.tar",
-          "--batch", "5", "--max-batches", "1"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
+    main(
+        [
+            "archive",
+            "index",
+            "--db",
+            db,
+            "--archive",
+            "a.tar",
+            "--batch",
+            "5",
+            "--max-batches",
+            "1",
+        ]
+    )
     store = ArchiveStore(db)
     row = store.get("a.tar")
-    assert row["state"] != "complete"          # sanity: the walk really did stop early
+    assert row["state"] != "complete"  # sanity: the walk really did stop early
     capsys.readouterr()
 
     out_dir = tmp_path / "out"
-    assert main(["archive", "export", "--db", db, "--archive", "a.tar",
-                 "--out", str(out_dir)]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "export",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--out",
+                str(out_dir),
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert "may be missing members" in out
     assert "wrote " in out

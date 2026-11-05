@@ -17,16 +17,25 @@ def content_hash(content: str) -> str:
 def file(path, size, content=None, modified="2026-01-01T00:00:00Z"):
     """A file as Dropbox lists it. Files with the same `content` are copies."""
     return {
-        ".tag": "file", "id": f"id:{path}", "name": path.rsplit("/", 1)[1],
-        "path_display": path, "size": size, "rev": "r",
+        ".tag": "file",
+        "id": f"id:{path}",
+        "name": path.rsplit("/", 1)[1],
+        "path_display": path,
+        "size": size,
+        "rev": "r",
         "content_hash": content_hash(content or path),
-        "client_modified": modified, "server_modified": modified,
+        "client_modified": modified,
+        "server_modified": modified,
     }
 
 
 def folder(path):
-    return {".tag": "folder", "id": f"id:{path}", "name": path.rsplit("/", 1)[1],
-            "path_display": path}
+    return {
+        ".tag": "folder",
+        "id": f"id:{path}",
+        "name": path.rsplit("/", 1)[1],
+        "path_display": path,
+    }
 
 
 def listing(tmp_path, *entries, finished=True) -> Store:
@@ -43,14 +52,21 @@ def listing(tmp_path, *entries, finished=True) -> Store:
 
 
 def dir_of(store, path) -> int:
-    return store.query("SELECT id FROM dirs WHERE path_lower = ?", (path.lower(),))[0][0]
+    return store.query("SELECT id FROM dirs WHERE path_lower = ?", (path.lower(),))[0][
+        0
+    ]
 
 
 def archive(name, folder, parts, members, state="complete") -> dict:
     """An archive as the index holds it. `parts` holds (name, size, content) and `members`
     (dir, name, size, mtime), with a fifth item for a type other than a regular file."""
-    return {"name": name, "folder": folder, "parts": parts, "members": members,
-            "state": state}
+    return {
+        "name": name,
+        "folder": folder,
+        "parts": parts,
+        "members": members,
+        "state": state,
+    }
 
 
 def archive_index(tmp_path, *archives, name="archives.db") -> str:
@@ -63,19 +79,38 @@ def archive_index(tmp_path, *archives, name="archives.db") -> str:
         archive_id = conn.execute(
             "INSERT INTO archives (name, folder, total_size, n_parts, set_hash, state) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (held["name"], held["folder"], sum(size for _, size, _ in held["parts"]),
-             len(held["parts"]), f"set-{number}", held["state"])).lastrowid
+            (
+                held["name"],
+                held["folder"],
+                sum(size for _, size, _ in held["parts"]),
+                len(held["parts"]),
+                f"set-{number}",
+                held["state"],
+            ),
+        ).lastrowid
         offset = 0
         for idx, (part, size, content) in enumerate(held["parts"]):
-            conn.execute("INSERT INTO parts (archive_id, idx, name, size, offset, "
-                         "content_hash) VALUES (?, ?, ?, ?, ?, ?)",
-                         (archive_id, idx, part, size, offset, content_hash(content)))
+            conn.execute(
+                "INSERT INTO parts (archive_id, idx, name, size, offset, "
+                "content_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                (archive_id, idx, part, size, offset, content_hash(content)),
+            )
             offset += size
         for i, (where, member, size, mtime, *kind) in enumerate(held["members"]):
-            conn.execute("INSERT INTO members (archive_id, hdr_offset, data_offset, size, "
-                         "type, mtime, dir, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                         (archive_id, 512 * i, 512 * i + 512, size, kind[0] if kind else "0",
-                          mtime, where, member))
+            conn.execute(
+                "INSERT INTO members (archive_id, hdr_offset, data_offset, size, "
+                "type, mtime, dir, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    archive_id,
+                    512 * i,
+                    512 * i + 512,
+                    size,
+                    kind[0] if kind else "0",
+                    mtime,
+                    where,
+                    member,
+                ),
+            )
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     store.close()
     return path

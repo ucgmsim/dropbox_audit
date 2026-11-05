@@ -40,25 +40,29 @@ class Figures:
 
     parent: array
     depth: array
-    order: array          # dir ids, deepest first
-    kids: array           # direct subfolders
-    own_files: array      # files directly inside
+    order: array  # dir ids, deepest first
+    kids: array  # direct subfolders
+    own_files: array  # files directly inside
     files: array
     folders: array
     size: array
-    newest: array         # the latest client_modified below, 0 if none
-    cold: array           # bytes last modified before the cold cut-off
-    held: array           # bytes whose content also exists outside the folder
-    on_page: bytearray    # 1 for the page root and everything below it
+    newest: array  # the latest client_modified below, 0 if none
+    cold: array  # bytes last modified before the cold cut-off
+    held: array  # bytes whose content also exists outside the folder
+    on_page: bytearray  # 1 for the page root and everything below it
     page_root: int
-    copies: array = field(default_factory=lambda: array("I"))  # by files.rowid: copies, or 0
+    copies: array = field(
+        default_factory=lambda: array("I")
+    )  # by files.rowid: copies, or 0
     reclaimable: int = 0  # page bytes deletable while one copy of everything stays
 
 
 def find_dir(store, path: str):
     """The (id, path_display) of the folder at `path`, matched without case, or None."""
-    rows = store.query("SELECT id, path_display FROM dirs WHERE path_lower = ?",
-                       (path.rstrip("/").lower(),))
+    rows = store.query(
+        "SELECT id, path_display FROM dirs WHERE path_lower = ?",
+        (path.rstrip("/").lower(),),
+    )
     return rows[0] if rows else None
 
 
@@ -120,12 +124,25 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
     def zeros():
         return array("q", [0]) * top
 
-    f = Figures(parent=zeros(), depth=zeros(), order=array("q"), kids=zeros(),
-                own_files=zeros(), files=zeros(), folders=zeros(), size=zeros(),
-                newest=zeros(), cold=zeros(), held=zeros(), on_page=bytearray(top),
-                page_root=page_root, copies=array("I", [0]) * rowids)
+    f = Figures(
+        parent=zeros(),
+        depth=zeros(),
+        order=array("q"),
+        kids=zeros(),
+        own_files=zeros(),
+        files=zeros(),
+        folders=zeros(),
+        size=zeros(),
+        newest=zeros(),
+        cold=zeros(),
+        held=zeros(),
+        on_page=bytearray(top),
+        page_root=page_root,
+        copies=array("I", [0]) * rowids,
+    )
     for dir_id, parent_id, depth in conn.execute(
-            "SELECT id, parent_id, depth FROM dirs WHERE id < ? ORDER BY depth DESC", (top,)):
+        "SELECT id, parent_id, depth FROM dirs WHERE id < ? ORDER BY depth DESC", (top,)
+    ):
         f.parent[dir_id] = parent_id or 0
         f.depth[dir_id] = depth
         f.order.append(dir_id)
@@ -133,15 +150,19 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
     # A file's date is whatever uploaded it sent, so a wrong clock can date it after the
     # listing; such a date is never a folder's newest.
     for dir_id, count, total, latest, old in conn.execute(
-            "SELECT dir_id, COUNT(*), COALESCE(SUM(size), 0), "
-            "       COALESCE(MAX(CASE WHEN client_modified <= ? THEN client_modified END), 0), "
-            "       COALESCE(SUM(CASE WHEN client_modified < ? THEN size END), 0) "
-            "FROM files GROUP BY dir_id", (listed, listed - COLD_YEARS * YEAR)):
+        "SELECT dir_id, COUNT(*), COALESCE(SUM(size), 0), "
+        "       COALESCE(MAX(CASE WHEN client_modified <= ? THEN client_modified END), 0), "
+        "       COALESCE(SUM(CASE WHEN client_modified < ? THEN size END), 0) "
+        "FROM files GROUP BY dir_id",
+        (listed, listed - COLD_YEARS * YEAR),
+    ):
         if 0 < dir_id < top:
             f.own_files[dir_id] = f.files[dir_id] = count
             f.size[dir_id], f.newest[dir_id], f.cold[dir_id] = total, latest, old
 
-    for dir_id in f.order:  # deepest first, so each folder is complete before its parent
+    for (
+        dir_id
+    ) in f.order:  # deepest first, so each folder is complete before its parent
         up = f.parent[dir_id]
         if up:
             f.kids[up] += 1
@@ -179,26 +200,28 @@ def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
 
 
 def is_tiny(figures: Figures, d: int) -> bool:
-    return (figures.files[d] >= TINY_FILES
-            and figures.size[d] <= figures.files[d] * TINY_MEAN)
+    return (
+        figures.files[d] >= TINY_FILES
+        and figures.size[d] <= figures.files[d] * TINY_MEAN
+    )
 
 
 @dataclass
 class Row:
-    kind: str                 # "dir", "file" or "fold"
+    kind: str  # "dir", "file" or "fold"
     name: str
-    path: str                 # below the crawl root; a fold row carries its folder's
+    path: str  # below the crawl root; a fold row carries its folder's
     size: int
     files: int = 0
     folders: int = 0
-    date: int = 0             # a folder's newest file, or a file's own date
+    date: int = 0  # a folder's newest file, or a file's own date
     dir_id: int = 0
-    copies: int = 1           # a file's content: copies in the listing, this one included
+    copies: int = 1  # a file's content: copies in the listing, this one included
     held: int = 0
     cold: int = 0
     tiny: bool = False
-    entries: int = 0          # a fold row: the folder's direct children folded into it
-    group: str = ""           # a folder's largest kind of data (kinds.GROUPS), and its bytes
+    entries: int = 0  # a fold row: the folder's direct children folded into it
+    group: str = ""  # a folder's largest kind of data (kinds.GROUPS), and its bytes
     group_bytes: float = 0.0
     children: list = field(default_factory=list)
 
@@ -206,9 +229,9 @@ class Row:
 @dataclass
 class Page:
     root: Row
-    threshold: int            # entries below this fold
+    threshold: int  # entries below this fold
     rows: int
-    shown: set                # dir ids with a row of their own
+    shown: set  # dir ids with a row of their own
 
 
 def below(path: str, crawl_root: str) -> str:
@@ -217,7 +240,7 @@ def below(path: str, crawl_root: str) -> str:
     if path.lower() == root.lower():
         return ""
     if root and path.lower().startswith(root.lower() + "/"):
-        return path[len(root) + 1:]
+        return path[len(root) + 1 :]
     return path.lstrip("/")
 
 
@@ -225,14 +248,18 @@ def chunked(conn, query: str, ids):
     """The rows `query` finds for `ids`, a chunk at a time; it ends in `IN ({})`."""
     ids = list(ids)
     for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
+        chunk = ids[i : i + 500]
         yield from conn.execute(query.format(",".join("?" * len(chunk))), chunk)
 
 
 def dir_names(conn, ids) -> dict[int, tuple[str, str]]:
     """{dir id: (name, path_display)}."""
-    return {d: (name, path) for d, name, path in
-            chunked(conn, "SELECT id, name, path_display FROM dirs WHERE id IN ({})", ids)}
+    return {
+        d: (name, path)
+        for d, name, path in chunked(
+            conn, "SELECT id, name, path_display FROM dirs WHERE id IN ({})", ids
+        )
+    }
 
 
 def past(threshold: int, size: int) -> int:
@@ -243,9 +270,19 @@ def past(threshold: int, size: int) -> int:
 
 
 def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
-    return Row("dir", name, path, f.size[d], files=f.files[d], folders=f.folders[d],
-               date=f.newest[d], dir_id=d, held=f.held[d], cold=f.cold[d],
-               tiny=is_tiny(f, d))
+    return Row(
+        "dir",
+        name,
+        path,
+        f.size[d],
+        files=f.files[d],
+        folders=f.folders[d],
+        date=f.newest[d],
+        dir_id=d,
+        held=f.held[d],
+        cold=f.cold[d],
+        tiny=is_tiny(f, d),
+    )
 
 
 def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
@@ -255,14 +292,28 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
     # Each folder and file at or above the threshold gets a row, so while more than
     # max_rows of either qualify the page cannot fit: start past the (max_rows + 1)-th
     # largest. Memory then follows --max-rows, whatever --min-size is.
-    folders = heapq.nlargest(max_rows + 1, (d for d in range(1, top) if f.on_page[d]
-                                            and d != root and f.size[d] >= threshold),
-                             key=lambda d: f.size[d])
+    folders = heapq.nlargest(
+        max_rows + 1,
+        (
+            d
+            for d in range(1, top)
+            if f.on_page[d] and d != root and f.size[d] >= threshold
+        ),
+        key=lambda d: f.size[d],
+    )
     if len(folders) > max_rows:
         threshold = past(threshold, f.size[folders[-1]])
-    files = heapq.nlargest(max_rows + 1, (row for row in conn.execute(
-                               "SELECT rowid, dir_id, size FROM files WHERE size >= ?", (threshold,))
-                           if 0 < row[1] < top and f.on_page[row[1]]), key=lambda row: row[2])
+    files = heapq.nlargest(
+        max_rows + 1,
+        (
+            row
+            for row in conn.execute(
+                "SELECT rowid, dir_id, size FROM files WHERE size >= ?", (threshold,)
+            )
+            if 0 < row[1] < top and f.on_page[row[1]]
+        ),
+        key=lambda row: row[2],
+    )
     if len(files) > max_rows:
         threshold = past(threshold, files[-1][2])
 
@@ -270,8 +321,11 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
         shown = [d for d in folders if f.size[d] >= t]
         subfolders = Counter(f.parent[d] for d in shown)
         own = Counter(row[1] for row in files if row[2] >= t)
-        folds = sum(1 for d in [root, *shown]
-                    if f.kids[d] > subfolders[d] or f.own_files[d] > own[d])
+        folds = sum(
+            1
+            for d in [root, *shown]
+            if f.kids[d] > subfolders[d] or f.own_files[d] > own[d]
+        )
         return 1 + len(shown) + sum(own.values()) + folds
 
     rows = rows_at(threshold)
@@ -281,9 +335,14 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
 
     shown = {d for d in folders if f.size[d] >= threshold}
     names = dir_names(conn, shown | {root})
-    details = {rowid: (name, modified) for rowid, name, modified in chunked(
-        conn, "SELECT rowid, name, client_modified FROM files WHERE rowid IN ({})",
-        [row[0] for row in files if row[2] >= threshold])}
+    details = {
+        rowid: (name, modified)
+        for rowid, name, modified in chunked(
+            conn,
+            "SELECT rowid, name, client_modified FROM files WHERE rowid IN ({})",
+            [row[0] for row in files if row[2] >= threshold],
+        )
+    }
     crawl_root = store.get_meta("root") or ""
     inside = defaultdict(list)
     for d in shown:
@@ -294,8 +353,17 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
             name, modified = details[rowid]
             folder = below(names[dir_id][1], crawl_root)
             copies = f.copies[rowid] if rowid < len(f.copies) else 0
-            inside[dir_id].append(Row("file", name, f"{folder}/{name}" if folder else name,
-                                      size, files=1, date=modified or 0, copies=copies or 1))
+            inside[dir_id].append(
+                Row(
+                    "file",
+                    name,
+                    f"{folder}/{name}" if folder else name,
+                    size,
+                    files=1,
+                    date=modified or 0,
+                    copies=copies or 1,
+                )
+            )
 
     def assemble(row):
         children = sorted(inside.get(row.dir_id, ()), key=lambda r: (-r.size, r.name))
@@ -303,13 +371,24 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
             if child.kind == "dir":
                 assemble(child)
         subfolders = [c for c in children if c.kind == "dir"]
-        entries = (f.kids[row.dir_id] - len(subfolders)
-                   + f.own_files[row.dir_id] - (len(children) - len(subfolders)))
+        entries = (
+            f.kids[row.dir_id]
+            - len(subfolders)
+            + f.own_files[row.dir_id]
+            - (len(children) - len(subfolders))
+        )
         if entries:
-            children.append(Row("fold", "", row.path, row.size - sum(c.size for c in children),
-                                files=row.files - sum(c.files for c in children),
-                                folders=row.folders - sum(c.folders + 1 for c in subfolders),
-                                entries=entries))
+            children.append(
+                Row(
+                    "fold",
+                    "",
+                    row.path,
+                    row.size - sum(c.size for c in children),
+                    files=row.files - sum(c.files for c in children),
+                    folders=row.folders - sum(c.folders + 1 for c in subfolders),
+                    entries=entries,
+                )
+            )
         row.children = children
 
     name, path = names[root]
@@ -327,8 +406,12 @@ def measure_kinds(figures: Figures, page: Page, rows, listed: float) -> kinds.Ta
     """
     shown = [d for d in figures.order if d in page.shown]  # deepest first
     at = {d: i for i, d in enumerate(shown)}
-    near = array("i", [-1]) * len(figures.size)  # the nearest folder row, as an index in shown
-    for d in reversed(figures.order):  # shallowest first, so a parent is settled before its folders
+    near = array("i", [-1]) * len(
+        figures.size
+    )  # the nearest folder row, as an index in shown
+    for d in reversed(
+        figures.order
+    ):  # shallowest first, so a parent is settled before its folders
         near[d] = at[d] if d in at else near[figures.parent[d]]
     width = len(kinds.GROUPS)
     totals = array("d", [0.0]) * (width * len(shown))
@@ -351,7 +434,7 @@ def measure_kinds(figures: Figures, page: Page, rows, listed: float) -> kinds.Ta
         row = stack.pop()
         stack.extend(row.children)
         if row.kind == "dir" and row.dir_id in at:
-            sizes = totals[at[row.dir_id] * width:(at[row.dir_id] + 1) * width]
+            sizes = totals[at[row.dir_id] * width : (at[row.dir_id] + 1) * width]
             largest = max(range(width), key=sizes.__getitem__)
             if sizes[largest] > 0:
                 row.group, row.group_bytes = kinds.GROUPS[largest], sizes[largest]
@@ -372,13 +455,13 @@ def ancestors(d: int, parent):
 class Entry:
     dir_id: int
     path: str
-    target: int               # the row its link opens: itself, or its nearest shown ancestor
+    target: int  # the row its link opens: itself, or its nearest shown ancestor
     size: int
     files: int
     held: int
     cold: int
     newest: int
-    place: str = ""           # where most of its held-elsewhere bytes have their copies
+    place: str = ""  # where most of its held-elsewhere bytes have their copies
     place_share: float = 0.0
 
 
@@ -427,8 +510,11 @@ def counterparts(conn, figures: Figures, folders: list[int], floor: int) -> dict
     for group in duplicate_groups(conn, len(f.size)):
         for mine in {owner[d] for d, _, _ in group} - {0}:
             inside = sum(size for d, size, _ in group if owner[d] == mine)
-            for spot in {place(d, near[mine], f.parent, f.depth, floor)
-                         for d, _, _ in group if owner[d] != mine}:
+            for spot in {
+                place(d, near[mine], f.parent, f.depth, floor)
+                for d, _, _ in group
+                if owner[d] != mine
+            }:
                 credit[mine][spot] += inside
     out = {}
     for d in folders:
@@ -442,12 +528,26 @@ def tables(store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
     f, root = figures, figures.page_root
     below_root = [d for d in range(1, len(f.size)) if f.on_page[d] and d != root]
     big = [d for d in below_root if f.size[d] >= page.threshold]
-    dup = choose(sorted((d for d in big if f.held[d] and f.held[d] >= DUP_TABLE_SHARE * f.size[d]),
-                        key=lambda d: (-f.held[d], d)), f.parent)
-    cold = choose(sorted((d for d in big if f.cold[d] and f.cold[d] >= COLD_TABLE_SHARE * f.size[d]),
-                         key=lambda d: (-f.cold[d], d)), f.parent)
-    tiny = choose(sorted((d for d in below_root if is_tiny(f, d)),
-                         key=lambda d: (-f.files[d], d)), f.parent)
+    dup = choose(
+        sorted(
+            (d for d in big if f.held[d] and f.held[d] >= DUP_TABLE_SHARE * f.size[d]),
+            key=lambda d: (-f.held[d], d),
+        ),
+        f.parent,
+    )
+    cold = choose(
+        sorted(
+            (d for d in big if f.cold[d] and f.cold[d] >= COLD_TABLE_SHARE * f.size[d]),
+            key=lambda d: (-f.cold[d], d),
+        ),
+        f.parent,
+    )
+    tiny = choose(
+        sorted(
+            (d for d in below_root if is_tiny(f, d)), key=lambda d: (-f.files[d], d)
+        ),
+        f.parent,
+    )
 
     conn = store.connect()
     crawl_root = store.get_meta("root") or ""
@@ -458,15 +558,29 @@ def tables(store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
         target = d
         while target not in page.shown:
             target = f.parent[target]
-        e = Entry(d, below(names[d][1], crawl_root), target, f.size[d], f.files[d],
-                  f.held[d], f.cold[d], f.newest[d])
+        e = Entry(
+            d,
+            below(names[d][1], crawl_root),
+            target,
+            f.size[d],
+            f.files[d],
+            f.held[d],
+            f.cold[d],
+            f.newest[d],
+        )
         if d in spots:
             spot, credit = spots[d]
-            e.place, e.place_share = below(names[spot][1], crawl_root), credit / f.held[d]
+            e.place, e.place_share = (
+                below(names[spot][1], crawl_root),
+                credit / f.held[d],
+            )
         return e
 
-    return {"dup": [entry(d) for d in dup], "cold": [entry(d) for d in cold],
-            "tiny": [entry(d) for d in tiny]}
+    return {
+        "dup": [entry(d) for d in dup],
+        "cold": [entry(d) for d in cold],
+        "tiny": [entry(d) for d in tiny],
+    }
 
 
 # ---- build: everything the page shows ---------------------------------------
@@ -474,24 +588,31 @@ def tables(store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
 
 @dataclass
 class Summary:
-    title: str                # the page root's path
+    title: str  # the page root's path
     db_name: str
-    listed: float             # when the listing was taken
-    finished: bool            # a pass over the listing finished
+    listed: float  # when the listing was taken
+    finished: bool  # a pass over the listing finished
     generated: float
     reclaimable: int
     pending: int
     running: int
     failed: int
     min_size: int
-    types: list               # report.ExtRow
-    years: list               # report.YearRow
+    types: list  # report.ExtRow
+    years: list  # report.YearRow
     kinds: kinds.Tally | None = None
-    looked_inside: bool = False   # an archive index was given, to look inside tarballs
+    looked_inside: bool = False  # an archive index was given, to look inside tarballs
 
 
-def build(store, page_path: str, min_size: int, max_rows: int, db_name: str,
-          rules: kinds.Rules | None = None, index=None):
+def build(
+    store,
+    page_path: str,
+    min_size: int,
+    max_rows: int,
+    db_name: str,
+    rules: kinds.Rules | None = None,
+    index=None,
+):
     """(page, summary, tables) for the folder at `page_path`. `rules` and `index` (an
     archive index, see kinds.archive_index) say what kinds of data the files are."""
     conn = store.connect()
@@ -505,24 +626,39 @@ def build(store, page_path: str, min_size: int, max_rows: int, db_name: str,
         under = None if whole else page_path
         found = find_dir(store, page_path)
         if found is None:  # nothing listed yet
-            page, chosen, reclaimable = (Page(Row("dir", page_path, "", 0), min_size, 1, {0}),
-                                         {"dup": [], "cold": [], "tiny": []}, 0)
+            page, chosen, reclaimable = (
+                Page(Row("dir", page_path, "", 0), min_size, 1, {0}),
+                {"dup": [], "cold": [], "tiny": []},
+                0,
+            )
             counted = kinds.Tally(listed)
         else:
             figures = measure(store, listed, min_size, found[0])
             page = layout(store, figures, min_size, max_rows)
             counted = measure_kinds(
-                figures, page, kinds.walk(store, rules or kinds.Rules(), index, under), listed)
+                figures,
+                page,
+                kinds.walk(store, rules or kinds.Rules(), index, under),
+                listed,
+            )
             chosen = tables(store, figures, page)
             reclaimable = figures.reclaimable
         summary = Summary(
-            title=found[1] if found else page_path, db_name=db_name, listed=listed,
-            finished=finished, generated=time.time(), reclaimable=reclaimable,
-            pending=store.pending_count(), running=store.running_count(),
-            failed=store.progress()["shards_error"], min_size=min_size,
+            title=found[1] if found else page_path,
+            db_name=db_name,
+            listed=listed,
+            finished=finished,
+            generated=time.time(),
+            reclaimable=reclaimable,
+            pending=store.pending_count(),
+            running=store.running_count(),
+            failed=store.progress()["shards_error"],
+            min_size=min_size,
             types=report.extension_profile(store, limit=TYPE_ROWS, under=under),
-            years=report.cold_bytes(store, under=under), kinds=counted,
-            looked_inside=index is not None)
+            years=report.cold_bytes(store, under=under),
+            kinds=counted,
+            looked_inside=index is not None,
+        )
         return page, summary, chosen
     finally:
         if conn.in_transaction:
@@ -572,16 +708,20 @@ def _counts(row: Row) -> str:
 
 def _cells(size: int, total: int, tree: str) -> str:
     share = size / total if total else 0.0
-    return (f'<span class="size">{compact(size)}</span><span class="pct">{share:.1%}</span>'
-            f'<span class="bar">{bar(share)}</span><span class="tree">{tree}</span>'
-            '<span class="caret"></span>')
+    return (
+        f'<span class="size">{compact(size)}</span><span class="pct">{share:.1%}</span>'
+        f'<span class="bar">{bar(share)}</span><span class="tree">{tree}</span>'
+        '<span class="caret"></span>'
+    )
 
 
 def _badges(row: Row) -> str:
     out = ""
     if row.group_bytes >= KIND_BADGE * row.size > 0:
-        out += (f'<span class="badge kind">{kinds.SHORT[row.group]} '
-                f'{row.group_bytes / row.size:.0%}</span>')
+        out += (
+            f'<span class="badge kind">{kinds.SHORT[row.group]} '
+            f"{row.group_bytes / row.size:.0%}</span>"
+        )
     if row.size and row.held / row.size >= DUP_BADGE:
         out += f'<span class="badge dup">dup {row.held / row.size:.0%}</span>'
     if row.size and row.cold / row.size >= COLD_BADGE:
@@ -595,10 +735,12 @@ def _folder(out, row: Row, total: int, lines: str, twig: str) -> None:
     """Write a folder's row and, inside it, everything below it."""
     top = twig == ""
     meta = _counts(row) + (f" &middot; newest {day(row.date)}" if row.date else "")
-    out.write(f'<details class="dir" id="d{row.dir_id}" data-path="{esc(row.path)}"'
-              f'{" open" if top else ""}><summary class="row">{_cells(row.size, total, lines + twig)}'
-              f'<span class="name">{esc(row.name)}</span><span class="meta">{meta}</span>'
-              f'{_badges(row)}</summary>\n')
+    out.write(
+        f'<details class="dir" id="d{row.dir_id}" data-path="{esc(row.path)}"'
+        f'{" open" if top else ""}><summary class="row">{_cells(row.size, total, lines + twig)}'
+        f'<span class="name">{esc(row.name)}</span><span class="meta">{meta}</span>'
+        f"{_badges(row)}</summary>\n"
+    )
     inner = lines if top else lines + ("   " if twig == LAST else "│  ")
     for i, child in enumerate(row.children):
         branch = LAST if i == len(row.children) - 1 else MID
@@ -606,15 +748,23 @@ def _folder(out, row: Row, total: int, lines: str, twig: str) -> None:
         if child.kind == "dir":
             _folder(out, child, total, inner, branch)
         elif child.kind == "file":
-            copies = f'<span class="badge copies">×{child.copies}</span>' if child.copies > 1 else ""
-            out.write(f'<div class="row file" data-path="{esc(child.path)}">{cells}'
-                      f'<span class="name">{esc(child.name)}</span>'
-                      f'<span class="meta">{day(child.date)}</span>{copies}</div>\n')
+            copies = (
+                f'<span class="badge copies">×{child.copies}</span>'
+                if child.copies > 1
+                else ""
+            )
+            out.write(
+                f'<div class="row file" data-path="{esc(child.path)}">{cells}'
+                f'<span class="name">{esc(child.name)}</span>'
+                f'<span class="meta">{day(child.date)}</span>{copies}</div>\n'
+            )
         else:
             word = "entry" if child.entries == 1 else "entries"
-            out.write(f'<div class="row fold" data-path="{esc(child.path)}">{cells}'
-                      f'<span class="name">… {child.entries:,} more {word}</span>'
-                      f'<span class="meta">{_counts(child)}</span></div>\n')
+            out.write(
+                f'<div class="row fold" data-path="{esc(child.path)}">{cells}'
+                f'<span class="name">… {child.entries:,} more {word}</span>'
+                f'<span class="meta">{_counts(child)}</span></div>\n'
+            )
     out.write("</details>\n")
 
 
@@ -622,25 +772,40 @@ def _header(out, page: Page, summary: Summary) -> None:
     root = page.root
     made = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(summary.generated))
     when = "listed" if summary.finished else "listing begun"
-    out.write(f'<header>\n<h1>{esc(summary.title)}</h1>\n<div class="sub">{esc(summary.db_name)} '
-              f'&middot; {when} {day(summary.listed)} &middot; page made {made}</div>\n')
+    out.write(
+        f'<header>\n<h1>{esc(summary.title)}</h1>\n<div class="sub">{esc(summary.db_name)} '
+        f"&middot; {when} {day(summary.listed)} &middot; page made {made}</div>\n"
+    )
     if summary.pending or summary.running or summary.failed:
-        out.write(f'<div class="banner">The listing is incomplete: {summary.pending:,} pending, '
-                  f'{summary.running:,} running and {summary.failed:,} failed pieces. '
-                  'Every figure is a lower bound.</div>\n')
+        out.write(
+            f'<div class="banner">The listing is incomplete: {summary.pending:,} pending, '
+            f"{summary.running:,} running and {summary.failed:,} failed pieces. "
+            "Every figure is a lower bound.</div>\n"
+        )
     if page.threshold > summary.min_size:
-        out.write(f'<div class="banner">The page would have too many rows at {compact(summary.min_size)}, '
-                  f'so entries under {compact(page.threshold)} are folded.</div>\n')
+        out.write(
+            f'<div class="banner">The page would have too many rows at {compact(summary.min_size)}, '
+            f"so entries under {compact(page.threshold)} are folded.</div>\n"
+        )
     cold = root.cold / root.size if root.size else 0.0
-    tiles = [(compact(root.size), "total"), (f"{root.files:,}", "files"),
-             (f"{root.folders:,}", "folders"), (compact(summary.reclaimable), "reclaimable duplicates"),
-             (f"{compact(root.cold)} ({cold:.0%})", "cold")]
-    out.write('<div class="stats">' + "".join(
-        f'<div class="stat"><b>{value}</b><span>{label}</span></div>' for value, label in tiles)
+    tiles = [
+        (compact(root.size), "total"),
+        (f"{root.files:,}", "files"),
+        (f"{root.folders:,}", "folders"),
+        (compact(summary.reclaimable), "reclaimable duplicates"),
+        (f"{compact(root.cold)} ({cold:.0%})", "cold"),
+    ]
+    out.write(
+        '<div class="stats">'
+        + "".join(
+            f'<div class="stat"><b>{value}</b><span>{label}</span></div>'
+            for value, label in tiles
+        )
         + '</div>\n<div class="tools"><input type="search" id="q" placeholder="filter by path…" '
-          'autocomplete="off"><button data-all="open">expand all</button>'
-          '<button data-all="close">collapse all</button><span class="meta" id="count"></span>'
-          '</div>\n</header>\n')
+        'autocomplete="off"><button data-all="open">expand all</button>'
+        '<button data-all="close">collapse all</button><span class="meta" id="count"></span>'
+        "</div>\n</header>\n"
+    )
 
 
 def _table(out, headings: list[str], rows: list[list[str]], left=(0,)) -> None:
@@ -649,12 +814,21 @@ def _table(out, headings: list[str], rows: list[list[str]], left=(0,)) -> None:
         return
 
     def cell(tag, i, text):
-        return f'<{tag} class="left">{text}</{tag}>' if i in left else f"<{tag}>{text}</{tag}>"
+        return (
+            f'<{tag} class="left">{text}</{tag}>'
+            if i in left
+            else f"<{tag}>{text}</{tag}>"
+        )
 
-    out.write("<table>\n<tr>" + "".join(cell("th", i, h) for i, h in enumerate(headings))
-              + "</tr>\n")
+    out.write(
+        "<table>\n<tr>"
+        + "".join(cell("th", i, h) for i, h in enumerate(headings))
+        + "</tr>\n"
+    )
     for row in rows:
-        out.write("<tr>" + "".join(cell("td", i, c) for i, c in enumerate(row)) + "</tr>\n")
+        out.write(
+            "<tr>" + "".join(cell("td", i, c) for i, c in enumerate(row)) + "</tr>\n"
+        )
     out.write("</table>\n")
 
 
@@ -669,49 +843,120 @@ def _tables(out, page: Page, summary: Summary, chosen: dict) -> None:
     def share(n):
         return f"{n / total:.1%}" if total else "0.0%"
 
-    out.write('<h2>Biggest duplicated folders</h2>\n<p class="note">Folders with at least half '
-              'their bytes also stored elsewhere, the most held elsewhere first. Two folders that '
-              'name each other are copies of each other: delete at most one. These figures '
-              'overlap; the reclaimable figure at the top is what deleting duplicates can '
-              'actually free.</p>\n')
-    _table(out, ["folder", "size", "held elsewhere", "share", "held mostly in"],
-           [[_link(e), compact(e.size), compact(e.held), f"{e.held / e.size:.0%}",
-             f"{esc(e.place or '/')} ({e.place_share:.0%})" if e.place_share else ""]
-            for e in chosen["dup"]], left=(0, 4))
-    out.write(f'<h2>Coldest big folders</h2>\n<p class="note">Folders with at least '
-              f'{COLD_TABLE_SHARE:.0%} of their bytes last modified more than {COLD_YEARS} years '
-              'before the listing, the most cold bytes first.</p>\n')
-    _table(out, ["folder", "size", "cold", "newest"],
-           [[_link(e), compact(e.size), f"{e.cold / e.size:.0%}", day(e.newest)]
-            for e in chosen["cold"]])
-    out.write(f'<h2>Folders made of tiny files</h2>\n<p class="note">Folders of '
-              f'{TINY_FILES:,} files or more averaging {TINY_MEAN >> 20} MiB or less, the most '
-              'files first.</p>\n')
-    _table(out, ["folder", "files", "size", "mean file"],
-           [[_link(e), f"{e.files:,}", compact(e.size), compact(e.size / e.files)]
-            for e in chosen["tiny"]])
+    out.write(
+        '<h2>Biggest duplicated folders</h2>\n<p class="note">Folders with at least half '
+        "their bytes also stored elsewhere, the most held elsewhere first. Two folders that "
+        "name each other are copies of each other: delete at most one. These figures "
+        "overlap; the reclaimable figure at the top is what deleting duplicates can "
+        "actually free.</p>\n"
+    )
+    _table(
+        out,
+        ["folder", "size", "held elsewhere", "share", "held mostly in"],
+        [
+            [
+                _link(e),
+                compact(e.size),
+                compact(e.held),
+                f"{e.held / e.size:.0%}",
+                f"{esc(e.place or '/')} ({e.place_share:.0%})" if e.place_share else "",
+            ]
+            for e in chosen["dup"]
+        ],
+        left=(0, 4),
+    )
+    out.write(
+        f'<h2>Coldest big folders</h2>\n<p class="note">Folders with at least '
+        f"{COLD_TABLE_SHARE:.0%} of their bytes last modified more than {COLD_YEARS} years "
+        "before the listing, the most cold bytes first.</p>\n"
+    )
+    _table(
+        out,
+        ["folder", "size", "cold", "newest"],
+        [
+            [_link(e), compact(e.size), f"{e.cold / e.size:.0%}", day(e.newest)]
+            for e in chosen["cold"]
+        ],
+    )
+    out.write(
+        f'<h2>Folders made of tiny files</h2>\n<p class="note">Folders of '
+        f"{TINY_FILES:,} files or more averaging {TINY_MEAN >> 20} MiB or less, the most "
+        "files first.</p>\n"
+    )
+    _table(
+        out,
+        ["folder", "files", "size", "mean file"],
+        [
+            [_link(e), f"{e.files:,}", compact(e.size), compact(e.size / e.files)]
+            for e in chosen["tiny"]
+        ],
+    )
     out.write("<h2>Where the bytes are, by file type</h2>\n")
-    _table(out, ["type", "size", "share", "files"],
-           [["(no extension)" if r.ext == "(none)" else esc("." + r.ext), compact(r.bytes),
-             share(r.bytes), f"{r.files:,}"] for r in summary.types])
+    _table(
+        out,
+        ["type", "size", "share", "files"],
+        [
+            [
+                "(no extension)" if r.ext == "(none)" else esc("." + r.ext),
+                compact(r.bytes),
+                share(r.bytes),
+                f"{r.files:,}",
+            ]
+            for r in summary.types
+        ],
+    )
     counted = summary.kinds or kinds.Tally(summary.listed)
-    note = kinds.tarball_note(counted, summary.looked_inside, lambda n: compact(round(n)))
-    out.write(f'<h2>Where the bytes are, by kind</h2>\n<p class="note">{esc(note)}</p>\n')
-    _table(out, ["kind", "size", "share", "loose", "in tarballs"],
-           [[esc(group), compact(round(loose + tarred)), share(loose + tarred),
-             compact(round(loose)), compact(round(tarred))]
-            for group, (loose, tarred) in counted.groups().items()])
+    note = kinds.tarball_note(
+        counted, summary.looked_inside, lambda n: compact(round(n))
+    )
+    out.write(
+        f'<h2>Where the bytes are, by kind</h2>\n<p class="note">{esc(note)}</p>\n'
+    )
+    _table(
+        out,
+        ["kind", "size", "share", "loose", "in tarballs"],
+        [
+            [
+                esc(group),
+                compact(round(loose + tarred)),
+                share(loose + tarred),
+                compact(round(loose)),
+                compact(round(tarred)),
+            ]
+            for group, (loose, tarred) in counted.groups().items()
+        ],
+    )
     out.write("<h2>Bytes by year last modified</h2>\n")
-    _table(out, ["year", "size", "share", "files"],
-           [[str(r.year), compact(r.bytes), share(r.bytes), f"{r.files:,}"]
-            for r in summary.years])
+    _table(
+        out,
+        ["year", "size", "share", "files"],
+        [
+            [str(r.year), compact(r.bytes), share(r.bytes), f"{r.files:,}"]
+            for r in summary.years
+        ],
+    )
     by_year = counted.group_years()
     groups = list(counted.groups())
-    out.write("<h2>Bytes by kind and year</h2>\n<p class=\"note\">Each byte is dated by its "
-              "oldest copy, or inside a tarball by its member's own time.</p>\n")
-    _table(out, ["year", *(esc(kinds.SHORT[group]) for group in groups)],
-           [[str(year), *(compact(round(by_year.get(group, {}).get(year, 0))) for group in groups)]
-            for year in sorted({year for group in groups for year in by_year.get(group, {})})])
+    out.write(
+        '<h2>Bytes by kind and year</h2>\n<p class="note">Each byte is dated by its '
+        "oldest copy, or inside a tarball by its member's own time.</p>\n"
+    )
+    _table(
+        out,
+        ["year", *(esc(kinds.SHORT[group]) for group in groups)],
+        [
+            [
+                str(year),
+                *(
+                    compact(round(by_year.get(group, {}).get(year, 0)))
+                    for group in groups
+                ),
+            ]
+            for year in sorted(
+                {year for group in groups for year in by_year.get(group, {})}
+            )
+        ],
+    )
 
 
 def _reading(out, page: Page) -> None:

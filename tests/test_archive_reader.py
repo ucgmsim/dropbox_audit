@@ -8,11 +8,11 @@ from tests.archive_fakes import write_parts
 
 
 def test_reads_across_parts_return_the_original_bytes(tmp_path):
-    data = bytes(range(256)) * 40                      # 10,240 bytes
+    data = bytes(range(256)) * 40  # 10,240 bytes
     archive = write_parts(tmp_path, data, part_size=1024)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
     handle.seek(1000)
-    assert handle.read(100) == data[1000:1100]         # straddles a boundary
+    assert handle.read(100) == data[1000:1100]  # straddles a boundary
     handle.seek(0)
     assert handle.read(len(data)) == data
 
@@ -94,14 +94,22 @@ class _Recording(LocalRangeReader):
 def _replay(handle):
     """Reads, drops and window-keeping drops across three parts; what each read saw."""
     seen = []
-    for step in [(1000, 512), (150_000, 70_000), (99_990, 20), "drop", (250_000, 4096),
-                 "keep", (1000, 512), (299_000, 5000)]:
+    for step in [
+        (1000, 512),
+        (150_000, 70_000),
+        (99_990, 20),
+        "drop",
+        (250_000, 4096),
+        "keep",
+        (1000, 512),
+        (299_000, 5000),
+    ]:
         if step in ("drop", "keep"):
             handle.drop_cache(keep_window=step == "keep")
             continue
         offset, size = step
         handle.seek(offset)
-        assert handle.read(size) == DATA[offset:offset + size]
+        assert handle.read(size) == DATA[offset : offset + size]
         seen.append((handle.cached(), handle.fills))
     return seen
 
@@ -112,8 +120,15 @@ def test_what_a_read_returns_does_not_depend_on_the_shape(tmp_path):
     archive = write_parts(tmp_path, DATA, part_size=100_000)
 
     def run(shape):
-        return _replay(ConcatFile(archive, LocalRangeReader(tmp_path, archive),
-                                  window_min=4096, window_max=65_536, shape=shape))
+        return _replay(
+            ConcatFile(
+                archive,
+                LocalRangeReader(tmp_path, archive),
+                window_min=4096,
+                window_max=65_536,
+                shape=shape,
+            )
+        )
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("dbaudit.archive.reader.LEAD_STEP", 0)
@@ -134,7 +149,7 @@ def test_a_re_read_after_a_drop_starts_somewhere_else(tmp_path):
         assert handle.read(512) == DATA[200_000:200_512]
         starts.append(reader.asked[-1][1])
         handle.drop_cache()
-    assert starts[0] == 200_000                     # shape 0 has no lead
+    assert starts[0] == 200_000  # shape 0 has no lead
     assert {abs(b - a) for a, b in zip(starts, starts[1:])} == {25_033, 40_503}
 
 
@@ -145,12 +160,20 @@ def test_a_re_read_at_a_parts_first_byte_asks_for_a_different_length(tmp_path):
     reader = _Recording(tmp_path, archive)
     handle = ConcatFile(archive, reader, window_min=4096, window_max=4096, shape=1)
     for _ in range(8):
-        handle.seek(100_000)                        # part 1's first byte
+        handle.seek(100_000)  # part 1's first byte
         assert handle.read(512) == DATA[100_000:100_512]
         handle.drop_cache()
     # 4,096 wanted, and past that the lead of shapes 1 to 8.
-    assert reader.asked == [(1, 0, 44_599), (1, 0, 19_566), (1, 0, 60_069), (1, 0, 35_036),
-                            (1, 0, 10_003), (1, 0, 50_506), (1, 0, 25_473), (1, 0, 65_976)]
+    assert reader.asked == [
+        (1, 0, 44_599),
+        (1, 0, 19_566),
+        (1, 0, 60_069),
+        (1, 0, 35_036),
+        (1, 0, 10_003),
+        (1, 0, 50_506),
+        (1, 0, 25_473),
+        (1, 0, 65_976),
+    ]
 
 
 def test_a_re_read_crossing_into_the_next_part_asks_it_for_a_different_length(tmp_path):
@@ -164,9 +187,16 @@ def test_a_re_read_crossing_into_the_next_part_asks_it_for_a_different_length(tm
         assert handle.read(2000) == DATA[99_000:101_000]
         handle.drop_cache()
     # 3,096 of the window fall in part 1, and past that the lead of shapes 1 to 8.
-    assert reader.asked[1::2] == [(1, 0, 43_599), (1, 0, 18_566), (1, 0, 59_069),
-                                  (1, 0, 34_036), (1, 0, 9_003), (1, 0, 49_506),
-                                  (1, 0, 24_473), (1, 0, 64_976)]
+    assert reader.asked[1::2] == [
+        (1, 0, 43_599),
+        (1, 0, 18_566),
+        (1, 0, 59_069),
+        (1, 0, 34_036),
+        (1, 0, 9_003),
+        (1, 0, 49_506),
+        (1, 0, 24_473),
+        (1, 0, 64_976),
+    ]
 
 
 def test_a_lead_never_leaves_its_part_or_adds_a_request(tmp_path):
@@ -175,13 +205,18 @@ def test_a_lead_never_leaves_its_part_or_adds_a_request(tmp_path):
         wanted = archive.slices(pos, min(4096, len(DATA) - pos))
         for shape in (1, 2, 3, 30_599, 34_937, SHAPES - 1):
             reader = _Recording(tmp_path, archive)
-            handle = ConcatFile(archive, reader, window_min=4096, window_max=4096,
-                                shape=shape)
+            handle = ConcatFile(
+                archive, reader, window_min=4096, window_max=4096, shape=shape
+            )
             handle.seek(pos)
-            assert handle.read(512) == DATA[pos:pos + 512]
-            assert [part for part, _, _ in reader.asked] == [part for part, _, _ in wanted]
-            assert all(0 <= offset and offset + length <= archive.parts[part].size
-                       for part, offset, length in reader.asked)
+            assert handle.read(512) == DATA[pos : pos + 512]
+            assert [part for part, _, _ in reader.asked] == [
+                part for part, _, _ in wanted
+            ]
+            assert all(
+                0 <= offset and offset + length <= archive.parts[part].size
+                for part, offset, length in reader.asked
+            )
             assert reader.bytes_fetched == sum(length for _, _, length in reader.asked)
 
 
@@ -189,7 +224,7 @@ def test_a_part_smaller_than_a_request_is_asked_for_whole_every_time(tmp_path):
     """Where shapes stop: a request that already runs from a part's first byte to its
     last cannot move or grow without asking a second part, so it is the same every time.
     In practice only a small last part is like this."""
-    archive = write_parts(tmp_path, DATA[:103_000], part_size=100_000)   # 3,000 left
+    archive = write_parts(tmp_path, DATA[:103_000], part_size=100_000)  # 3,000 left
     reader = _Recording(tmp_path, archive)
     handle = ConcatFile(archive, reader, window_min=4096, window_max=4096, shape=1)
     for _ in range(3):
@@ -202,8 +237,10 @@ def test_a_part_smaller_than_a_request_is_asked_for_whole_every_time(tmp_path):
 def test_a_new_reader_starts_at_a_random_shape_unless_given_one(tmp_path, monkeypatch):
     archive = write_parts(tmp_path, b"z" * 100, part_size=100)
     drawn = []
-    monkeypatch.setattr("dbaudit.archive.reader.secrets",
-                        SimpleNamespace(randbelow=lambda n: drawn.append(n) or 12_345))
+    monkeypatch.setattr(
+        "dbaudit.archive.reader.secrets",
+        SimpleNamespace(randbelow=lambda n: drawn.append(n) or 12_345),
+    )
     assert ConcatFile(archive, LocalRangeReader(tmp_path, archive)).shape == 12_345
     assert ConcatFile(archive, LocalRangeReader(tmp_path, archive), shape=7).shape == 7
     assert drawn == [SHAPES]
@@ -221,6 +258,9 @@ def test_a_drop_moves_to_the_next_shape_with_or_without_its_window(tmp_path):
 def test_every_lead_comes_once_and_near_shapes_are_never_a_byte_apart():
     leads = [shape * LEAD_STEP % SHAPES for shape in range(SHAPES)]
     assert sorted(leads) == list(range(SHAPES))
-    assert {abs(leads[(s + 1) % SHAPES] - leads[s]) for s in range(SHAPES)} == {25_033, 40_503}
+    assert {abs(leads[(s + 1) % SHAPES] - leads[s]) for s in range(SHAPES)} == {
+        25_033,
+        40_503,
+    }
     # leads[d] is how far apart, mod SHAPES, the leads of two shapes d apart are.
     assert min(d for d in range(1, SHAPES) if leads[d] in (1, SHAPES - 1)) == 30_599

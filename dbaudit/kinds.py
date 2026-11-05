@@ -32,11 +32,26 @@ from pathlib import Path
 from . import report
 from .archive.tarwalk import REGULAR_MEMBER_TYPES
 
-GROUPS = ("simulated waveforms", "recorded waveforms", "velocity models",
-          "kept velocity models", "xyts", "rupture sources", "IM and hazard results", "other")
-SHORT = {"simulated waveforms": "sim wf", "recorded waveforms": "rec wf",
-         "velocity models": "vm", "kept velocity models": "vm kept", "xyts": "xyts",
-         "rupture sources": "src", "IM and hazard results": "im", "other": "other"}
+GROUPS = (
+    "simulated waveforms",
+    "recorded waveforms",
+    "velocity models",
+    "kept velocity models",
+    "xyts",
+    "rupture sources",
+    "IM and hazard results",
+    "other",
+)
+SHORT = {
+    "simulated waveforms": "sim wf",
+    "recorded waveforms": "rec wf",
+    "velocity models": "vm",
+    "kept velocity models": "vm kept",
+    "xyts": "xyts",
+    "rupture sources": "src",
+    "IM and hazard results": "im",
+    "other": "other",
+}
 KINDS = {
     "wf_bin_bb": ("BB binary (.bin)", "simulated waveforms"),
     "wf_bin_hf": ("HF binary (.bin)", "simulated waveforms"),
@@ -67,7 +82,14 @@ VM_NAME = re.compile(r"^(vp3dfile|vs3dfile|rho3dfile|in_basin_mask)")
 WF_BIN = re.compile(r"(^|_)(bb|hf|lf)\.bin$")
 WF_H5 = re.compile(r"^r\d+_(lf|hf|bb)\.h5$")
 BB_HF_TAR = re.compile(r"(^|_)(bb|hf)(_\d+)?\.tar")
-VM_FOLDERS = ("vm", "vms", "velocity_model", "velocity_models", "velocitymodel", "velocitymodels")
+VM_FOLDERS = (
+    "vm",
+    "vms",
+    "velocity_model",
+    "velocity_models",
+    "velocitymodel",
+    "velocitymodels",
+)
 # What the LF tarballs the index could list held, by bytes, in October 2026. An LF tarball it
 # could not list (`lf_mix`) is shared out the same way.
 LF_SPLIT = {"wf_seis_tar": 0.303, "xyts": 0.684, "other": 0.013}
@@ -78,12 +100,12 @@ TARLIKE = re.compile(r"\.tar$|\.tar\.|\.part[a-z]{2}$|_part_[a-z]{2}$")
 # How each byte was placed: a loose file, shared out over the members the archive index
 # lists, or a tarball judged by its name.
 LOOSE, MEMBERS, BY_NAME = "loose", "members", "name"
-AGES = (0.5, 1, 2, 3, 5, 10)    # years back from the listing that ages are counted at
+AGES = (0.5, 1, 2, 3, 5, 10)  # years back from the listing that ages are counted at
 YEAR = 365.25 * 86400
 # A walked archive whose listing holds all it has: the walk reached its end, or the tar
 # itself ends early.
 FINISHED = ("complete", "truncated")
-FOLDER_CACHE = 1 << 16          # folders whose tests classify remembers
+FOLDER_CACHE = 1 << 16  # folders whose tests classify remembers
 
 
 class KindsError(ValueError):
@@ -94,34 +116,48 @@ class KindsError(ValueError):
 class Rules:
     """The classifier, given the folder words that only mean something on one Dropbox."""
 
-    recorded: tuple[str, ...] = ()       # words in a folder path that mark recorded waveforms
-    im_folders: tuple[str, ...] = ()     # folders that hold IM and hazard results
-    lf_converted: tuple[str, ...] = ()   # words that mark LF converted to netCDF
-    vm_folders: tuple[str, ...] = ()     # more folder names that hold velocity models
-    keep: tuple[str, ...] = ()           # path prefixes whose velocity models are kept
+    recorded: tuple[
+        str, ...
+    ] = ()  # words in a folder path that mark recorded waveforms
+    im_folders: tuple[str, ...] = ()  # folders that hold IM and hazard results
+    lf_converted: tuple[str, ...] = ()  # words that mark LF converted to netCDF
+    vm_folders: tuple[str, ...] = ()  # more folder names that hold velocity models
+    keep: tuple[str, ...] = ()  # path prefixes whose velocity models are kept
     _im_dirs: tuple[str, ...] = field(init=False, repr=False, compare=False)
     _vm_dir: re.Pattern = field(init=False, repr=False, compare=False)
     _folder: object = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         for name in RULE_KEYS:
-            object.__setattr__(self, name, tuple(w.lower() for w in getattr(self, name)))
-        object.__setattr__(self, "_im_dirs", tuple("/" + w.strip("/") for w in self.im_folders))
+            object.__setattr__(
+                self, name, tuple(w.lower() for w in getattr(self, name))
+            )
+        object.__setattr__(
+            self, "_im_dirs", tuple("/" + w.strip("/") for w in self.im_folders)
+        )
         words = VM_FOLDERS + self.vm_folders
-        object.__setattr__(self, "_vm_dir", re.compile(
-            r"/(" + "|".join(map(re.escape, words)) + r")(/|$)|_vm(/|$)"))
+        object.__setattr__(
+            self,
+            "_vm_dir",
+            re.compile(r"/(" + "|".join(map(re.escape, words)) + r")(/|$)|_vm(/|$)"),
+        )
         # Files come folder by folder, so each folder's tests are worked out once.
-        object.__setattr__(self, "_folder",
-                           functools.lru_cache(maxsize=FOLDER_CACHE)(self._folder_tests))
+        object.__setattr__(
+            self,
+            "_folder",
+            functools.lru_cache(maxsize=FOLDER_CACHE)(self._folder_tests),
+        )
 
     def _folder_tests(self, folder: str) -> tuple[bool, bool, bool, bool, bool]:
         """What classify asks of a folder: recorded, LF converted, velocity models, sources
         and IM results."""
-        return (any(w in folder for w in self.recorded),
-                any(w in folder for w in self.lf_converted),
-                self._vm_dir.search(folder) is not None,
-                "/srf" in folder or "/sources/" in folder + "/",
-                any(d in folder for d in self._im_dirs))
+        return (
+            any(w in folder for w in self.recorded),
+            any(w in folder for w in self.lf_converted),
+            self._vm_dir.search(folder) is not None,
+            "/srf" in folder or "/sources/" in folder + "/",
+            any(d in folder for d in self._im_dirs),
+        )
 
     def classify(self, folder: str, name: str) -> str:
         """The kind of a file, both arguments lowercased. `folder` is a folder path, or an
@@ -162,7 +198,11 @@ class Rules:
             return "vm"
         if ext in ("srf", "stoch", "srfinfo") or "_source" in name or src_folder:
             return "src"
-        if ext in ("db", "csv", "parquet", "feather") or "intensity_measures" in name or im_folder:
+        if (
+            ext in ("db", "csv", "parquet", "feather")
+            or "intensity_measures" in name
+            or im_folder
+        ):
             return "im"
         return "other"
 
@@ -187,8 +227,9 @@ def load_rules(path: str | None) -> Rules:
         raise KindsError(f"{path} is not TOML: {exc}") from None
     for key, value in table.items():
         if key not in RULE_KEYS:
-            raise KindsError(f"{path}: unknown key {key!r} (the keys are "
-                             f"{', '.join(RULE_KEYS)})")
+            raise KindsError(
+                f"{path}: unknown key {key!r} (the keys are {', '.join(RULE_KEYS)})"
+            )
         if not isinstance(value, list) or not all(isinstance(w, str) for w in value):
             raise KindsError(f"{path}: {key} must be a list of strings")
     return Rules(**{key: tuple(value) for key, value in table.items()})
@@ -220,8 +261,10 @@ def shares(kind: str) -> dict[str, float]:
 # ---- the walk -------------------------------------------------------------------
 
 # Each duplicated content's oldest date: a loose copy is dated by its content's oldest copy.
-OLDEST = ("SELECT content_hash, MIN(client_modified) AS oldest FROM files "
-          "WHERE content_hash IS NOT NULL GROUP BY content_hash HAVING COUNT(*) > 1")
+OLDEST = (
+    "SELECT content_hash, MIN(client_modified) AS oldest FROM files "
+    "WHERE content_hash IS NOT NULL GROUP BY content_hash HAVING COUNT(*) > 1"
+)
 _TYPES = sorted(REGULAR_MEMBER_TYPES)
 _REGULAR = f"size > 0 AND type IN ({', '.join('?' * len(_TYPES))})"
 
@@ -230,8 +273,9 @@ def archive_index(path: str) -> sqlite3.Connection:
     """The archive index at `path`, read-only. One still being written is read through its
     write-ahead log, so it is never opened as immutable."""
     try:
-        conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True,
-                               isolation_level=None)
+        conn = sqlite3.connect(
+            Path(path).resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None
+        )
     except sqlite3.Error:
         raise KindsError(f"{path} holds no archive index") from None
     try:
@@ -242,8 +286,12 @@ def archive_index(path: str) -> sqlite3.Connection:
     return conn
 
 
-def walk(store, rules: Rules, index: sqlite3.Connection | None = None,
-         under: str | None = None) -> Iterator[tuple[int, str, float, str, float | None]]:
+def walk(
+    store,
+    rules: Rules,
+    index: sqlite3.Connection | None = None,
+    under: str | None = None,
+) -> Iterator[tuple[int, str, float, str, float | None]]:
     """Every byte of the listing, or of the folder `under`, as (dir_id, kind, size, how,
     date) rows, `how` being LOOSE, MEMBERS or BY_NAME. Bytes inside a tarball count toward
     the folder that holds it. Reads both databases, each in one read transaction, and
@@ -255,7 +303,9 @@ def walk(store, rules: Rules, index: sqlite3.Connection | None = None,
         aside: dict[int, list[tuple[int, int]]] = defaultdict(list)
         yield from _files(store, rules, archives, owner, aside, under)
         for archive_id in sorted(aside):
-            yield from _members(index, rules, archive_id, archives[archive_id], aside[archive_id])
+            yield from _members(
+                index, rules, archive_id, archives[archive_id], aside[archive_id]
+            )
     finally:
         if index is not None and index.in_transaction:
             index.execute("COMMIT")
@@ -272,20 +322,25 @@ def _archives(index):
     over one that is not, a finished walk over any other (a stale row lists the archive as
     it was before a part went), and between equals the latest row wins.
     """
-    listed = dict(index.execute(
-        f"SELECT archive_id, SUM(size) FROM members WHERE {_REGULAR} GROUP BY archive_id",
-        _TYPES))
+    listed = dict(
+        index.execute(
+            f"SELECT archive_id, SUM(size) FROM members WHERE {_REGULAR} GROUP BY archive_id",
+            _TYPES,
+        )
+    )
     archives, rank = {}, {}
     for archive_id, state, total, name, folder in index.execute(
-            "SELECT id, state, total_size, name, folder FROM archives"):
+        "SELECT id, state, total_size, name, folder FROM archives"
+    ):
         held = listed.get(archive_id, 0)
         trusted = held > 0 and (state in FINISHED or held >= total / 2)
         archives[archive_id] = (trusted, name, folder or "", held)
         rank[archive_id] = (trusted, state in FINISHED, archive_id)
     owner = {}
     for archive_id, digest in index.execute(
-            "SELECT archive_id, content_hash FROM parts WHERE content_hash IS NOT NULL "
-            "AND content_hash != ''"):
+        "SELECT archive_id, content_hash FROM parts WHERE content_hash IS NOT NULL "
+        "AND content_hash != ''"
+    ):
         try:
             key = bytes.fromhex(digest)
         except ValueError:  # no file's hash can match it
@@ -304,14 +359,18 @@ def _files(store, rules, archives, owner, aside, under):
     if opened:
         conn.execute("BEGIN")
     try:
-        sql = ("SELECT f.dir_id, f.name, f.size, f.content_hash, f.client_modified, "
-               "d.path_lower, o.oldest FROM files f JOIN dirs d ON d.id = f.dir_id "
-               f"LEFT JOIN ({OLDEST}) o ON o.content_hash = f.content_hash")
+        sql = (
+            "SELECT f.dir_id, f.name, f.size, f.content_hash, f.client_modified, "
+            "d.path_lower, o.oldest FROM files f JOIN dirs d ON d.id = f.dir_id "
+            f"LEFT JOIN ({OLDEST}) o ON o.content_hash = f.content_hash"
+        )
         values = []
         if under is not None:
             condition, values = report._subtree(under)
             sql += f" WHERE {condition}"
-        for dir_id, name, size, digest, modified, folder, oldest in conn.execute(sql, values):
+        for dir_id, name, size, digest, modified, folder, oldest in conn.execute(
+            sql, values
+        ):
             archive_id = owner.get(digest) if digest else None
             if archive_id is not None:
                 trusted, archive_name, archive_folder, _ = archives[archive_id]
@@ -341,10 +400,13 @@ def _members(index, rules, archive_id, archive, files):
     its listed members by size and dated by each member's own time."""
     _, name, folder, listed = archive
     for where, member, size, mtime in index.execute(
-            f"SELECT dir, name, size, mtime FROM members WHERE archive_id = ? AND {_REGULAR}",
-            [archive_id, *_TYPES]):
-        kind = rules.classify((folder + "/" + name + "::" + where).lower(),
-                              member.rsplit("/", 1)[-1].lower())
+        f"SELECT dir, name, size, mtime FROM members WHERE archive_id = ? AND {_REGULAR}",
+        [archive_id, *_TYPES],
+    ):
+        kind = rules.classify(
+            (folder + "/" + name + "::" + where).lower(),
+            member.rsplit("/", 1)[-1].lower(),
+        )
         for part, w in shares(kind).items():
             for dir_id, file_size in files:
                 yield dir_id, part, file_size * size * w / listed, MEMBERS, mtime
@@ -357,12 +419,12 @@ def _members(index, rules, archive_id, archive, files):
 class Tally:
     """Bytes by kind, each split [loose, in tarballs], as the walk gave them."""
 
-    listed: float                                  # when the listing was taken
-    kinds: dict = field(default_factory=dict)      # kind -> [loose, tarred]
-    months: dict = field(default_factory=dict)     # (kind, "YYYY-MM") -> [loose, tarred]
-    older: dict = field(default_factory=dict)      # (kind, years) -> [loose, tarred]
-    members: float = 0.0                           # tarred bytes shared over listed members
-    by_name: float = 0.0                           # tarred bytes judged by their names
+    listed: float  # when the listing was taken
+    kinds: dict = field(default_factory=dict)  # kind -> [loose, tarred]
+    months: dict = field(default_factory=dict)  # (kind, "YYYY-MM") -> [loose, tarred]
+    older: dict = field(default_factory=dict)  # (kind, years) -> [loose, tarred]
+    members: float = 0.0  # tarred bytes shared over listed members
+    by_name: float = 0.0  # tarred bytes judged by their names
     undated: float = 0.0
 
     def total(self) -> float:
@@ -379,7 +441,9 @@ class Tally:
     def groups(self) -> dict[str, list[float]]:
         """Group -> [loose, tarred], in GROUPS order, for the groups that hold bytes."""
         out = self._by_group(self.kinds.items())
-        return {group: out[group] for group in GROUPS if group in out and sum(out[group])}
+        return {
+            group: out[group] for group in GROUPS if group in out and sum(out[group])
+        }
 
     def group_older(self, years) -> dict[str, list[float]]:
         """Group -> [loose, tarred] older than `years`, for each group that holds bytes."""
@@ -399,10 +463,14 @@ class Tally:
 def tarball_note(counted: Tally, looked_inside: bool, size) -> str:
     """One sentence on how the tarballs' bytes were placed; `size` formats a byte count."""
     if looked_inside:
-        return (f"In tarballs: {size(counted.members)} shared out over the members the archive "
-                f"index lists, {size(counted.by_name)} judged by their names.")
-    return (f"In tarballs: {size(counted.members + counted.by_name)}, all judged by their names "
-            "(give --archive-db to look inside them).")
+        return (
+            f"In tarballs: {size(counted.members)} shared out over the members the archive "
+            f"index lists, {size(counted.by_name)} judged by their names."
+        )
+    return (
+        f"In tarballs: {size(counted.members + counted.by_name)}, all judged by their names "
+        "(give --archive-db to look inside them)."
+    )
 
 
 def tally(rows, listed: float) -> Tally:
@@ -443,6 +511,7 @@ def tally(rows, listed: float) -> Tally:
 def _months():
     """A function giving a Unix time's UTC month as "YYYY-MM", remembered day by day, or
     None for a time no calendar holds."""
+
     @functools.lru_cache(maxsize=None)
     def of_day(day: int) -> str | None:
         try:
@@ -459,18 +528,35 @@ def write_csv(counted: Tally, outdir: str, about: dict[str, str]) -> list[str]:
     os.makedirs(outdir, exist_ok=True)
     held = [kind for kind in KINDS if sum(counted.kinds.get(kind, (0, 0)))]
     tables = {
-        "kinds": (["kind", "label", "group", "bytes", "loose", "tarred"],
-                  [(kind, *KINDS[kind], round(sum(counted.kinds[kind])),
-                    *map(round, counted.kinds[kind])) for kind in held]),
-        "kinds_by_month": (["kind", "group", "month", "loose", "tarred"],
-                           [(kind, KINDS[kind][1], month, *map(round, figures))
-                            for kind in held
-                            for (of, month), figures in sorted(counted.months.items())
-                            if of == kind]),
-        "kinds_older_than": (["kind", "group", "years", "loose", "tarred"],
-                             [(kind, KINDS[kind][1], years,
-                               *map(round, counted.older[kind, years]))
-                              for kind in held for years in AGES]),
+        "kinds": (
+            ["kind", "label", "group", "bytes", "loose", "tarred"],
+            [
+                (
+                    kind,
+                    *KINDS[kind],
+                    round(sum(counted.kinds[kind])),
+                    *map(round, counted.kinds[kind]),
+                )
+                for kind in held
+            ],
+        ),
+        "kinds_by_month": (
+            ["kind", "group", "month", "loose", "tarred"],
+            [
+                (kind, KINDS[kind][1], month, *map(round, figures))
+                for kind in held
+                for (of, month), figures in sorted(counted.months.items())
+                if of == kind
+            ],
+        ),
+        "kinds_older_than": (
+            ["kind", "group", "years", "loose", "tarred"],
+            [
+                (kind, KINDS[kind][1], years, *map(round, counted.older[kind, years]))
+                for kind in held
+                for years in AGES
+            ],
+        ),
         "kinds_listing": (list(about), [list(about.values())]),
     }
     written = []

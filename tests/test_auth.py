@@ -30,19 +30,34 @@ def test_headers_include_bearer_and_path_root():
     )
     h = tp.headers()
     assert h["Authorization"] == "Bearer tok-abc"
-    assert json.loads(h["Dropbox-API-Path-Root"]) == {".tag": "root", "root": "1234567890"}
+    assert json.loads(h["Dropbox-API-Path-Root"]) == {
+        ".tag": "root",
+        "root": "1234567890",
+    }
     assert h["Content-Type"] == "application/json"
 
 
 def test_expired_token_triggers_rclone_refresh():
     calls = []
     expired = json.dumps(
-        {"dropbox": {"type": "dropbox", "token": json.dumps(
-            {"access_token": "old", "expiry": "2000-01-01T00:00:00Z"})}}
+        {
+            "dropbox": {
+                "type": "dropbox",
+                "token": json.dumps(
+                    {"access_token": "old", "expiry": "2000-01-01T00:00:00Z"}
+                ),
+            }
+        }
     )
     fresh = json.dumps(
-        {"dropbox": {"type": "dropbox", "token": json.dumps(
-            {"access_token": "new", "expiry": "2099-01-01T00:00:00Z"})}}
+        {
+            "dropbox": {
+                "type": "dropbox",
+                "token": json.dumps(
+                    {"access_token": "new", "expiry": "2099-01-01T00:00:00Z"}
+                ),
+            }
+        }
     )
     dumps = iter([expired, fresh])
     tp = TokenProvider(
@@ -109,8 +124,12 @@ def test_expiry_within_refresh_margin_is_treated_as_stale():
         "%Y-%m-%dT%H:%M:%SZ"
     )
     stale = json.dumps(
-        {"dropbox": {"type": "dropbox", "token": json.dumps(
-            {"access_token": "old", "expiry": soon})}}
+        {
+            "dropbox": {
+                "type": "dropbox",
+                "token": json.dumps({"access_token": "old", "expiry": soon}),
+            }
+        }
     )
     dumps = iter([stale, FAKE_DUMP])
     refreshed = []
@@ -136,8 +155,12 @@ def test_refresh_is_not_attempted_on_every_call():
         "%Y-%m-%dT%H:%M:%SZ"
     )
     stale = json.dumps(
-        {"dropbox": {"type": "dropbox", "token": json.dumps(
-            {"access_token": "still-valid", "expiry": soon})}}
+        {
+            "dropbox": {
+                "type": "dropbox",
+                "token": json.dumps({"access_token": "still-valid", "expiry": soon}),
+            }
+        }
     )
     refreshes, dumps = [], []
     clock = [0.0]
@@ -147,8 +170,10 @@ def test_refresh_is_not_attempted_on_every_call():
         return stale
 
     tp = TokenProvider(
-        refresh_margin=600, refresh_cooldown=60,
-        _dump_fn=dump, _refresh_fn=lambda: refreshes.append(1),
+        refresh_margin=600,
+        refresh_cooldown=60,
+        _dump_fn=dump,
+        _refresh_fn=lambda: refreshes.append(1),
         _account_fn=lambda tok: {"root_info": {"root_namespace_id": "1"}},
         _clock=lambda: clock[0],
     )
@@ -165,17 +190,30 @@ def test_refresh_is_not_attempted_on_every_call():
 def test_expired_token_still_refreshes_despite_cooldown():
     """A genuinely expired token must never be served, cooldown or not."""
     expired = json.dumps(
-        {"dropbox": {"type": "dropbox", "token": json.dumps(
-            {"access_token": "old", "expiry": "2000-01-01T00:00:00Z"})}}
+        {
+            "dropbox": {
+                "type": "dropbox",
+                "token": json.dumps(
+                    {"access_token": "old", "expiry": "2000-01-01T00:00:00Z"}
+                ),
+            }
+        }
     )
     fresh = json.dumps(
-        {"dropbox": {"type": "dropbox", "token": json.dumps(
-            {"access_token": "new", "expiry": "2099-01-01T00:00:00Z"})}}
+        {
+            "dropbox": {
+                "type": "dropbox",
+                "token": json.dumps(
+                    {"access_token": "new", "expiry": "2099-01-01T00:00:00Z"}
+                ),
+            }
+        }
     )
     dumps = iter([expired, fresh, fresh, fresh])
     tp = TokenProvider(
         refresh_cooldown=1e9,
-        _dump_fn=lambda: next(dumps), _refresh_fn=lambda: None,
+        _dump_fn=lambda: next(dumps),
+        _refresh_fn=lambda: None,
         _account_fn=lambda tok: {"root_info": {"root_namespace_id": "1"}},
     )
     assert tp.access_token() == "new"
@@ -187,12 +225,22 @@ def test_invalidate_forces_a_reread_of_the_token():
 
     def dump():
         calls.append(1)
-        return json.dumps({"dropbox": {"token": json.dumps(
-            {"access_token": f"t{len(calls)}", "expiry": "2099-01-01T00:00:00Z"})}})
+        return json.dumps(
+            {
+                "dropbox": {
+                    "token": json.dumps(
+                        {
+                            "access_token": f"t{len(calls)}",
+                            "expiry": "2099-01-01T00:00:00Z",
+                        }
+                    )
+                }
+            }
+        )
 
     provider = TokenProvider(_dump_fn=dump, _refresh_fn=lambda: None)
     assert provider.access_token() == "t1"
-    assert provider.access_token() == "t1"       # cached
+    assert provider.access_token() == "t1"  # cached
     provider.invalidate()
     assert provider.access_token() == "t2"
 
@@ -206,11 +254,13 @@ class _Answer:
 
 
 @pytest.mark.parametrize("status", [429, 500, 503])
-def test_an_account_lookup_dropbox_cannot_answer_now_is_not_dead_credentials(monkeypatch,
-                                                                             status):
+def test_an_account_lookup_dropbox_cannot_answer_now_is_not_dead_credentials(
+    monkeypatch, status
+):
     """A rate limit or a server error at the start of a run says nothing about the token:
     called dead credentials, it stopped the run within seconds."""
     from dbaudit import auth
+
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: _Answer(status))
     with pytest.raises(RuntimeError) as raised:
         auth._fetch_account("tok")
@@ -219,6 +269,7 @@ def test_an_account_lookup_dropbox_cannot_answer_now_is_not_dead_credentials(mon
 
 def test_an_account_lookup_that_refuses_the_token_is_an_auth_error(monkeypatch):
     from dbaudit import auth
+
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: _Answer(401))
     with pytest.raises(AuthError):
         auth._fetch_account("tok")

@@ -1,7 +1,16 @@
 import pytest
 
-from dbaudit.kinds import (GROUPS, KINDS, LF_SPLIT, SHORT, KindsError, Rules, by_archive_name,
-                           load_rules, shares)
+from dbaudit.kinds import (
+    GROUPS,
+    KINDS,
+    LF_SPLIT,
+    SHORT,
+    KindsError,
+    Rules,
+    by_archive_name,
+    load_rules,
+    shares,
+)
 
 CASES = [  # (folder, name, rules, kind): name rules first, in order, then folders
     ("/r/vm", "faultsz03_xyts.e3d", {}, "xyts"),
@@ -21,7 +30,12 @@ CASES = [  # (folder, name, rules, kind): name rules first, in order, then folde
     ("/r/a", "broadband.h5", {}, "wf_h5_bb"),
     ("/r/a", "seis_lf.nc", {}, "wf_seis_nc"),
     ("/r/a", "faultsz03_seis-00001.e3d", {}, "wf_seis"),
-    ("/r/lf_netcdf/a", "station.nc", {"lf_converted": ("lf_netcdf",)}, "wf_lf_converted"),
+    (
+        "/r/lf_netcdf/a",
+        "station.nc",
+        {"lf_converted": ("lf_netcdf",)},
+        "wf_lf_converted",
+    ),
     ("/r/a", "station.nc", {}, "other"),
     ("/r/a", "faultsz03_hf.bin", {}, "wf_bin_hf"),
     ("/r/a", "bb.bin", {}, "wf_bin_bb"),
@@ -47,11 +61,18 @@ def test_a_file_gets_the_kind_its_folder_and_name_say(folder, name, rules, kind)
     assert Rules(**rules).classify(folder, name) == kind
 
 
-@pytest.mark.parametrize("folder,name,kind", [
-    ("/r/a", "x_hf_3.tar", "wf_bin_hf"), ("/r/runs_bb", "a.tar", "wf_bin_bb"),
-    ("/r/a", "outbin.tar", "lf_mix"), ("/r/a", "x_im.tar", "im"),
-    ("/r/a", "sources.tar", "src"), ("/r/a", "v01p0_vms.tar", "vm"),
-    ("/r/a", "data.tar", "unknown_archive")])
+@pytest.mark.parametrize(
+    "folder,name,kind",
+    [
+        ("/r/a", "x_hf_3.tar", "wf_bin_hf"),
+        ("/r/runs_bb", "a.tar", "wf_bin_bb"),
+        ("/r/a", "outbin.tar", "lf_mix"),
+        ("/r/a", "x_im.tar", "im"),
+        ("/r/a", "sources.tar", "src"),
+        ("/r/a", "v01p0_vms.tar", "vm"),
+        ("/r/a", "data.tar", "unknown_archive"),
+    ],
+)
 def test_a_tarball_nobody_listed_is_judged_by_its_name(folder, name, kind):
     assert by_archive_name(folder, name) == kind
 
@@ -75,18 +96,30 @@ def test_an_unlisted_lf_tarball_is_shared_out_like_the_listed_ones():
 
 def test_a_rules_file_gives_its_words(tmp_path):
     path = tmp_path / "site.toml"
-    path.write_text('recorded = ["observed_db"]\nim_folders = ["im_results", "hazard"]\n'
-                    'lf_converted = ["lf_netcdf"]\nvm_folders = ["velmodels"]\n'
-                    'keep = ["/TeamSpace/scratch/proj00001/"]\n')
-    assert load_rules(str(path)) == Rules(("observed_db",), ("im_results", "hazard"),
-                                          ("lf_netcdf",), ("velmodels",),
-                                          ("/teamspace/scratch/proj00001/",))
+    path.write_text(
+        'recorded = ["observed_db"]\nim_folders = ["im_results", "hazard"]\n'
+        'lf_converted = ["lf_netcdf"]\nvm_folders = ["velmodels"]\n'
+        'keep = ["/TeamSpace/scratch/proj00001/"]\n'
+    )
+    assert load_rules(str(path)) == Rules(
+        ("observed_db",),
+        ("im_results", "hazard"),
+        ("lf_netcdf",),
+        ("velmodels",),
+        ("/teamspace/scratch/proj00001/",),
+    )
     assert load_rules(None) == Rules()
 
 
-@pytest.mark.parametrize("text,named", [
-    ('recordd = ["x"]', "recordd"), ('keep = "/x/"', "keep"), ("recorded = [1]", "recorded"),
-    ("recorded = [", "TOML")])
+@pytest.mark.parametrize(
+    "text,named",
+    [
+        ('recordd = ["x"]', "recordd"),
+        ('keep = "/x/"', "keep"),
+        ("recorded = [1]", "recorded"),
+        ("recorded = [", "TOML"),
+    ],
+)
 def test_a_rules_file_that_cannot_be_used_says_why(tmp_path, text, named):
     path = tmp_path / "site.toml"
     path.write_text(text)

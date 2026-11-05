@@ -161,17 +161,17 @@ def test_the_rate_does_not_climb_when_requests_go_out_slower_than_it_allows():
 
 def test_a_clean_interval_starts_when_the_pause_ends():
     clock, lim = make(rps=4.0, max_rps=20.0, recover_after=10)
-    lim.on_rate_limited(5)              # rate 2.0; everything waits until t=5
-    saturate(clock, lim, 14)            # the pause, then 9 s at the full rate
+    lim.on_rate_limited(5)  # rate 2.0; everything waits until t=5
+    saturate(clock, lim, 14)  # the pause, then 9 s at the full rate
     assert lim.rps == 2.0
-    saturate(clock, lim, 2)             # a whole clean interval since the pause ended
+    saturate(clock, lim, 2)  # a whole clean interval since the pause ended
     assert lim.rps == 2.5
 
 
 def test_concurrency_does_not_recover_as_a_pause_ends():
     clock, lim = make(max_concurrency=8, recover_after=300)
     lim.on_rate_limited(300)
-    clock.t += 301                      # the pause is just over: no clean interval yet
+    clock.t += 301  # the pause is just over: no clean interval yet
     lim.on_success()
     assert lim.concurrency == 7
 
@@ -192,7 +192,7 @@ def test_429s_that_come_back_together_are_one_overload_even_at_retry_after_zero(
         lim.on_rate_limited(0)
         clock.t += 0.08
     assert (lim.rps, lim.concurrency) == (4.0, 23)
-    clock.t += 5                        # Dropbox objecting again later is a new overload
+    clock.t += 5  # Dropbox objecting again later is a new overload
     lim.on_rate_limited(0)
     assert (lim.rps, lim.concurrency) == (2.0, 22)
 
@@ -213,7 +213,7 @@ def test_a_429_halves_the_rate_but_not_below_one_request_a_second():
     for _ in range(5):
         lim.on_rate_limited(1)
         rates.append(lim.rps)
-        clock.t += 2             # past the pause, so each 429 counts
+        clock.t += 2  # past the pause, so each 429 counts
     assert rates == [4.0, 2.0, 1.0, 1.0, 1.0]
 
 

@@ -42,7 +42,13 @@ def lister(resps):
 
 
 def test_list_folder_returns_page():
-    lst = lister([FakeResp(200, {"entries": [{".tag": "file"}], "cursor": "c1", "has_more": True})])
+    lst = lister(
+        [
+            FakeResp(
+                200, {"entries": [{".tag": "file"}], "cursor": "c1", "has_more": True}
+            )
+        ]
+    )
     page = lst.list_folder("/TeamSpace", recursive=True)
     assert len(page.entries) == 1
     assert page.cursor == "c1"
@@ -74,7 +80,17 @@ def test_continue_uses_the_continue_endpoint():
 
 def test_429_body_retry_after_is_used():
     lst = lister(
-        [FakeResp(429, {"error": {"reason": {".tag": "too_many_requests"}, "retry_after": 300}})]
+        [
+            FakeResp(
+                429,
+                {
+                    "error": {
+                        "reason": {".tag": "too_many_requests"},
+                        "retry_after": 300,
+                    }
+                },
+            )
+        ]
     )
     with pytest.raises(RateLimited) as excinfo:
         lst.list_folder("/x", recursive=True)
@@ -102,7 +118,9 @@ def test_cursor_reset_classified():
 
 
 def test_path_not_found_classified():
-    lst = lister([FakeResp(409, {"error": {".tag": "path", "path": {".tag": "not_found"}}})])
+    lst = lister(
+        [FakeResp(409, {"error": {".tag": "path", "path": {".tag": "not_found"}}})]
+    )
     with pytest.raises(PathNotFound):
         lst.list_folder("/gone", recursive=True)
 
@@ -130,8 +148,12 @@ def test_a_listing_asks_for_no_deleted_entries():
     ask for entries that are already gone."""
     import json
 
-    lst = HttpLister(FakeTokens(), session=FakeSession(
-        [FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})]))
+    lst = HttpLister(
+        FakeTokens(),
+        session=FakeSession(
+            [FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})]
+        ),
+    )
     lst.list_folder("/x", recursive=True)
     assert json.loads(lst.session.calls[0][1])["include_deleted"] is False
 

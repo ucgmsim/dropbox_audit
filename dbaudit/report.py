@@ -80,8 +80,12 @@ def duplicate_report(store, limit: int = 50) -> list[DuplicateRow]:
         )
         out.append(
             DuplicateRow(
-                content_hash=content_hash.hex() if isinstance(content_hash, bytes) else str(content_hash),
-                copies=copies, size=size, reclaimable=reclaimable,
+                content_hash=content_hash.hex()
+                if isinstance(content_hash, bytes)
+                else str(content_hash),
+                copies=copies,
+                size=size,
+                reclaimable=reclaimable,
                 example=example[0][0] if example else "",
             )
         )
@@ -103,8 +107,11 @@ def _subtree(under: str) -> tuple[str, list]:
     character after "/", so this is one range scan of the path index.
     """
     low = under.rstrip("/").lower()
-    return ("dir_id IN (SELECT id FROM dirs WHERE path_lower = ? "
-            "OR (path_lower >= ? AND path_lower < ?))", [low, low + "/", low + "0"])
+    return (
+        "dir_id IN (SELECT id FROM dirs WHERE path_lower = ? "
+        "OR (path_lower >= ? AND path_lower < ?))",
+        [low, low + "/", low + "0"],
+    )
 
 
 def cold_bytes(store, under: str | None = None) -> list[YearRow]:
@@ -178,8 +185,9 @@ def top_dirs(store, limit: int = 50) -> list[DirRow]:
     return out[:limit]
 
 
-def small_file_hotspots(store, min_files: int = 100_000, max_mean_size: int = 65536,
-                        limit: int = 50) -> list[HotspotRow]:
+def small_file_hotspots(
+    store, min_files: int = 100_000, max_mean_size: int = 65536, limit: int = 50
+) -> list[HotspotRow]:
     """Directories holding many tiny files.
 
     These dominate crawl time and are usually the best cleanup candidates: lots of
@@ -229,18 +237,32 @@ def export_csv(store, outdir: str) -> list[str]:
     os.makedirs(outdir, exist_ok=True)
     written = []
     tables = {
-        "top_dirs": (["path", "files", "bytes"],
-                     [(r.path, r.files, r.bytes) for r in top_dirs(store, limit=5000)]),
-        "duplicates": (["content_hash", "copies", "size", "reclaimable", "example"],
-                       [(r.content_hash, r.copies, r.size, r.reclaimable, r.example)
-                        for r in duplicate_report(store, limit=5000)]),
-        "by_year": (["year", "files", "bytes"],
-                    [(r.year, r.files, r.bytes) for r in cold_bytes(store)]),
-        "by_extension": (["ext", "files", "bytes"],
-                         [(r.ext, r.files, r.bytes) for r in extension_profile(store, limit=1000)]),
-        "small_file_hotspots": (["path", "files", "bytes", "mean_size"],
-                                [(r.path, r.files, r.bytes, round(r.mean_size, 1))
-                                 for r in small_file_hotspots(store, limit=1000)]),
+        "top_dirs": (
+            ["path", "files", "bytes"],
+            [(r.path, r.files, r.bytes) for r in top_dirs(store, limit=5000)],
+        ),
+        "duplicates": (
+            ["content_hash", "copies", "size", "reclaimable", "example"],
+            [
+                (r.content_hash, r.copies, r.size, r.reclaimable, r.example)
+                for r in duplicate_report(store, limit=5000)
+            ],
+        ),
+        "by_year": (
+            ["year", "files", "bytes"],
+            [(r.year, r.files, r.bytes) for r in cold_bytes(store)],
+        ),
+        "by_extension": (
+            ["ext", "files", "bytes"],
+            [(r.ext, r.files, r.bytes) for r in extension_profile(store, limit=1000)],
+        ),
+        "small_file_hotspots": (
+            ["path", "files", "bytes", "mean_size"],
+            [
+                (r.path, r.files, r.bytes, round(r.mean_size, 1))
+                for r in small_file_hotspots(store, limit=1000)
+            ],
+        ),
     }
     for name, (header, rows) in tables.items():
         path = os.path.join(outdir, f"{name}.csv")

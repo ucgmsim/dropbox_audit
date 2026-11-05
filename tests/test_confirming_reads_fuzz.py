@@ -36,7 +36,9 @@ TRIALS = int(os.environ.get("DBAUDIT_FUZZ", "0"))
 #: No part smaller than the largest window and two leads, so no request can run from a
 #: part's first byte to its last: shapes cannot move such a request (test_archive_reader).
 MIN_PART = (64 << 10) + 2 * (64 << 10)
-pytestmark = pytest.mark.skipif(not TRIALS, reason="slow: set DBAUDIT_FUZZ=<seeds> to run")
+pytestmark = pytest.mark.skipif(
+    not TRIALS, reason="slow: set DBAUDIT_FUZZ=<seeds> to run"
+)
 
 
 class _Server:
@@ -47,7 +49,7 @@ class _Server:
         self.requests = self.bytes_fetched = 0
 
     def read_range(self, part_idx, offset, length):
-        true = self.parts[part_idx][offset:offset + length]
+        true = self.parts[part_idx][offset : offset + length]
         assert len(true) == length
         self.requests += 1
         self.bytes_fetched += length
@@ -59,14 +61,26 @@ def _members(rng, filler=0):
     for i in range(rng.randint(5, 30)):
         roll = rng.random()
         if roll < 0.15:
-            inner = build_tar([(f"in/{j}.dat", bytes([65 + j]) * rng.randint(1, 900))
-                               for j in range(rng.randint(1, 3))])
+            inner = build_tar(
+                [
+                    (f"in/{j}.dat", bytes([65 + j]) * rng.randint(1, 900))
+                    for j in range(rng.randint(1, 3))
+                ]
+            )
             members.append((f"run/s{i:02d}.tar", inner))
             continue
-        name = (f"run/{'d' * rng.randint(100, 180)}/f{i:02d}.bin" if roll < 0.3
-                else f"run/f{i:02d}.bin")
-        size = rng.choice([rng.randint(0, 3000), rng.randint(3000, 20_000),
-                           rng.randint(70_000, 300_000)])
+        name = (
+            f"run/{'d' * rng.randint(100, 180)}/f{i:02d}.bin"
+            if roll < 0.3
+            else f"run/f{i:02d}.bin"
+        )
+        size = rng.choice(
+            [
+                rng.randint(0, 3000),
+                rng.randint(3000, 20_000),
+                rng.randint(70_000, 300_000),
+            ]
+        )
         members.append((name, bytes([1 + i % 250]) * size))
     return members + [("run/zz.bin", b"z" * MIN_PART)]
 
@@ -76,10 +90,19 @@ def _split(rng, data, whole):
     size = len(data) if whole else rng.randint(MIN_PART, 4 * MIN_PART)
     if 0 < len(data) % size < MIN_PART:
         size = len(data)
-    chunks = [data[at:at + size] for at in range(0, len(data), size)]
+    chunks = [data[at : at + size] for at in range(0, len(data), size)]
     archive = ArchiveSet.from_entries(
-        [{"name": f"a.tar.{suffix(i)}", "size": len(c), "id": f"id:{i}",
-          "content_hash": f"{i:064x}"} for i, c in enumerate(chunks)], "a.tar")
+        [
+            {
+                "name": f"a.tar.{suffix(i)}",
+                "size": len(c),
+                "id": f"id:{i}",
+                "content_hash": f"{i:064x}",
+            }
+            for i, c in enumerate(chunks)
+        ],
+        "a.tar",
+    )
     return archive, chunks
 
 
@@ -88,16 +111,20 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
     rng = random.Random(seed)
     kind = rng.choice(["request", "class", "block"])
     block = rng.choice([1 << 16, 1 << 20]) if kind == "block" else None
-    data = build_tar(_members(rng, filler=block - 512 if block else 0),
-                     format=tarfile.GNU_FORMAT)
+    data = build_tar(
+        _members(rng, filler=block - 512 if block else 0), format=tarfile.GNU_FORMAT
+    )
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
         infos = list(tar)
     truth = {m.offset: Member.from_tarinfo(m) for m in infos}
     archive, chunks = _split(rng, data, whole=kind == "block")
     # Where a copied header must not send the walk: onto any header, outer or stored.
     headers = {m.offset for m in infos} | {m.offset_data - 512 for m in infos}
-    stored = [(m.offset_data, m.offset_data + m.size) for m in infos
-              if m.name.endswith(".tar")]
+    stored = [
+        (m.offset_data, m.offset_data + m.size)
+        for m in infos
+        if m.name.endswith(".tar")
+    ]
     at = rng.choice(infos).offset
     state = {"bad": None}
 
@@ -109,11 +136,11 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
             return true
         state["answered"] = True
         cut = at - start
-        return true[:cut] + donor[:length - cut] + true[cut + 512:]
+        return true[:cut] + donor[: length - cut] + true[cut + 512 :]
 
     def shifted(part_idx, offset, length, back):
         source = max(offset - back, 0)
-        return chunks[part_idx][source:source + length]
+        return chunks[part_idx][source : source + length]
 
     def klass(part_idx, offset, length, true):
         start = archive.parts[part_idx].offset + offset
@@ -137,22 +164,26 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
 
         def lands(m):
             landing = at + 512 + -(-m.size // 512) * 512
-            return (landing in headers or any(a <= landing < b for a, b in stored)
-                    or -(-m.size // 512) == -(-size_at // 512))
+            return (
+                landing in headers
+                or any(a <= landing < b for a, b in stored)
+                or -(-m.size // 512) == -(-size_at // 512)
+            )
 
         plain = [m for m in plain if not lands(m)]
         if not plain:
             pytest.skip("no header to copy that the walk alone must catch")
         copied = rng.choice(plain).offset
-        donor = data[copied:copied + 512]
+        donor = data[copied : copied + 512]
         fault = request
     elif kind == "class":
         modulus = rng.choice([1 << 16, 1 << 20])
-        back = rng.randrange(1, 1 << 16, 2)         # odd: never a header's alignment
+        back = rng.randrange(1, 1 << 16, 2)  # odd: never a header's alignment
         fault = klass
     else:
         fault = edge
-        shape = 0                                    # the first pass asks from the byte before
+        shape = 0  # the first pass asks from the byte before
+
     class Kept(ConcatFile):
         """Notes whether a bad answer reached the bytes a fill keeps. One that fell where
         the fill throws bytes away was never read, so the fault waits for the next request
@@ -170,11 +201,19 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
     windows = rng.choice([(4096, 4096), (4096, 65536), (16384, 16384)])
     rows = {}
     try:
-        result = walk(Kept(archive, _Server(chunks, fault), window_min=windows[0],
-                           window_max=windows[1], shape=shape), 0,
-                      lambda batch, _next: rows.update((m.hdr_offset, m) for m in batch))
+        result = walk(
+            Kept(
+                archive,
+                _Server(chunks, fault),
+                window_min=windows[0],
+                window_max=windows[1],
+                shape=shape,
+            ),
+            0,
+            lambda batch, _next: rows.update((m.hdr_offset, m) for m in batch),
+        )
     except UnsettledRead:
-        result = None                                # stopped: never a false verdict
+        result = None  # stopped: never a false verdict
     if kind == "request":
         assert state.get("landed"), "the bad answer never reached bytes the walk kept"
     if result is not None:

@@ -29,16 +29,16 @@ class Candidate:
     name: str
     size: int
     n_parts: int
-    set_hash: str           # "" for a refused set
-    status: str             # ok | copy | refused
+    set_hash: str  # "" for a refused set
+    status: str  # ok | copy | refused
     detail: str = ""
 
 
 @dataclass(frozen=True)
 class Listing:
-    candidates: list        # Candidate, largest first
-    compressed: tuple       # (files, bytes) skipped by their compressed names
-    other: tuple            # (files, bytes) named like `x.tar.<something>` that are neither
+    candidates: list  # Candidate, largest first
+    compressed: tuple  # (files, bytes) skipped by their compressed names
+    other: tuple  # (files, bytes) named like `x.tar.<something>` that are neither
 
 
 def find_candidates(audit_db) -> Listing:
@@ -54,9 +54,10 @@ def find_candidates(audit_db) -> Listing:
 def _find(audit) -> Listing:
     found, compressed, other = {}, [0, 0], [0, 0]
     for dir_id, folder, name, size in audit.execute(
-            "SELECT f.dir_id, d.path_display, f.name, f.size FROM files f "
-            "JOIN dirs d ON d.id = f.dir_id "
-            "WHERE f.name LIKE '%.tar' OR f.name LIKE '%.tar.%' OR f.name LIKE '%.tgz'"):
+        "SELECT f.dir_id, d.path_display, f.name, f.size FROM files f "
+        "JOIN dirs d ON d.id = f.dir_id "
+        "WHERE f.name LIKE '%.tar' OR f.name LIKE '%.tar.%' OR f.name LIKE '%.tgz'"
+    ):
         part = PART.match(name)
         if COMPRESSED.search(name):
             compressed[0] += 1
@@ -72,36 +73,69 @@ def _find(audit) -> Listing:
     rows = []
     for (dir_id, base), folder in found.items():
         entries = [
-            {"name": name, "size": size, "path_display": f"{folder}/{name}",
-             "id": dbx_id or "", "rev": rev or "",
-             "content_hash": digest.hex() if digest else ""}
+            {
+                "name": name,
+                "size": size,
+                "path_display": f"{folder}/{name}",
+                "id": dbx_id or "",
+                "rev": rev or "",
+                "content_hash": digest.hex() if digest else "",
+            }
             for name, size, dbx_id, rev, digest in audit.execute(
                 "SELECT name, size, dbx_id, rev, content_hash FROM files "
-                "WHERE dir_id = ? AND substr(name, 1, ?) = ?", (dir_id, len(base), base))]
+                "WHERE dir_id = ? AND substr(name, 1, ?) = ?",
+                (dir_id, len(base), base),
+            )
+        ]
         total = sum(e["size"] for e in entries)
         # One part per folder, each folder named after its part: `register` reads one
         # folder, so the first part alone would pass as a whole archive and be walked to
         # the end of that part only to be called truncated.
         holder = PART.match(folder.rsplit("/", 1)[-1])
         if holder and holder.group("base") == base:
-            rows.append(Candidate(folder, base, total, len(entries), "", "refused",
-                                  "its parts are in separate folders"))
+            rows.append(
+                Candidate(
+                    folder,
+                    base,
+                    total,
+                    len(entries),
+                    "",
+                    "refused",
+                    "its parts are in separate folders",
+                )
+            )
             continue
         try:
             archive_set = ArchiveSet.from_entries(entries, base)
         except ArchiveSetError as exc:
-            rows.append(Candidate(folder, base, total, len(entries), "", "refused", str(exc)))
+            rows.append(
+                Candidate(folder, base, total, len(entries), "", "refused", str(exc))
+            )
             continue
-        rows.append(Candidate(folder, base, archive_set.total_size, len(archive_set.parts),
-                              archive_set.set_hash(), "ok"))
+        rows.append(
+            Candidate(
+                folder,
+                base,
+                archive_set.total_size,
+                len(archive_set.parts),
+                archive_set.set_hash(),
+                "ok",
+            )
+        )
 
     rows.sort(key=lambda c: (-c.size, c.folder, c.name))
     first, listed = {}, []
     for candidate in rows:
         if candidate.status == "ok" and candidate.set_hash in first:
-            candidate = Candidate(candidate.folder, candidate.name, candidate.size,
-                                  candidate.n_parts, candidate.set_hash, "copy",
-                                  f"copy of {first[candidate.set_hash]}")
+            candidate = Candidate(
+                candidate.folder,
+                candidate.name,
+                candidate.size,
+                candidate.n_parts,
+                candidate.set_hash,
+                "copy",
+                f"copy of {first[candidate.set_hash]}",
+            )
         elif candidate.status == "ok":
             first[candidate.set_hash] = f"{candidate.folder}/{candidate.name}"
         listed.append(candidate)

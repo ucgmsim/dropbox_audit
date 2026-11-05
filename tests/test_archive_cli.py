@@ -20,7 +20,12 @@ import threading
 import pytest
 
 from dbaudit.api import AuthExpired, Page, RateLimited, TransientError
-from dbaudit.archive.reader import DropboxRangeReader, LocalRangeReader, ReaderError, ReadStopped
+from dbaudit.archive.reader import (
+    DropboxRangeReader,
+    LocalRangeReader,
+    ReaderError,
+    ReadStopped,
+)
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
 from dbaudit import cli
@@ -31,8 +36,11 @@ from tests.archive_fakes import build_tar, write_parts
 MEMBERS = [(f"run/file{i:02d}.bin", b"x" * (700 + i)) for i in range(30)]
 # One member big enough to swallow whole parts: split at 4096, parts 1-4 hold no header
 # at all, so those chains cross the moment they start and commit only a cursor.
-SWALLOWED = [("run/a.bin", b"a" * 1000), ("run/big.bin", b"b" * 20000),
-             ("run/c.bin", b"c" * 1000)]
+SWALLOWED = [
+    ("run/a.bin", b"a" * 1000),
+    ("run/big.bin", b"b" * 20000),
+    ("run/c.bin", b"c" * 1000),
+]
 
 
 def local_archive(tmp_path, data=None, part_size=4096, name="parts"):
@@ -45,9 +53,18 @@ def local_archive(tmp_path, data=None, part_size=4096, name="parts"):
 
 def dropbox_entries(archive_set, override=None):
     """The `files/list_folder` entries a folder of these parts would return."""
-    entries = [{".tag": "file", "name": p.name, "size": p.size,
-                "path_display": p.path_display, "id": p.dbx_id, "rev": p.rev,
-                "content_hash": p.content_hash} for p in archive_set.parts]
+    entries = [
+        {
+            ".tag": "file",
+            "name": p.name,
+            "size": p.size,
+            "path_display": p.path_display,
+            "id": p.dbx_id,
+            "rev": p.rev,
+            "content_hash": p.content_hash,
+        }
+        for p in archive_set.parts
+    ]
     if override is not None:
         index, content_hash = override
         entries[index]["content_hash"] = content_hash
@@ -78,9 +95,15 @@ def fake_build_lister(pages):
 
 
 def event_count(db, archive_id, kind):
-    return ArchiveStore(db).connect().execute(
-        "SELECT COUNT(*) FROM events WHERE archive_id=? AND kind=?",
-        (archive_id, kind)).fetchone()[0]
+    return (
+        ArchiveStore(db)
+        .connect()
+        .execute(
+            "SELECT COUNT(*) FROM events WHERE archive_id=? AND kind=?",
+            (archive_id, kind),
+        )
+        .fetchone()[0]
+    )
 
 
 def run_starts(db, archive_id):
@@ -112,15 +135,24 @@ def signal_handled():
 
 
 def has_analysis_indexes(db):
-    return bool(ArchiveStore(db).connect().execute(
-        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='members_dir'").fetchone())
+    return bool(
+        ArchiveStore(db)
+        .connect()
+        .execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='members_dir'"
+        )
+        .fetchone()
+    )
 
 
 def register_dropbox(monkeypatch, db, archive_set, folder="/d"):
-    monkeypatch.setattr("dbaudit.cli.build_lister",
-                        fake_build_lister([dropbox_entries(archive_set)]))
-    assert main(["archive", "register", "--db", db, "--folder", folder,
-                 "--name", "a.tar"]) == 0
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister", fake_build_lister([dropbox_entries(archive_set)])
+    )
+    assert (
+        main(["archive", "register", "--db", db, "--folder", folder, "--name", "a.tar"])
+        == 0
+    )
 
 
 # ---- the four from the brief -------------------------------------------------
@@ -131,15 +163,28 @@ def test_register_then_index_a_local_archive(tmp_path, capsys):
     (source / "notes.txt").write_text("a real folder holds other files too")
     db = str(tmp_path / "archives.db")
 
-    assert main(["archive", "register", "--db", db, "--local-dir", str(source),
-                 "--name", "a.tar"]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "register",
+                "--db",
+                db,
+                "--local-dir",
+                str(source),
+                "--name",
+                "a.tar",
+            ]
+        )
+        == 0
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert main(["archive", "status", "--db", db]) == 0
 
     out = capsys.readouterr().out
     assert "complete" in out
     assert str(len(MEMBERS)) in out
-    assert "429s" in out          # T7-16: throttling is the first thing to look at
+    assert "429s" in out  # T7-16: throttling is the first thing to look at
 
     store = ArchiveStore(db)
     archive_id = store.get("a.tar")["id"]
@@ -157,15 +202,37 @@ def test_an_interrupted_index_resumes(tmp_path):
     """Kill the walk halfway, re-run, and the manifest must be identical."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source),
-          "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     store = ArchiveStore(db)
     archive_id = store.get("a.tar")["id"]
 
     # Walk only the first two batches, as an interrupted run would have.
-    main(["archive", "index", "--db", db, "--archive", "a.tar", "--batch", "5",
-          "--max-batches", "2"])
+    main(
+        [
+            "archive",
+            "index",
+            "--db",
+            db,
+            "--archive",
+            "a.tar",
+            "--batch",
+            "5",
+            "--max-batches",
+            "2",
+        ]
+    )
     partial = store.stats(archive_id)["n_members"]
     assert 0 < partial < len(MEMBERS)
 
@@ -181,15 +248,37 @@ def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path):
     for workers in (1, 4):
         source = local_archive(tmp_path, data, name=f"parts{workers}")
         db = str(tmp_path / f"archives{workers}.db")
-        main(["archive", "register", "--db", db, "--local-dir", str(source),
-              "--name", "a.tar"])
-        main(["archive", "index", "--db", db, "--archive", "a.tar",
-              "--workers", str(workers)])
+        main(
+            [
+                "archive",
+                "register",
+                "--db",
+                db,
+                "--local-dir",
+                str(source),
+                "--name",
+                "a.tar",
+            ]
+        )
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                str(workers),
+            ]
+        )
         store = ArchiveStore(db)
         archive_id = store.get("a.tar")["id"]
         assert store.get("a.tar")["state"] == "complete"
-        manifests[workers] = [(r["hdr_offset"], r["dir"], r["name"], r["size"])
-                              for r in store.query_members(archive_id)]
+        manifests[workers] = [
+            (r["hdr_offset"], r["dir"], r["name"], r["size"])
+            for r in store.query_members(archive_id)
+        ]
     assert manifests[1] == manifests[4]
 
 
@@ -198,7 +287,18 @@ def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path, monkeypatch):
     archive, rather than wait for this one to end."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     # The first four workers meet before any claims: on a busy machine the fourth could
     # otherwise start after another had already run out of segments.
     barrier, arrived, lock = threading.Barrier(4, timeout=30), set(), threading.Lock()
@@ -216,30 +316,75 @@ def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path, monkeypatch):
     store = ArchiveStore(db)
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=4)
     seen = []
-    walked = cli._walk_archive(args, store, store.get("a.tar"), None, None,
-                               threading.Event(), on_chains=seen.append)
+    walked = cli._walk_archive(
+        args,
+        store,
+        store.get("a.tar"),
+        None,
+        None,
+        threading.Event(),
+        on_chains=seen.append,
+    )
     assert walked.state == "complete"
     assert max(seen) == 4 and seen[-1] == 0
 
 
 @pytest.mark.parametrize("seed", range(10))
-def test_chains_find_every_member_wherever_the_parts_divide(tmp_path, monkeypatch, seed):
+def test_chains_find_every_member_wherever_the_parts_divide(
+    tmp_path, monkeypatch, seed
+):
     """Against tarfile's own listing: members from a few bytes to many times a part, parts
     cut anywhere, one chain or many -- each starting where its scan found a header, or
     where the chain before it crossed into its part, before or during the scan."""
-    monkeypatch.setattr("dbaudit.cli.find_chain_start",     # small reads, so scans give way
-                        lambda concat, start, **kw: find_chain_start(concat, start,
-                                                                     scan_read=4096, **kw))
+    monkeypatch.setattr(
+        "dbaudit.cli.find_chain_start",  # small reads, so scans give way
+        lambda concat, start, **kw: find_chain_start(
+            concat, start, scan_read=4096, **kw
+        ),
+    )
     rng = random.Random(seed)
-    sizes = [rng.choice([10, 700, 5000, 70_000, 400_000]) for _ in range(rng.randint(5, 40))]
-    data = build_tar([(f"run/m{i:03d}.bin", rng.randbytes(n)) for i, n in enumerate(sizes)])
-    source = local_archive(tmp_path, data, part_size=max(4096, len(data) // rng.randint(2, 12)))
+    sizes = [
+        rng.choice([10, 700, 5000, 70_000, 400_000]) for _ in range(rng.randint(5, 40))
+    ]
+    data = build_tar(
+        [(f"run/m{i:03d}.bin", rng.randbytes(n)) for i, n in enumerate(sizes)]
+    )
+    source = local_archive(
+        tmp_path, data, part_size=max(4096, len(data) // rng.randint(2, 12))
+    )
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers",
-                 str(rng.choice([1, 2, 4, 8]))]) == 0
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
+    assert (
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                str(rng.choice([1, 2, 4, 8])),
+            ]
+        )
+        == 0
+    )
     store = ArchiveStore(db)
-    got = [(r["hdr_offset"], r["size"]) for r in store.query_members(store.get("a.tar")["id"])]
+    got = [
+        (r["hdr_offset"], r["size"])
+        for r in store.query_members(store.get("a.tar")["id"])
+    ]
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         assert got == [(m.offset, m.size) for m in tar]
 
@@ -248,13 +393,29 @@ def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path):
     """A scan starting mid-member can land on an inner tar's header. The join must see
     that the chains do not meet, drop that segment's members and re-walk it."""
     inner = build_tar([(f"inner/deep{i:02d}.bin", b"i" * 400) for i in range(6)])
-    data = build_tar([("run/first.bin", b"a" * 5000), ("run/nested.tar", inner),
-                      ("run/last.bin", b"z" * 5000)])
+    data = build_tar(
+        [
+            ("run/first.bin", b"a" * 5000),
+            ("run/nested.tar", inner),
+            ("run/last.bin", b"z" * 5000),
+        ]
+    )
     # Split so a part begins inside the nested tar, among the inner headers.
     nested_at = data.find(b"inner/deep00.bin") - 512
     source = local_archive(tmp_path, data, part_size=(nested_at + 1024) // 512 * 512)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "2"])
     store = ArchiveStore(db)
     names = [r["name"] for r in store.query_members(store.get("a.tar")["id"])]
@@ -267,18 +428,31 @@ def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path):
 
 @pytest.mark.unshaped
 def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     """SIGINT mid-walk: exit 0, keep what was committed, hand the segment back, and
     put pytest's own SIGINT handler back where it was."""
     data = build_tar(MEMBERS)
-    source = local_archive(tmp_path, data, part_size=len(data))   # one long segment
+    source = local_archive(tmp_path, data, part_size=len(data))  # one long segment
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     real_commit = ArchiveStore.commit_batch
     sent = threading.Event()
     before = signal.getsignal(signal.SIGINT)
     with signal_handled() as handled:
+
         def commit_batch(self, *args, **kwargs):
             result = real_commit(self, *args, **kwargs)
             if not sent.is_set():
@@ -290,9 +464,27 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
         monkeypatch.setattr(ArchiveStore, "commit_batch", commit_batch)
         # One-block windows, so members leave the held-back window -- and batches are
         # committed -- while the walk is still going.
-        assert main(["archive", "index", "--db", db, "--archive", "a.tar",
-                     "--workers", "1", "--batch", "5", "--window-min", "1024",
-                     "--window-max", "1024"]) == 0
+        assert (
+            main(
+                [
+                    "archive",
+                    "index",
+                    "--db",
+                    db,
+                    "--archive",
+                    "a.tar",
+                    "--workers",
+                    "1",
+                    "--batch",
+                    "5",
+                    "--window-min",
+                    "1024",
+                    "--window-max",
+                    "1024",
+                ]
+            )
+            == 0
+        )
     monkeypatch.undo()
 
     assert handled.is_set()
@@ -334,9 +526,20 @@ def test_max_batches_commits_exactly_that_many_batches(tmp_path, monkeypatch):
     """--max-batches N means N batches, not N plus whatever was in flight when the
     limit was reached."""
     data = build_tar(MEMBERS)
-    source = local_archive(tmp_path, data, part_size=len(data))   # one long segment
+    source = local_archive(tmp_path, data, part_size=len(data))  # one long segment
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     reads = {"n": 0, "bytes": 0}
     real_read = LocalRangeReader.read_range
@@ -348,9 +551,29 @@ def test_max_batches_commits_exactly_that_many_batches(tmp_path, monkeypatch):
         return block
 
     monkeypatch.setattr(LocalRangeReader, "read_range", read_range)
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-                 "--batch", "5", "--max-batches", "2",
-                 "--window-min", "1024", "--window-max", "4096"]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                "1",
+                "--batch",
+                "5",
+                "--max-batches",
+                "2",
+                "--window-min",
+                "1024",
+                "--window-max",
+                "4096",
+            ]
+        )
+        == 0
+    )
     store = ArchiveStore(db)
     row = store.get("a.tar")
     assert store.stats(row["id"])["n_members"] == 10
@@ -368,7 +591,18 @@ def test_a_stop_between_claim_and_scan_never_starts_the_scan(tmp_path, monkeypat
     """
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     scans = {"n": 0}
     real_scan = find_chain_start
@@ -381,19 +615,27 @@ def test_a_stop_between_claim_and_scan_never_starts_the_scan(tmp_path, monkeypat
     real_claim = ArchiveStore.claim_segment
 
     with signal_handled() as handled:
+
         def claim_segment(self, archive_id, owner):
             segment = real_claim(self, archive_id, owner)
             # Segment 0 starts at offset 0 and needs no scan. Stop the run exactly as a
             # segment that *would* scan is handed to a worker.
-            if (segment is not None and segment["first_header"] is None
-                    and not handled.is_set()):
+            if (
+                segment is not None
+                and segment["first_header"] is None
+                and not handled.is_set()
+            ):
                 os.kill(os.getpid(), signal.SIGINT)
                 handled.wait(10.0)
             return segment
 
         monkeypatch.setattr(ArchiveStore, "claim_segment", claim_segment)
-        assert main(["archive", "index", "--db", db, "--archive", "a.tar",
-                     "--workers", "1"]) == 0
+        assert (
+            main(
+                ["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]
+            )
+            == 0
+        )
 
     assert handled.is_set()
     assert scans["n"] == 0
@@ -403,18 +645,37 @@ def _deep_second_part(tmp_path):
     """Two parts, the second beginning inside a 40 MiB member, so that a scan of it reads
     16 MiB of nothing before the header beyond. Returns the database and where in the
     second part a read counts as scanning: anywhere short of that header's window."""
-    data = build_tar([("run/a.bin", b"a" * 1000), ("run/big.bin", bytes(40 << 20)),
-                      ("run/c.bin", b"c" * 1000), ("run/d.bin", b"d" * 1000)])
+    data = build_tar(
+        [
+            ("run/a.bin", b"a" * 1000),
+            ("run/big.bin", bytes(40 << 20)),
+            ("run/c.bin", b"c" * 1000),
+            ("run/d.bin", b"d" * 1000),
+        ]
+    )
     part = 21 << 20
     source = local_archive(tmp_path, data, part_size=part)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         header = next(m.offset for m in tar if m.name == "run/c.bin")
     return db, header - part - (128 << 10)
 
 
-def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(tmp_path, monkeypatch):
+def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(
+    tmp_path, monkeypatch
+):
     """The scan has no bound of its own, so a stop must reach it between reads -- not wait
     for a header that may lie gigabytes on -- and the walk resumes later all the same."""
     db, scanning = _deep_second_part(tmp_path)
@@ -423,27 +684,33 @@ def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(tmp_path, mo
     class Stopping(LocalRangeReader):
         def read_range(self, part_idx, offset, length):
             if part_idx == 0:
-                stop.wait(10)                   # the first chain crosses only after it
+                stop.wait(10)  # the first chain crosses only after it
             elif offset < scanning:
                 scans.append(offset)
-                stop.set()                      # a signal, as the second chain scans
+                stop.set()  # a signal, as the second chain scans
             return super().read_range(part_idx, offset, length)
 
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: Stopping(row["folder"], s))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: Stopping(row["folder"], s),
+    )
     store = ArchiveStore(db)
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=2)
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(scans) == 1
     scanned = store.segments(store.get("a.tar")["id"])[1]
-    assert (scanned["state"], scanned["error"]) == ("pending", None)   # stopped, not failed
+    assert (scanned["state"], scanned["error"]) == (
+        "pending",
+        None,
+    )  # stopped, not failed
     monkeypatch.undo()
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert ArchiveStore(db).get("a.tar")["n_members"] == 4
 
 
-def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(tmp_path,
-                                                                          monkeypatch):
+def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(
+    tmp_path, monkeypatch
+):
     """Where the chain before crossed into this part is exactly where the join would start
     this chain, so once it has crossed, a scan for that header is requests wasted -- a
     part inside a large member can take hundreds of them."""
@@ -456,16 +723,23 @@ def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(tmp_pa
                 scans.append(offset)
             return super().read_range(part_idx, offset, length)
 
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: Recording(row["folder"], s))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: Recording(row["folder"], s),
+    )
     # One worker walks segment 0, which crosses, before it claims segment 1.
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
+        == 0
+    )
     assert ArchiveStore(db).get("a.tar")["n_members"] == 4
     assert scans == []
-    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "repair") == 0   # exact
+    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "repair") == 0  # exact
 
 
-def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(tmp_path, monkeypatch):
+def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(
+    tmp_path, monkeypatch
+):
     db, scanning = _deep_second_part(tmp_path)
     started, crossed, scans = threading.Event(), threading.Event(), []
     real_finish = ArchiveStore.finish_segment
@@ -478,34 +752,44 @@ def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(tmp_path, monk
     class Ordered(LocalRangeReader):
         def read_range(self, part_idx, offset, length):
             if part_idx == 0:
-                started.wait(10)                # segment 1 is scanning before 0 crosses
+                started.wait(10)  # segment 1 is scanning before 0 crosses
             elif offset < scanning:
                 scans.append(offset)
                 started.set()
-                crossed.wait(10)                # its first read comes back after the crossing
+                crossed.wait(10)  # its first read comes back after the crossing
             return super().read_range(part_idx, offset, length)
 
     monkeypatch.setattr(ArchiveStore, "finish_segment", finish_segment)
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: Ordered(row["folder"], s))
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "2"]) == 0
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: Ordered(row["folder"], s),
+    )
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "2"])
+        == 0
+    )
     assert ArchiveStore(db).get("a.tar")["n_members"] == 4
     assert len(scans) == 1
-    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "repair") == 0   # exact
+    assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "repair") == 0  # exact
 
 
-def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(tmp_path,
-                                                                           monkeypatch):
+def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(
+    tmp_path, monkeypatch
+):
     """The join hands the scanning chain that start on the next run all the same."""
     db, scanning = _deep_second_part(tmp_path)
-    stop, started, crossed, after = (threading.Event(), threading.Event(), threading.Event(),
-                                     [])
+    stop, started, crossed, after = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+        [],
+    )
     real_finish = ArchiveStore.finish_segment
 
     def finish_segment(self, segment_id, result, *rest, **kwargs):
         real_finish(self, segment_id, result, *rest, **kwargs)
         if result.state == "crossed":
-            stop.set()                          # a signal lands as segment 0 crosses
+            stop.set()  # a signal lands as segment 0 crosses
             crossed.set()
 
     class Ordered(LocalRangeReader):
@@ -520,8 +804,10 @@ def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(tmp_p
             return super().read_range(part_idx, offset, length)
 
     monkeypatch.setattr(ArchiveStore, "finish_segment", finish_segment)
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: Ordered(row["folder"], s))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: Ordered(row["folder"], s),
+    )
     store = ArchiveStore(db)
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=2)
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
@@ -533,7 +819,18 @@ def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypat
     real, and every other exit path charges them."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     reads = {"n": 0}
     real_read = LocalRangeReader.read_range
@@ -545,12 +842,29 @@ def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypat
         return real_read(self, part_idx, offset, length)
 
     monkeypatch.setattr(LocalRangeReader, "read_range", read_range)
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-                 "--window-min", "1024", "--window-max", "4096"]) == 1
+    assert (
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                "1",
+                "--window-min",
+                "1024",
+                "--window-max",
+                "4096",
+            ]
+        )
+        == 1
+    )
 
     row = ArchiveStore(db).get("a.tar")
-    assert reads["n"] > 3                       # the dead chain was not the only one
-    assert row["requests"] == reads["n"] - 1    # every read but the one that raised
+    assert reads["n"] > 3  # the dead chain was not the only one
+    assert row["requests"] == reads["n"] - 1  # every read but the one that raised
 
 
 def test_a_worker_that_blows_up_does_not_look_like_a_clean_stop(tmp_path, monkeypatch):
@@ -558,14 +872,27 @@ def test_a_worker_that_blows_up_does_not_look_like_a_clean_stop(tmp_path, monkey
     something unexpected must not report the same 0 as Ctrl-C."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     def boom(self, archive_id, owner):
         raise RuntimeError("the database went away")
 
     monkeypatch.setattr(ArchiveStore, "claim_segment", boom)
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar",
-                 "--workers", "1"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
+        == 1
+    )
 
 
 def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path):
@@ -576,16 +903,47 @@ def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path):
     """
     source = local_archive(tmp_path, build_tar(SWALLOWED), part_size=4096)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar",
-                 "--workers", "1", "--batch", "5", "--max-batches", "2"]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                "1",
+                "--batch",
+                "5",
+                "--max-batches",
+                "2",
+            ]
+        )
+        == 0
+    )
 
     store = ArchiveStore(db)
     row = store.get("a.tar")
-    empty_crossings = [s for s in store.segments(row["id"])
-                       if s["state"] == "crossed" and s["members"] == 0]
-    assert len(empty_crossings) == 4        # the parts swallowed by big.bin
+    empty_crossings = [
+        s
+        for s in store.segments(row["id"])
+        if s["state"] == "crossed" and s["members"] == 0
+    ]
+    assert len(empty_crossings) == 4  # the parts swallowed by big.bin
     # Two batches carrying members: the one before those crossings and the one after.
     assert store.stats(row["id"])["n_members"] == len(SWALLOWED)
     assert row["state"] == "complete"
@@ -595,7 +953,8 @@ def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path):
 
 
 def test_a_part_that_changed_before_the_walk_is_stale_and_nothing_is_read(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     """The stored offsets describe bytes that no longer exist, so the walk must not
     read a single range."""
     source = tmp_path / "parts"
@@ -604,8 +963,10 @@ def test_a_part_that_changed_before_the_walk_is_stale_and_nothing_is_read(
     db = str(tmp_path / "archives.db")
     register_dropbox(monkeypatch, db, archive_set)
 
-    monkeypatch.setattr("dbaudit.cli.build_lister",
-                        fake_build_lister([dropbox_entries(archive_set, (1, "ff" * 32))]))
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister([dropbox_entries(archive_set, (1, "ff" * 32))]),
+    )
 
     def landmine(*args, **kwargs):
         raise AssertionError("a stale archive must not be read")
@@ -625,7 +986,8 @@ def test_a_part_that_changed_before_the_walk_is_stale_and_nothing_is_read(
 
 
 def test_a_part_that_changes_during_the_walk_is_stale_but_keeps_its_members(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     """The spec's error table: the walk's results are kept, the index is flagged."""
     source = tmp_path / "parts"
     source.mkdir()
@@ -634,12 +996,18 @@ def test_a_part_that_changes_during_the_walk_is_stale_but_keeps_its_members(
     register_dropbox(monkeypatch, db, archive_set)
 
     # The before-check sees what was registered; the after-check sees a changed part.
-    monkeypatch.setattr("dbaudit.cli.build_lister", fake_build_lister(
-        [dropbox_entries(archive_set), dropbox_entries(archive_set, (0, "ff" * 32))]))
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister(
+            [dropbox_entries(archive_set), dropbox_entries(archive_set, (0, "ff" * 32))]
+        ),
+    )
     monkeypatch.setattr(
         "dbaudit.cli._reader_for",
-        lambda row, archive_set, tokens=None, limiter=None:
-            LocalRangeReader(source, archive_set))
+        lambda row, archive_set, tokens=None, limiter=None: LocalRangeReader(
+            source, archive_set
+        ),
+    )
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     store = ArchiveStore(db)
@@ -648,8 +1016,9 @@ def test_a_part_that_changes_during_the_walk_is_stale_but_keeps_its_members(
     assert store.stats(row["id"])["n_members"] == len(MEMBERS)
 
 
-def test_index_waits_out_a_rate_limited_listing_and_asks_again(tmp_path, monkeypatch,
-                                                                capsys):
+def test_index_waits_out_a_rate_limited_listing_and_asks_again(
+    tmp_path, monkeypatch, capsys
+):
     """Every listing takes its turn at the limiter: a 429 pauses every request, and then
     the listing is asked again."""
     source = tmp_path / "parts"
@@ -657,20 +1026,30 @@ def test_index_waits_out_a_rate_limited_listing_and_asks_again(tmp_path, monkeyp
     archive_set = write_parts(source, build_tar(MEMBERS), 4096)
     db = str(tmp_path / "archives.db")
     register_dropbox(monkeypatch, db, archive_set)
-    monkeypatch.setattr("dbaudit.cli.build_lister", fake_build_lister(
-        [RateLimited("too_many_requests", retry_after=0.01), dropbox_entries(archive_set)]))
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister(
+            [
+                RateLimited("too_many_requests", retry_after=0.01),
+                dropbox_entries(archive_set),
+            ]
+        ),
+    )
     monkeypatch.setattr(
         "dbaudit.cli._reader_for",
-        lambda row, archive_set, tokens=None, limiter=None:
-            LocalRangeReader(source, archive_set))
+        lambda row, archive_set, tokens=None, limiter=None: LocalRangeReader(
+            source, archive_set
+        ),
+    )
     capsys.readouterr()
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     out = capsys.readouterr().out
     assert "a.tar: complete" in out and "429s          : 1" in out
 
 
-def test_index_gives_up_on_a_folder_listing_that_keeps_failing(tmp_path, monkeypatch,
-                                                               capsys):
+def test_index_gives_up_on_a_folder_listing_that_keeps_failing(
+    tmp_path, monkeypatch, capsys
+):
     source = tmp_path / "parts"
     source.mkdir()
     archive_set = write_parts(source, build_tar(MEMBERS), 4096)
@@ -688,9 +1067,14 @@ def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(monkeypatch
     """A 401 means Dropbox stopped accepting a token that may still look fresh here:
     asked again with it, the listing would fail every time."""
     monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
-    answers = iter([AuthExpired("401 from Dropbox"),
-                    Page(entries=[{".tag": "file", "name": "a.tar"}], cursor=None,
-                         has_more=False)])
+    answers = iter(
+        [
+            AuthExpired("401 from Dropbox"),
+            Page(
+                entries=[{".tag": "file", "name": "a.tar"}], cursor=None, has_more=False
+            ),
+        ]
+    )
 
     class Lister:
         def list_folder(self, path, recursive=False):
@@ -708,7 +1092,8 @@ def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(monkeypatch
     tokens = Tokens()
     limiter = cli.AdaptiveLimiter(rps=1000.0)
     assert cli._listed(Lister(), limiter, "/d", "a.tar", tokens=tokens) == [
-        {".tag": "file", "name": "a.tar"}]
+        {".tag": "file", "name": "a.tar"}
+    ]
     assert tokens.dropped == 1
 
 
@@ -719,7 +1104,18 @@ def test_indexing_a_finished_archive_reads_nothing(tmp_path):
     """Re-running `index` is how you resume, so resuming a finished archive is a no-op."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
 
     store = ArchiveStore(db)
@@ -744,7 +1140,18 @@ def test_the_reported_cost_is_the_delta_and_not_a_running_total(tmp_path, monkey
     data = build_tar(MEMBERS)
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     reads = {"n": 0, "bytes": 0}
     real_read = LocalRangeReader.read_range
@@ -758,8 +1165,27 @@ def test_the_reported_cost_is_the_delta_and_not_a_running_total(tmp_path, monkey
     monkeypatch.setattr(LocalRangeReader, "read_range", read_range)
     # A window small enough to force many reads, and a batch small enough to force
     # many reports: with one of each, a running total and a delta are the same number.
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-                 "--batch", "5", "--window-min", "1024", "--window-max", "4096"]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                "1",
+                "--batch",
+                "5",
+                "--window-min",
+                "1024",
+                "--window-max",
+                "4096",
+            ]
+        )
+        == 0
+    )
 
     row = ArchiveStore(db).get("a.tar")
     assert reads["n"] > 1
@@ -769,10 +1195,21 @@ def test_the_reported_cost_is_the_delta_and_not_a_running_total(tmp_path, monkey
 
 def test_a_missing_final_part_is_truncated_and_keeps_what_it_found(tmp_path):
     source = local_archive(tmp_path)
-    for part in sorted(source.iterdir())[8:]:      # the tail of the tar never arrived
+    for part in sorted(source.iterdir())[8:]:  # the tail of the tar never arrived
         part.unlink()
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     store = ArchiveStore(db)
@@ -787,7 +1224,18 @@ def test_a_missing_final_part_is_truncated_and_keeps_what_it_found(tmp_path):
 def test_status_shows_every_segment_and_the_efficiency_ratio(tmp_path, capsys):
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     capsys.readouterr()
 
@@ -808,7 +1256,18 @@ def test_status_shows_every_segment_and_the_efficiency_ratio(tmp_path, capsys):
 def test_usage_errors_exit_2_and_a_held_lock_exits_3(tmp_path, capsys):
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "nope.tar"]) == 2
@@ -825,6 +1284,7 @@ def test_usage_errors_exit_2_and_a_held_lock_exits_3(tmp_path, capsys):
 
 
 # ---- a bad read through the real pool --------------------------------------------------
+
 
 class _SharedLies:
     """One schedule of bad reads for every reader the pool builds, counted across all
@@ -859,16 +1319,25 @@ class _SharedLies:
                         shared.lied += 1
                         cut = bad - start
                         n = min(1024, length - cut)
-                        return data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n:]
+                        return (
+                            data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n :]
+                        )
                     for bad, nth in shared.plan.items():
                         if start <= bad < start + length:
                             shared.covering[bad] += 1
-                            if (shared.covering[bad] == nth
-                                    or nth is None and shared.covering[bad] % 2):
+                            if (
+                                shared.covering[bad] == nth
+                                or nth is None
+                                and shared.covering[bad] % 2
+                            ):
                                 shared.lied += 1
                                 cut = bad - start
                                 n = min(1024, length - cut)
-                                data = data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n:]
+                                data = (
+                                    data[:cut]
+                                    + (bytes(range(256)) * 4)[:n]
+                                    + data[cut + n :]
+                                )
                 return data
 
         return _Reader(self.source, archive_set)
@@ -883,7 +1352,8 @@ def _terminator_of(data):
 @pytest.mark.parametrize("nth", [1, 2])
 @pytest.mark.unshaped
 def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
-        tmp_path, monkeypatch, nth):
+    tmp_path, monkeypatch, nth
+):
     """End to end, through the 8-worker pool, the join and the store: one bad read at the
     terminator -- on whichever fetch it lands, including the one that confirms `complete`
     -- must leave a complete archive complete, every member in place, exit 0. A lie on
@@ -896,7 +1366,18 @@ def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
     data = build_tar(MEMBERS)
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     liar = _SharedLies(source, {_terminator_of(data): nth})
     monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
 
@@ -904,22 +1385,36 @@ def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
 
     store = ArchiveStore(db)
     row = store.get("a.tar")
-    assert row["state"] == "complete", f"a lie on covering read #{nth} decided the verdict"
+    assert row["state"] == "complete", (
+        f"a lie on covering read #{nth} decided the verdict"
+    )
     assert store.stats(row["id"])["n_members"] == len(MEMBERS)
     assert liar.lied == 1, "the test did not actually inject a bad read"
 
 
 @pytest.mark.unshaped
 def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     """Every other read of the terminator comes back as junk, so each reading of the
     verdict contradicts the last, more times than REREAD_LIMIT allows: the segment must
     land in `error`, the archive must not be condemned, and an honest re-run must finish
     it. Believing the last read instead left the archive `corrupt`, and a re-run refused."""
     data = build_tar(MEMBERS)
-    source = local_archive(tmp_path, data, part_size=len(data))    # one segment
+    source = local_archive(tmp_path, data, part_size=len(data))  # one segment
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     liar = _SharedLies(source, alternate=_terminator_of(data))
     monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
 
@@ -932,9 +1427,12 @@ def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
     assert segment["state"] == "error"
     assert "UnsettledRead" in (segment["error"] or "")
 
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, archive_set, tokens=None, limiter=None:
-                            LocalRangeReader(source, archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: LocalRangeReader(
+            source, archive_set
+        ),
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     row = store.get("a.tar")
     assert row["state"] == "complete"
@@ -942,6 +1440,7 @@ def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
 
 
 # ---- pax archives are refused, loudly --------------------------------------------------
+
 
 def _pax_archive(tmp_path, members, part_size=4096):
     """A pax-format tar split into parts: an `x` header before every member, as GNU tar
@@ -959,14 +1458,27 @@ def _pax_archive(tmp_path, members, part_size=4096):
 def test_index_refuses_a_pax_archive_loudly_and_for_good(tmp_path, capsys):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     err = capsys.readouterr().err
     assert "is a pax-format archive" in err
     row = ArchiveStore(db).get("a.tar")
-    assert row["state"] == "unsupported", "not `error` (retryable) or `corrupt` (a verdict)"
+    assert row["state"] == "unsupported", (
+        "not `error` (retryable) or `corrupt` (a verdict)"
+    )
     assert "pax" in (row["detail"] or "")
 
 
@@ -975,7 +1487,18 @@ def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(tmp_p
     and no other."""
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     store = ArchiveStore(db)
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     stop = threading.Event()
@@ -986,7 +1509,18 @@ def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(tmp_p
 def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     capsys.readouterr()
 
@@ -1001,12 +1535,38 @@ def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):
 def test_cat_refuses_an_unsupported_archive(tmp_path, capsys):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     capsys.readouterr()
     out = tmp_path / "out.bin"
-    assert main(["archive", "cat", "--db", db, "--archive", "a.tar",
-                 "--member", MEMBERS[0][0], "--out", str(out)]) == 1
+    assert (
+        main(
+            [
+                "archive",
+                "cat",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--member",
+                MEMBERS[0][0],
+                "--out",
+                str(out),
+            ]
+        )
+        == 1
+    )
     assert "is a pax-format archive" in capsys.readouterr().err
     assert not out.exists()
 
@@ -1027,7 +1587,18 @@ def test_a_pax_member_deep_in_a_split_archive_is_still_refused(tmp_path, capsys)
             tf.addfile(info, io.BytesIO(payload))
     source = local_archive(tmp_path, buf.getvalue(), part_size=4096)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
@@ -1046,8 +1617,13 @@ def _gnu_holding_a_pax_tarball():
             info = tarfile.TarInfo(f"inner/g{i:03d}.dat")
             info.size, info.mtime = 2000, 1_700_000_000.5
             tf.addfile(info, io.BytesIO(bytes([i]) * 2000))
-    outer = build_tar([("run/a.bin", b"a" * 30_000), ("run/results.tar", inner.getvalue()),
-                       ("run/z.bin", b"z" * 30_000)])
+    outer = build_tar(
+        [
+            ("run/a.bin", b"a" * 30_000),
+            ("run/results.tar", inner.getvalue()),
+            ("run/z.bin", b"z" * 30_000),
+        ]
+    )
     with tarfile.open(fileobj=io.BytesIO(outer), mode="r:") as t:
         return outer, t.getmember("run/results.tar").offset_data
 
@@ -1064,7 +1640,18 @@ def test_a_stored_pax_tarball_does_not_condemn_the_archive_holding_it(tmp_path, 
     (source / "a.tar.aa").write_bytes(outer[:cut])
     (source / "a.tar.ab").write_bytes(outer[cut:])
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
@@ -1077,11 +1664,24 @@ def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(tmp_path, c
     pool: with one worker, no segment after it is ever claimed."""
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     capsys.readouterr()
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar",
-                 "--workers", "1"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
+        == 1
+    )
     store = ArchiveStore(db)
     states = [s["state"] for s in store.segments(store.get("a.tar")["id"])]
     assert len(states) > 2
@@ -1090,6 +1690,7 @@ def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(tmp_path, c
 
 # ---- a header read from the wrong place, caught after a complete walk -------------------
 
+
 def _header_offsets(data):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
         return [m.offset for m in t]
@@ -1097,9 +1698,13 @@ def _header_offsets(data):
 
 def _names(db):
     store = ArchiveStore(db)
-    return [r["name"] for r in store.connect().execute(
-        "SELECT name FROM members WHERE archive_id=? ORDER BY hdr_offset",
-        (store.get("a.tar")["id"],))]
+    return [
+        r["name"]
+        for r in store.connect().execute(
+            "SELECT name FROM members WHERE archive_id=? ORDER BY hdr_offset",
+            (store.get("a.tar")["id"],),
+        )
+    ]
 
 
 class _CopiesAHeader:
@@ -1110,7 +1715,7 @@ class _CopiesAHeader:
 
     def __init__(self, directory, data, at, source, nth=1):
         self.directory, self.at, self.nth = directory, at, nth
-        self.header = data[source:source + 512]
+        self.header = data[source : source + 512]
         self.covering = self.lied = 0
         self.lock = threading.Lock()
 
@@ -1129,14 +1734,15 @@ class _CopiesAHeader:
                         return data
                     shared.lied += 1
                 cut = shared.at - start
-                return data[:cut] + shared.header[:length - cut] + data[cut + 512:]
+                return data[:cut] + shared.header[: length - cut] + data[cut + 512 :]
 
         return _Reader(self.directory, archive_set)
 
 
 @pytest.mark.unshaped
 def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
-        tmp_path, monkeypatch, capsys):
+    tmp_path, monkeypatch, capsys
+):
     """The silent case: member 5's header served where member 20's belongs. Same padded
     size, so the chain rejoins and the walk ends `complete` -- member 5 recorded twice,
     member 20 never. Any such copy leaves a path recorded twice, so after a complete walk
@@ -1148,12 +1754,40 @@ def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
     fake = _CopiesAHeader(source, data, at=offsets[20], source=offsets[5])
     monkeypatch.setattr("dbaudit.cli._reader_for", fake.reader_for)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     # One-block windows: every header is its own fetch, so the fetches read again to
     # confirm the verdict hold only the last members -- this copy is the audit's to find.
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-                 "--window-min", "1024", "--window-max", "1024"]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                "1",
+                "--window-min",
+                "1024",
+                "--window-max",
+                "1024",
+            ]
+        )
+        == 0
+    )
     assert fake.lied == 1, "the test did not actually inject the bad read"
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
@@ -1166,9 +1800,21 @@ def _index_with_appended(tmp_path, appended, *extra):
     label = appended.replace("/", "_")
     source = local_archive(tmp_path, data, part_size=len(data), name=label)
     db = str(tmp_path / f"{label}.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
-    code = main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-                 *extra])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
+    code = main(
+        ["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1", *extra]
+    )
     return code, db
 
 
@@ -1178,7 +1824,8 @@ def _requests(db):
 
 
 def test_a_path_truly_in_the_archive_twice_survives_the_audit_for_one_request(
-        tmp_path, capsys):
+    tmp_path, capsys
+):
     """`tar -r` appends a newer copy under the same path. The audit reads both rows
     again, they agree, and both stay -- for the one fetch that covers both in an archive
     this small, which the same archive with no repeated path does not pay."""
@@ -1204,24 +1851,38 @@ def test_the_audit_reads_at_most_its_limit(tmp_path, monkeypatch, capsys):
     assert code == 0
 
     assert _requests(twice) - _requests(once) == 1
-    assert event_count(twice, ArchiveStore(twice).get("a.tar")["id"], "audit_partial") == 1
+    assert (
+        event_count(twice, ArchiveStore(twice).get("a.tar")["id"], "audit_partial") == 1
+    )
 
 
 def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
-        tmp_path, monkeypatch, capsys):
+    tmp_path, monkeypatch, capsys
+):
     """A complete walk whose audit could not run is not complete: the archive is left in
     `error`, which the next `index` retries -- straight to the audit, since every chain
     is already walked."""
     data = build_tar(MEMBERS + [("run/file05.bin", b"y" * 705)])
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     made = []
 
     def reader_for(row, archive_set, tokens=None, limiter=None):
         reader = LocalRangeReader(row["folder"], archive_set)
         made.append(reader)
-        if len(made) == 2:                  # the first reader walks, the second audits
+        if len(made) == 2:  # the first reader walks, the second audits
 
             def fail(*args, **kwargs):
                 raise ReaderError("simulated: Dropbox kept failing")
@@ -1230,12 +1891,18 @@ def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
         return reader
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
+        == 1
+    )
     assert "audit" in capsys.readouterr().err
     assert ArchiveStore(db).get("a.tar")["state"] == "error"
 
     monkeypatch.undo()
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
+        == 0
+    )
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
 
 
@@ -1246,12 +1913,23 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(tmp_path, monkey
     data = build_tar([("run/same.bin", bytes([i]) * 700) for i in range(30)])
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     stop, audited, real_read = threading.Event(), [], cli.read_member
 
-    def read_member(concat, offset):           # only the audit reads members this way
+    def read_member(concat, offset):  # only the audit reads members this way
         audited.append(offset)
-        stop.set()                             # a signal, as the audit begins
+        stop.set()  # a signal, as the audit begins
         return real_read(concat, offset)
 
     monkeypatch.setattr("dbaudit.cli.read_member", read_member)
@@ -1267,18 +1945,34 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(tmp_path, monkey
 
 
 @pytest.mark.parametrize("phase", ["walk", "audit", "compression"])
-def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(tmp_path, monkeypatch,
-                                                                 phase):
+def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(
+    tmp_path, monkeypatch, phase
+):
     """A read Dropbox kept answering 429 gives way to a stop. The walk, the audit and the
     compression check each take that as a stop: no verdict yet, and nothing failed."""
-    data = {"walk": build_tar(MEMBERS),
-            "audit": build_tar([("run/same.bin", bytes([i]) * 700) for i in range(30)]),
-            "compression": _compressed("gzip", build_tar(RANDOM_MEMBERS))}[phase]
+    data = {
+        "walk": build_tar(MEMBERS),
+        "audit": build_tar([("run/same.bin", bytes([i]) * 700) for i in range(30)]),
+        "compression": _compressed("gzip", build_tar(RANDOM_MEMBERS)),
+    }[phase]
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     stop, made = threading.Event(), []
-    nth = {"walk": 1, "audit": 2, "compression": 2}[phase]   # the walk's reader comes first
+    nth = {"walk": 1, "audit": 2, "compression": 2}[
+        phase
+    ]  # the walk's reader comes first
 
     class GivesWay(LocalRangeReader):
         def read_range(self, part_idx, offset, length):
@@ -1299,33 +1993,58 @@ def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(tmp_path, monke
     assert walked.stopped and len(made) == nth
     archive_id = store.get("a.tar")["id"]
     assert store.get("a.tar")["state"] == "walking"
-    assert [s["state"] for s in store.segments(archive_id) if s["state"] == "error"] == []
+    assert [
+        s["state"] for s in store.segments(archive_id) if s["state"] == "error"
+    ] == []
 
 
 def test_a_read_that_gives_way_to_a_stop_still_commits_what_the_walk_confirmed(
-        tmp_path, monkeypatch):
+    tmp_path, monkeypatch
+):
     """As a stop between reads does: the members already out of the held-back window are
     confirmed, and the next run should not have to read them again."""
-    data = build_tar([(f"run/f{i:03d}.bin", bytes([i % 256]) * 3000) for i in range(120)])
+    data = build_tar(
+        [(f"run/f{i:03d}.bin", bytes([i % 256]) * 3000) for i in range(120)]
+    )
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     stop, reads = threading.Event(), [0]
 
     class GivesWay(LocalRangeReader):
         def read_range(self, part_idx, offset, length):
             reads[0] += 1
-            if reads[0] == 60:                  # a signal, as this read meets a 429
+            if reads[0] == 60:  # a signal, as this read meets a 429
                 stop.set()
                 raise ReadStopped("a.tar: stopped while Dropbox answered 429")
             return super().read_range(part_idx, offset, length)
 
-    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
-                        limiter=None: GivesWay(row["folder"], archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: GivesWay(
+            row["folder"], archive_set
+        ),
+    )
     store = ArchiveStore(db)
     # One fetch per header, so the walk has confirmed members by the 60th read.
-    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar",
-                         window_min=512, window_max=512)
+    args = cli.arguments(
+        cli.archive_index_command,
+        db=db,
+        archive="a.tar",
+        window_min=512,
+        window_max=512,
+    )
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped
     assert store.stats(store.get("a.tar")["id"])["n_members"] > 0
@@ -1355,18 +2074,35 @@ class _Tokens:
 
 
 @pytest.mark.parametrize("phase", ["walk", "audit", "compression"])
-def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(tmp_path, monkeypatch, phase):
+def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(
+    tmp_path, monkeypatch, phase
+):
     """Through the real reader: once the stop lands, Dropbox answers 429 to everything,
     and only the reader giving way to the stop can end the walk, the audit or the
     compression check."""
-    data = {"walk": build_tar(MEMBERS),
-            "audit": build_tar([("run/same.bin", bytes([i]) * 700) for i in range(30)]),
-            "compression": _compressed("gzip", build_tar(RANDOM_MEMBERS))}[phase]
+    data = {
+        "walk": build_tar(MEMBERS),
+        "audit": build_tar([("run/same.bin", bytes([i]) * 700) for i in range(30)]),
+        "compression": _compressed("gzip", build_tar(RANDOM_MEMBERS)),
+    }[phase]
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     stop, made = threading.Event(), []
-    nth = {"walk": 1, "audit": 2, "compression": 2}[phase]   # the walk's reader comes first
+    nth = {"walk": 1, "audit": 2, "compression": 2}[
+        phase
+    ]  # the walk's reader comes first
 
     class Dropbox:
         def __init__(self):
@@ -1375,25 +2111,41 @@ def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(tmp_path, monkeypat
         def post(self, url, headers=None, timeout=None):
             self.posts += 1
             if self.nth == nth and self.posts >= 2:
-                stop.set()                      # a signal, in a storm that does not end
+                stop.set()  # a signal, in a storm that does not end
                 return _Answer(429, body={"error": {"retry_after": 0}})
             first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
-            return _Answer(206, data[first:last + 1],
-                           {"Content-Range": f"bytes {first}-{last}/{len(data)}"})
+            return _Answer(
+                206,
+                data[first : last + 1],
+                {"Content-Range": f"bytes {first}-{last}/{len(data)}"},
+            )
 
     def reader_for(row, archive_set, tokens=None, limiter=None):
         made.append(None)
-        return DropboxRangeReader(archive_set, _Tokens(), cli.AdaptiveLimiter(rps=1e6),
-                                  session=Dropbox(), sleep=lambda seconds: None)
+        return DropboxRangeReader(
+            archive_set,
+            _Tokens(),
+            cli.AdaptiveLimiter(rps=1e6),
+            session=Dropbox(),
+            sleep=lambda seconds: None,
+        )
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
     store = ArchiveStore(db)
-    args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar",
-                         window_min=512, window_max=512)
+    args = cli.arguments(
+        cli.archive_index_command,
+        db=db,
+        archive="a.tar",
+        window_min=512,
+        window_max=512,
+    )
     walked = {}
-    walking = threading.Thread(target=lambda: walked.update(
-        result=cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)),
-        daemon=True)
+    walking = threading.Thread(
+        target=lambda: walked.update(
+            result=cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
+        ),
+        daemon=True,
+    )
     walking.start()
     walking.join(timeout=20)
     assert not walking.is_alive() and walked["result"].stopped
@@ -1404,22 +2156,29 @@ def test_a_pax_verdict_is_still_checked_against_the_folder(tmp_path, monkeypatch
     so that a part changed during the walk makes the archive stale instead."""
     source = tmp_path / "parts"
     source.mkdir()
-    data = build_tar([(n, d, {"pax_headers": {"mtime": "1700000000.25"}}) for n, d in MEMBERS],
-                     format=tarfile.PAX_FORMAT)
+    data = build_tar(
+        [(n, d, {"pax_headers": {"mtime": "1700000000.25"}}) for n, d in MEMBERS],
+        format=tarfile.PAX_FORMAT,
+    )
     archive_set = write_parts(source, data, len(data))
     db = str(tmp_path / "archives.db")
     register_dropbox(monkeypatch, db, archive_set)
     build = fake_build_lister([dropbox_entries(archive_set)])
     monkeypatch.setattr("dbaudit.cli.build_lister", build)
-    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
-                        limiter=None: LocalRangeReader(source, archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: LocalRangeReader(
+            source, archive_set
+        ),
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert ArchiveStore(db).get("a.tar")["state"] == "unsupported"
-    assert build.calls["n"] == 2                # before the walk, and before the verdict
+    assert build.calls["n"] == 2  # before the walk, and before the verdict
 
 
 class _CountingTokens:
     """A TokenProvider that counts the tokens dropped after a 401."""
+
     dropped = 0
 
     def __init__(self, remote="dropbox", **kwargs):
@@ -1436,10 +2195,18 @@ def test_index_drops_its_token_after_a_401_on_its_first_listing(tmp_path, monkey
     db = str(tmp_path / "archives.db")
     register_dropbox(monkeypatch, db, archive_set)
     monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
-    monkeypatch.setattr("dbaudit.cli.build_lister", fake_build_lister(
-        [AuthExpired("401 from Dropbox"), dropbox_entries(archive_set)]))
-    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
-                        limiter=None: LocalRangeReader(source, archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister(
+            [AuthExpired("401 from Dropbox"), dropbox_entries(archive_set)]
+        ),
+    )
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: LocalRangeReader(
+            source, archive_set
+        ),
+    )
     monkeypatch.setattr("dbaudit.cli.TokenProvider", _CountingTokens)
     monkeypatch.setattr(_CountingTokens, "dropped", 0)
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
@@ -1461,21 +2228,27 @@ def test_a_stopped_walk_does_not_list_its_folder_again(tmp_path, monkeypatch):
 
     class Stopping(LocalRangeReader):
         def read_range(self, part_idx, offset, length):
-            stop.set()                          # a signal, as the walk reads
+            stop.set()  # a signal, as the walk reads
             return super().read_range(part_idx, offset, length)
 
-    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
-                        limiter=None: Stopping(source, archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: Stopping(
+            source, archive_set
+        ),
+    )
     store = ArchiveStore(db)
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
-    walked = cli._walk_archive(args, store, store.get("a.tar"), None,
-                               cli.AdaptiveLimiter(rps=1000.0), stop)
+    walked = cli._walk_archive(
+        args, store, store.get("a.tar"), None, cli.AdaptiveLimiter(rps=1000.0), stop
+    )
     assert walked.stopped
-    assert build.calls["n"] == 1                # the listing before the walk; none after
+    assert build.calls["n"] == 1  # the listing before the walk; none after
 
 
-def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(tmp_path, monkeypatch,
-                                                                  capsys):
+def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(
+    tmp_path, monkeypatch, capsys
+):
     """A path truly in the archive twice, and the audit's own read of one copy comes
     back wrong. That is a disagreement between one read and the index, not a proof the
     index is wrong -- the row is read once more before a whole segment (300 GiB, on the
@@ -1484,27 +2257,41 @@ def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(tmp_path, monk
     offsets = _header_offsets(data)
     source = local_archive(tmp_path, data, part_size=len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     made = []
 
     def reader_for(row, archive_set, tokens=None, limiter=None):
         reader = LocalRangeReader(row["folder"], archive_set)
         made.append(reader)
-        if len(made) == 2:                  # the first reader walks, the second audits
+        if len(made) == 2:  # the first reader walks, the second audits
             real = reader.read_range
 
             def once_wrong(part_idx, offset, length):
                 body = real(part_idx, offset, length)
                 if reader.requests == 1 and offset <= offsets[-1] < offset + length:
                     cut = offsets[-1] - offset
-                    body = body[:cut] + b"\xff" * 512 + body[cut + 512:]
+                    body = body[:cut] + b"\xff" * 512 + body[cut + 512 :]
                 return body
 
             reader.read_range = once_wrong
         return reader
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"]) == 0
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
+        == 0
+    )
     store = ArchiveStore(db)
     row = store.get("a.tar")
     assert row["state"] == "complete"
@@ -1513,18 +2300,22 @@ def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(tmp_path, monk
 
 
 @pytest.mark.unshaped
-def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch, capsys):
+def test_the_audit_repairs_a_segment_other_than_the_first(
+    tmp_path, monkeypatch, capsys
+):
     """Review 5's K6. A well-formed bad read in segment 1: member 18's header read as
     member 5's (same padded size, so the chain rejoins). The audit finds member 5's path
     twice, reads the row afresh, and walks segment 1 again from its own confirmed start.
     The audit's other tests use one part; this pins a repair in a later segment."""
-    members = [(f"run/f{i:02d}.bin", bytes([i]) * (2_900 + (i % 3) * 10)) for i in range(24)]
+    members = [
+        (f"run/f{i:02d}.bin", bytes([i]) * (2_900 + (i % 3) * 10)) for i in range(24)
+    ]
     data = build_tar(members)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
         infos = t.getmembers()
     cut = infos[12].offset_data + 1_000
     x, y = infos[18], infos[5]
-    copied = data[y.offset:y.offset + 512]
+    copied = data[y.offset : y.offset + 512]
     source = tmp_path / "parts"
     source.mkdir()
     (source / "a.tar.aa").write_bytes(data[:cut])
@@ -1535,26 +2326,58 @@ def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch,
         def read_range(self, part_idx, offset, length):
             true = super().read_range(part_idx, offset, length)
             at = self.archive.parts[part_idx].offset + offset
-            if (not state["done"] and at <= x.offset
-                    and x.offset + 512 <= at + length):
+            if not state["done"] and at <= x.offset and x.offset + 512 <= at + length:
                 state["done"] = True
                 k = x.offset - at
-                return true[:k] + copied + true[k + 512:]
+                return true[:k] + copied + true[k + 512 :]
             return true
 
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: OneWellFormedLie(row["folder"], s))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: OneWellFormedLie(row["folder"], s),
+    )
     # Small scans and one-block windows: every header is its own fetch, so the fetches
     # read again to confirm segment 1's verdict hold only its last members, and the copy
     # is left for the audit to find.
-    monkeypatch.setattr("dbaudit.cli.find_chain_start",
-                        lambda concat, start, **kw: find_chain_start(concat, start,
-                                                                     scan_read=4096, **kw))
+    monkeypatch.setattr(
+        "dbaudit.cli.find_chain_start",
+        lambda concat, start, **kw: find_chain_start(
+            concat, start, scan_read=4096, **kw
+        ),
+    )
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-                 "--window-min", "1024", "--window-max", "1024"]) == 0
+    assert (
+        main(
+            [
+                "archive",
+                "index",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--workers",
+                "1",
+                "--window-min",
+                "1024",
+                "--window-max",
+                "1024",
+            ]
+        )
+        == 0
+    )
     assert state["done"], "the test did not actually inject the bad read"
     store = ArchiveStore(db)
     row = store.get("a.tar")
@@ -1564,6 +2387,7 @@ def test_the_audit_repairs_a_segment_other_than_the_first(tmp_path, monkeypatch,
 
 
 # ---- --recheck: the way back from a verdict reached wrongly --------------------------
+
 
 class _SameJunkEveryTime:
     """While ``on``, every fetch covering ``at`` carries the same junk there -- a server
@@ -1585,7 +2409,7 @@ class _SameJunkEveryTime:
                 shared.lied += 1
                 cut = shared.at - start
                 n = min(1024, length - cut)
-                return data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n:]
+                return data[:cut] + (bytes(range(256)) * 4)[:n] + data[cut + n :]
 
         return _Reader(self.source, archive_set)
 
@@ -1595,24 +2419,40 @@ def _condemned(tmp_path, monkeypatch, part_size=None):
     data = build_tar(MEMBERS)
     source = local_archive(tmp_path, data, part_size=part_size or len(data))
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     liar = _SameJunkEveryTime(source, _header_offsets(data)[20])
     monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert liar.lied >= 2 and ArchiveStore(db).get("a.tar")["state"] == "corrupt"
-    liar.on = False                                  # the server behaves from here on
+    liar.on = False  # the server behaves from here on
     return db, liar
 
 
 def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
-        tmp_path, monkeypatch, capsys):
+    tmp_path, monkeypatch, capsys
+):
     db, liar = _condemned(tmp_path, monkeypatch)
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    assert "--recheck" in capsys.readouterr().err, "a verdict should say how to ask again"
+    assert "--recheck" in capsys.readouterr().err, (
+        "a verdict should say how to ask again"
+    )
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
+    )
     assert "walking the chain again from offset 0" in capsys.readouterr().out
     store = ArchiveStore(db)
     row = store.get("a.tar")
@@ -1621,7 +2461,9 @@ def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
     assert event_count(db, row["id"], "recheck") == 1
 
 
-def test_recheck_walks_again_the_segments_the_verdict_retired(tmp_path, monkeypatch, capsys):
+def test_recheck_walks_again_the_segments_the_verdict_retired(
+    tmp_path, monkeypatch, capsys
+):
     """Split, the verdict lands in a middle segment, and the join retires every segment
     after it as `beyond`. Asking again must walk those too, from fresh scans, and join
     them to the chain -- not leave the walk blocked on a segment nobody will claim."""
@@ -1630,10 +2472,12 @@ def test_recheck_walks_again_the_segments_the_verdict_retired(tmp_path, monkeypa
     archive_id = store.get("a.tar")["id"]
     states = [s["state"] for s in store.segments(archive_id)]
     ending = states.index("corrupt")
-    assert "beyond" in states[ending + 1:], states
+    assert "beyond" in states[ending + 1 :], states
     repairs = event_count(db, archive_id, "repair")
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
+    )
     assert store.get("a.tar")["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
     assert "corrupt" not in [s["state"] for s in store.segments(archive_id)]
@@ -1649,14 +2493,27 @@ def test_recheck_finds_real_damage_again(tmp_path, capsys):
     corrupt again, at the same place, with every member before the damage indexed."""
     data = bytearray(build_tar(MEMBERS))
     offsets = _header_offsets(bytes(data))
-    data[offsets[20]:offsets[20] + 1024] = bytes(range(256)) * 4
+    data[offsets[20] : offsets[20] + 1024] = bytes(range(256)) * 4
     source = local_archive(tmp_path, bytes(data), part_size=4096)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     before = ArchiveStore(db).get("a.tar")
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    )
     after = ArchiveStore(db).get("a.tar")
     assert (after["state"], after["end_offset"]) == ("corrupt", before["end_offset"])
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS[:20]]
@@ -1665,11 +2522,24 @@ def test_recheck_finds_real_damage_again(tmp_path, capsys):
 def test_recheck_asks_a_pax_archive_again_and_it_is_still_pax(tmp_path, capsys):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     capsys.readouterr()
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    )
     assert "is a pax-format archive" in capsys.readouterr().err
     row = ArchiveStore(db).get("a.tar")
     assert row["state"] == "unsupported"
@@ -1679,7 +2549,18 @@ def test_recheck_asks_a_pax_archive_again_and_it_is_still_pax(tmp_path, capsys):
 def test_recheck_reads_nothing_of_a_complete_archive(tmp_path, monkeypatch, capsys):
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     capsys.readouterr()
 
@@ -1687,7 +2568,9 @@ def test_recheck_reads_nothing_of_a_complete_archive(tmp_path, monkeypatch, caps
         raise AssertionError("a complete archive must not be read again")
 
     monkeypatch.setattr("dbaudit.cli._reader_for", landmine)
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    )
     assert "is complete" in capsys.readouterr().err
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
 
@@ -1699,13 +2582,17 @@ def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatc
     it and finds the first wrong header -- and the store must never have held a row the
     wrong reading made: the second sits at an offset the true chain never visits, so no
     row written afterwards would replace it."""
-    members = [("run/a.bin", b"a" * 100), ("run/b.bin", b"b" * 3000),
-               ("run/c.bin", b"c" * 100), ("run/d.bin", b"d" * 20000),
-               ("run/e.bin", b"e" * 100)]
+    members = [
+        ("run/a.bin", b"a" * 100),
+        ("run/b.bin", b"b" * 3000),
+        ("run/c.bin", b"c" * 100),
+        ("run/d.bin", b"d" * 20000),
+        ("run/e.bin", b"e" * 100),
+    ]
     data = build_tar(members)
     offsets = _header_offsets(data)
     at = offsets[2]
-    stretch = data[offsets[0]:offsets[1] + 512]
+    stretch = data[offsets[0] : offsets[1] + 512]
     source = local_archive(tmp_path, data, part_size=len(data))
     state = {"lied": False}
 
@@ -1717,12 +2604,25 @@ def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatc
                 return true
             state["lied"] = True
             cut = at - start
-            return true[:cut] + stretch + true[cut + len(stretch):]
+            return true[:cut] + stretch + true[cut + len(stretch) :]
 
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: OneStretch(row["folder"], s))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: OneStretch(row["folder"], s),
+    )
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
     assert state["lied"], "the test did not actually inject the bad read"
@@ -1730,7 +2630,8 @@ def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatc
 
 
 def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
-        tmp_path, monkeypatch, capsys):
+    tmp_path, monkeypatch, capsys
+):
     """--recheck drops rows to walk them again, so it must not run on parts that changed
     since registration: the archive goes `stale` with its rows kept, as a plain `index`
     would leave it, and nothing is walked."""
@@ -1748,10 +2649,14 @@ def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
     assert row["state"] == "corrupt"
     kept = store.stats(row["id"])["n_members"]
     assert kept == 20
-    monkeypatch.setattr("dbaudit.cli.build_lister",
-                        fake_build_lister([dropbox_entries(archive_set, (1, "ff" * 32))]))
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister([dropbox_entries(archive_set, (1, "ff" * 32))]),
+    )
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    )
 
     row = store.get("a.tar")
     assert row["state"] == "stale"
@@ -1762,7 +2667,7 @@ def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
 def _header_claiming(data, header, size):
     """The header at ``header`` with its size field set to ``size``, checksum redone: a
     valid header that sends the chain wherever a test needs it."""
-    block = bytearray(data[header:header + 512])
+    block = bytearray(data[header : header + 512])
     block[124:136] = b"%011o\0" % size
     block[148:156] = b" " * 8
     block[148:156] = b"%06o\0 " % sum(block)
@@ -1771,7 +2676,8 @@ def _header_claiming(data, header, size):
 
 @pytest.mark.unshaped
 def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
-        tmp_path, monkeypatch, capsys):
+    tmp_path, monkeypatch, capsys
+):
     """Review 6's #2. One bad read in segment 0 sends its chain into a tarball stored in
     the archive, whose real headers it walks for longer than the fetches read again --
     and on across the part boundary: segment 0 crosses at one of the stored tarball's
@@ -1779,9 +2685,11 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
     stored tarball's chain to its end and is `corrupt`. Walking segment 1 again from the
     same start ends there again; --recheck walks the chain again from segment 0's."""
     inner = build_tar([(f"ginner/g{i:03d}.dat", bytes([i]) * 600) for i in range(40)])
-    members = ([(f"run/f{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
-               + [("run/results.tar", inner)]
-               + [(f"run/z{i:02d}.bin", bytes([i]) * 700) for i in range(6)])
+    members = (
+        [(f"run/f{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
+        + [("run/results.tar", inner)]
+        + [(f"run/z{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
+    )
     data = build_tar(members)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
         stored = t.getmember("run/results.tar").offset_data
@@ -1790,7 +2698,7 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
     wrong = _header_claiming(data, at, inner_headers[5] - at - 512)
     source = tmp_path / "parts"
     source.mkdir()
-    cut = inner_headers[30] + 700                   # the part boundary: in the stored tar
+    cut = inner_headers[30] + 700  # the part boundary: in the stored tar
     (source / "a.tar.aa").write_bytes(data[:cut])
     (source / "a.tar.ab").write_bytes(data[cut:])
     state = {"lie": True, "lied": 0}
@@ -1799,44 +2707,72 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
         def read_range(self, part_idx, offset, length):
             true = super().read_range(part_idx, offset, length)
             start = self.archive.parts[part_idx].offset + offset
-            if state["lie"] and not state["lied"] and start <= at and at + 512 <= start + length:
+            if (
+                state["lie"]
+                and not state["lied"]
+                and start <= at
+                and at + 512 <= start + length
+            ):
                 state["lied"] = 1
-                return true[:at - start] + wrong + true[at - start + 512:]
+                return true[: at - start] + wrong + true[at - start + 512 :]
             return true
 
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: OneLie(row["folder"], s))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: OneLie(row["folder"], s),
+    )
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     small = ["--workers", "1", "--window-min", "1024", "--window-max", "1024"]
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", *small]) == 1
     store = ArchiveStore(db)
     assert state["lied"], "the test did not actually inject the bad read"
     assert store.get("a.tar")["state"] == "corrupt"
     exit_ = store.segments(store.get("a.tar")["id"])[0]["exit_offset"]
-    assert exit_ in inner_headers, "segment 0 did not cross at a stored tarball's header"
+    assert exit_ in inner_headers, (
+        "segment 0 did not cross at a stored tarball's header"
+    )
     state["lie"] = False
     capsys.readouterr()
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck",
-                 *small]) == 0
+    assert (
+        main(
+            ["archive", "index", "--db", db, "--archive", "a.tar", "--recheck", *small]
+        )
+        == 0
+    )
     assert store.get("a.tar")["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
 
 
 @pytest.mark.unshaped
 def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
-        tmp_path, monkeypatch, capsys):
+    tmp_path, monkeypatch, capsys
+):
     """Review 7's B2. The stored tarball a bad read sends segment 0 into fills the whole of
     part 1, so the wrong start is handed on twice: segment 0 crosses at one of its
     headers, and segment 1 at another. Walked again from segment 1's start, the chain
     ends where it did. Asked again about that same verdict, --recheck goes a segment
     further back -- to segment 0, where the bad read was -- and the archive is whole."""
-    inner = build_tar([(f"ginner/g{i:03d}.dat", bytes([i % 251]) * 600)
-                       for i in range(200)])
-    members = ([(f"run/f{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
-               + [("run/results.tar", inner)]
-               + [(f"run/z{i:02d}.bin", bytes([i]) * 700) for i in range(6)])
+    inner = build_tar(
+        [(f"ginner/g{i:03d}.dat", bytes([i % 251]) * 600) for i in range(200)]
+    )
+    members = (
+        [(f"run/f{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
+        + [("run/results.tar", inner)]
+        + [(f"run/z{i:02d}.bin", bytes([i]) * 700) for i in range(6)]
+    )
     data = build_tar(members)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
         stored = t.getmember("run/results.tar").offset_data
@@ -1854,34 +2790,62 @@ def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
         def read_range(self, part_idx, offset, length):
             true = super().read_range(part_idx, offset, length)
             start = self.archive.parts[part_idx].offset + offset
-            if state["lie"] and not state["lied"] and start <= at and at + 512 <= start + length:
+            if (
+                state["lie"]
+                and not state["lied"]
+                and start <= at
+                and at + 512 <= start + length
+            ):
                 state["lied"] = 1
-                return true[:at - start] + wrong + true[at - start + 512:]
+                return true[: at - start] + wrong + true[at - start + 512 :]
             return true
 
-    monkeypatch.setattr("dbaudit.cli._reader_for",
-                        lambda row, s, t=None, l=None: OneLie(row["folder"], s))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, s, t=None, l=None: OneLie(row["folder"], s),
+    )
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     small = ["--workers", "1", "--window-min", "1024", "--window-max", "1024"]
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", *small]) == 1
     assert state["lied"], "the test did not actually inject the bad read"
     store = ArchiveStore(db)
     segments = store.segments(store.get("a.tar")["id"])
     assert [s["state"] for s in segments] == ["crossed", "crossed", "corrupt"]
-    assert {segments[1]["first_header"], segments[2]["first_header"]} <= set(inner_headers)
+    assert {segments[1]["first_header"], segments[2]["first_header"]} <= set(
+        inner_headers
+    )
     state["lie"] = False
     capsys.readouterr()
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck",
-                 *small]) == 1
+    assert (
+        main(
+            ["archive", "index", "--db", db, "--archive", "a.tar", "--recheck", *small]
+        )
+        == 1
+    )
     out = capsys.readouterr().out
     assert "(segment 1; the walk had ended in segment 2)" in out
     assert "further back" not in out
     assert store.get("a.tar")["state"] == "corrupt"
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck",
-                 *small]) == 0
+    assert (
+        main(
+            ["archive", "index", "--db", db, "--archive", "a.tar", "--recheck", *small]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert "walking the chain again from offset 0 (segment 0;" in out
     assert "further back" in out
@@ -1895,10 +2859,21 @@ def test_recheck_scans_for_no_start_it_already_has(tmp_path, monkeypatch):
     and on v01p0 a part can begin 37 GiB before its first header."""
     data = bytearray(build_tar(MEMBERS))
     offsets = _header_offsets(bytes(data))
-    data[offsets[20]:offsets[20] + 1024] = bytes(range(256)) * 4
+    data[offsets[20] : offsets[20] + 1024] = bytes(range(256)) * 4
     source = local_archive(tmp_path, bytes(data), part_size=4096)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     scans = []
 
@@ -1907,7 +2882,9 @@ def test_recheck_scans_for_no_start_it_already_has(tmp_path, monkeypatch):
         return find_chain_start(concat, offset, *args, **kwargs)
 
     monkeypatch.setattr("dbaudit.cli.find_chain_start", scan)
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    )
     assert ArchiveStore(db).get("a.tar")["end_offset"] == offsets[20]
     assert scans == []
 
@@ -1918,10 +2895,38 @@ def test_recheck_is_refused_for_a_walk_that_only_stopped(tmp_path, capsys):
     since -- hours, on a 5 TiB archive."""
     source = local_archive(tmp_path, part_size=4096)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
-    main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1",
-          "--batch", "5", "--max-batches", "2", "--window-min", "1024",
-          "--window-max", "1024"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
+    main(
+        [
+            "archive",
+            "index",
+            "--db",
+            db,
+            "--archive",
+            "a.tar",
+            "--workers",
+            "1",
+            "--batch",
+            "5",
+            "--max-batches",
+            "2",
+            "--window-min",
+            "1024",
+            "--window-max",
+            "1024",
+        ]
+    )
     store = ArchiveStore(db)
     row = store.get("a.tar")
     assert row["state"] == "walking"
@@ -1929,7 +2934,9 @@ def test_recheck_is_refused_for_a_walk_that_only_stopped(tmp_path, capsys):
     assert kept > 0
     capsys.readouterr()
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    )
     assert "`index` alone resumes" in capsys.readouterr().err
     assert store.stats(row["id"])["n_members"] == kept
     assert event_count(db, row["id"], "recheck") == 0
@@ -1941,22 +2948,36 @@ def test_recheck_of_real_damage_walks_only_what_it_must(tmp_path, capsys):
     retire those segments again, and on v01p0 each is 300 GiB."""
     data = bytearray(build_tar(MEMBERS))
     offsets = _header_offsets(bytes(data))
-    data[offsets[20]:offsets[20] + 1024] = bytes(range(256)) * 4
+    data[offsets[20] : offsets[20] + 1024] = bytes(range(256)) * 4
     source = local_archive(tmp_path, bytes(data), part_size=4096)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     store = ArchiveStore(db)
     segments = store.segments(store.get("a.tar")["id"])
     ending = next(s for s in segments if s["state"] != "crossed")
     assert 0 < ending["idx"] < len(segments) - 2
 
-    assert main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    assert (
+        main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 1
+    )
     row = store.get("a.tar")
     assert (row["state"], row["end_offset"]) == ("corrupt", offsets[20])
-    after = store.segments(row["id"])[ending["idx"] + 1:]
+    after = store.segments(row["id"])[ending["idx"] + 1 :]
     assert all(s["state"] == "beyond" and s["first_header"] is None for s in after), (
-        "a segment after the damage was scanned or walked")
+        "a segment after the damage was scanned or walked"
+    )
 
 
 def test_the_chain_crossing_into_a_retired_segment_re_arms_it(tmp_path):
@@ -1982,6 +3003,7 @@ def test_the_chain_crossing_into_a_retired_segment_re_arms_it(tmp_path):
 
 # ---- compressed files named .tar --------------------------------------------------
 
+
 def _compressed(kind, data):
     if kind == "gzip":
         return gzip.compress(data)
@@ -1989,7 +3011,7 @@ def _compressed(kind, data):
         return bz2.compress(data)
     if kind == "xz":
         return lzma.compress(data, format=lzma.FORMAT_XZ)
-    return b"\x28\xb5\x2f\xfd" + bytes(range(256)) * 8      # zstd's magic, then its frame
+    return b"\x28\xb5\x2f\xfd" + bytes(range(256)) * 8  # zstd's magic, then its frame
 
 
 RANDOM_MEMBERS = [(f"run/r{i}.bin", random.Random(i).randbytes(3000)) for i in range(3)]
@@ -1999,10 +3021,21 @@ RANDOM_MEMBERS = [(f"run/r{i}.bin", random.Random(i).randbytes(3000)) for i in r
 def test_a_compressed_file_named_tar_is_unsupported_not_corrupt(tmp_path, capsys, kind):
     """Its owner should look for a decompressor, not for damage."""
     data = _compressed(kind, build_tar(RANDOM_MEMBERS))
-    assert len(data) > 2048                     # past where a tar's first header ends
+    assert len(data) > 2048  # past where a tar's first header ends
     source = local_archive(tmp_path, data, part_size=1 << 20)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
@@ -2015,58 +3048,116 @@ def test_a_compressed_file_named_tar_is_unsupported_not_corrupt(tmp_path, capsys
 def test_junk_at_the_start_that_is_no_known_compression_stays_corrupt(tmp_path):
     source = local_archive(tmp_path, b"PK\x03\x04" + b"z" * 5000, part_size=1 << 20)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert ArchiveStore(db).get("a.tar")["state"] == "corrupt"
 
 
-def test_a_compressed_file_too_short_to_hold_a_tar_is_unsupported_not_truncated(tmp_path):
+def test_a_compressed_file_too_short_to_hold_a_tar_is_unsupported_not_truncated(
+    tmp_path,
+):
     data = _compressed("gzip", build_tar(MEMBERS))
-    assert len(data) < 1024                     # shorter than a terminator: `truncated`
+    assert len(data) < 1024  # shorter than a terminator: `truncated`
     source = local_archive(tmp_path, data, part_size=1 << 20)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert ArchiveStore(db).get("a.tar")["state"] == "unsupported"
 
 
-def test_index_says_so_when_the_read_that_checks_for_compression_fails(tmp_path, monkeypatch,
-                                                                       capsys):
+def test_index_says_so_when_the_read_that_checks_for_compression_fails(
+    tmp_path, monkeypatch, capsys
+):
     """That read meets Dropbox's passing failures like any other: the archive is left in
     `error`, to be asked again."""
-    source = local_archive(tmp_path, _compressed("gzip", build_tar(RANDOM_MEMBERS)),
-                           part_size=1 << 20)
+    source = local_archive(
+        tmp_path, _compressed("gzip", build_tar(RANDOM_MEMBERS)), part_size=1 << 20
+    )
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     class Failing(LocalRangeReader):
         def read_range(self, part_idx, offset, length):
-            if length <= 6:                     # only the compression check asks so little
+            if length <= 6:  # only the compression check asks so little
                 raise ReaderError("a.tar: rate limited")
             return super().read_range(part_idx, offset, length)
 
-    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
-                        limiter=None: Failing(row["folder"], archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: Failing(
+            row["folder"], archive_set
+        ),
+    )
     capsys.readouterr()
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert ArchiveStore(db).get("a.tar")["state"] == "error"
     assert "could not read its first bytes" in capsys.readouterr().err
 
 
-def test_a_compression_format_is_named_only_once_two_readings_agree(tmp_path, monkeypatch):
+def test_a_compression_format_is_named_only_once_two_readings_agree(
+    tmp_path, monkeypatch
+):
     """As every verdict stands only once two readings agree: one reading that shows a gzip
     signature at the start of junk does not make it gzip."""
     source = local_archive(tmp_path, b"PK\x03\x04" + b"z" * 5000, part_size=1 << 20)
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
 
     class Misread(LocalRangeReader):
         def read_range(self, part_idx, offset, length):
             data = super().read_range(part_idx, offset, length)
             return b"\x1f\x8b" + data[2:] if (offset, length) == (0, 6) else data
 
-    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
-                        limiter=None: Misread(row["folder"], archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: Misread(
+            row["folder"], archive_set
+        ),
+    )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert ArchiveStore(db).get("a.tar")["state"] == "corrupt"
 
@@ -2078,7 +3169,18 @@ def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(tmp_path, monkeypat
     source.mkdir()
     (source / "a.tar").write_bytes(b"")
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     asked = []
 
     class Recording(LocalRangeReader):
@@ -2086,8 +3188,12 @@ def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(tmp_path, monkeypat
             asked.append(length)
             return super().read_range(part_idx, offset, length)
 
-    monkeypatch.setattr("dbaudit.cli._reader_for", lambda row, archive_set, tokens=None,
-                        limiter=None: Recording(row["folder"], archive_set))
+    monkeypatch.setattr(
+        "dbaudit.cli._reader_for",
+        lambda row, archive_set, tokens=None, limiter=None: Recording(
+            row["folder"], archive_set
+        ),
+    )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     assert ArchiveStore(db).get("a.tar")["state"] == "truncated"
     assert 0 not in asked
@@ -2095,17 +3201,44 @@ def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(tmp_path, monkeypat
 
 def test_a_compressed_archive_is_never_called_pax(tmp_path, capsys):
     """`index` again, `report` and `cat` name what the walk found, as the walk did."""
-    source = local_archive(tmp_path, _compressed("gzip", build_tar(RANDOM_MEMBERS)),
-                           part_size=1 << 20)
+    source = local_archive(
+        tmp_path, _compressed("gzip", build_tar(RANDOM_MEMBERS)), part_size=1 << 20
+    )
     db = str(tmp_path / "archives.db")
-    main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", "a.tar"])
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     main(["archive", "report", "--db", db, "--archive", "a.tar"])
-    assert main(["archive", "cat", "--db", db, "--archive", "a.tar", "--member", "run/r0.bin",
-                 "--out", str(tmp_path / "r0.bin")]) == 1
+    assert (
+        main(
+            [
+                "archive",
+                "cat",
+                "--db",
+                db,
+                "--archive",
+                "a.tar",
+                "--member",
+                "run/r0.bin",
+                "--out",
+                str(tmp_path / "r0.bin"),
+            ]
+        )
+        == 1
+    )
     out, err = capsys.readouterr()
     assert "pax" not in out + err
     assert "gzip-compressed" in out and err.count("gzip-compressed") == 2
@@ -2115,13 +3248,26 @@ def test_status_without_an_archive_summarises_the_database(tmp_path, capsys):
     """With thousands of archives, one line per state and a line per walk in progress;
     one archive's full status is `--archive`."""
     db = str(tmp_path / "archives.db")
-    other = build_tar(MEMBERS + [("run/extra.bin", b"e" * 100)])     # its own identity
-    for name, data, cap in (("a.tar", build_tar(MEMBERS), []),
-                            ("b.tar", other, ["--batch", "5", "--max-batches", "1"])):
+    other = build_tar(MEMBERS + [("run/extra.bin", b"e" * 100)])  # its own identity
+    for name, data, cap in (
+        ("a.tar", build_tar(MEMBERS), []),
+        ("b.tar", other, ["--batch", "5", "--max-batches", "1"]),
+    ):
         source = tmp_path / name
         source.mkdir()
         write_parts(source, data, 4096, base=name)
-        main(["archive", "register", "--db", db, "--local-dir", str(source), "--name", name])
+        main(
+            [
+                "archive",
+                "register",
+                "--db",
+                db,
+                "--local-dir",
+                str(source),
+                "--name",
+                name,
+            ]
+        )
         main(["archive", "index", "--db", db, "--archive", name, *cap])
     capsys.readouterr()
 
@@ -2131,4 +3277,4 @@ def test_status_without_an_archive_summarises_the_database(tmp_path, capsys):
     assert "complete    : 1 (" in out and f"{len(MEMBERS)} members" in out
     assert "walking     : 1 (" in out
     assert "mid-walk:" in out and "b.tar" in out and "covered" in out
-    assert "[ 0]" not in out                    # no segment listing without --archive
+    assert "[ 0]" not in out  # no segment listing without --archive

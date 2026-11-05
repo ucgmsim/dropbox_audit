@@ -21,8 +21,11 @@ from dbaudit.archive import reader
 
 
 def pytest_addoption(parser):
-    parser.addoption("--unshaped", action="store_true",
-                     help="make every ConcatFile lead 0, as before request shapes")
+    parser.addoption(
+        "--unshaped",
+        action="store_true",
+        help="make every ConcatFile lead 0, as before request shapes",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -30,9 +33,11 @@ def _shapes(request):
     # A patch of its own: a test that calls monkeypatch.undo() must not undo this too.
     with pytest.MonkeyPatch.context() as patch:
         seed = f"{os.environ.get('DBAUDIT_SEED', '')}/{request.node.nodeid}"
-        patch.setattr(reader, "secrets",
-                      SimpleNamespace(randbelow=random.Random(seed).randrange))
-        if (request.config.getoption("--unshaped")
-                or request.node.get_closest_marker("unshaped")):
+        patch.setattr(
+            reader, "secrets", SimpleNamespace(randbelow=random.Random(seed).randrange)
+        )
+        if request.config.getoption("--unshaped") or request.node.get_closest_marker(
+            "unshaped"
+        ):
             patch.setattr(reader, "LEAD_STEP", 0)
         yield

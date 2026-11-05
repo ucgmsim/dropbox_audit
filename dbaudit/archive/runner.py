@@ -35,6 +35,7 @@ WALKED = frozenset({"complete", "truncated", "corrupt", "unsupported", "stale"})
 class Job:
     """One archive to walk. ``chains`` is how many it wants at once: an estimate until its
     walk begins, then the number its walk reports as chains finish."""
+
     key: str
     label: str
     size: int
@@ -52,6 +53,7 @@ class Done:
     """What one walk came to. ``state`` is the archive's state afterwards, or `stopped`
     (resumable), `gone` (no longer where the listing said) or `done` (walked before, or
     being walked by another job)."""
+
     state: str
     members: int = 0
     requests: int = 0
@@ -75,24 +77,37 @@ class Runner:
     ``stop``, and the run fails. ``limit`` caps how many archives the run starts.
     """
 
-    def __init__(self, walk, limiter, stop, *, margin=2, max_bugs=3, limit=0,
-                 summary_every=600.0, on_bug=None, clock=time.monotonic):
+    def __init__(
+        self,
+        walk,
+        limiter,
+        stop,
+        *,
+        margin=2,
+        max_bugs=3,
+        limit=0,
+        summary_every=600.0,
+        on_bug=None,
+        clock=time.monotonic,
+    ):
         self.walk, self.limiter, self.stop = walk, limiter, stop
         self.margin, self.max_bugs, self.limit = margin, max_bugs, limit
         self.summary_every, self.on_bug, self.clock = summary_every, on_bug, clock
 
     def run(self, jobs) -> Report:
         waiting = deque(sorted(jobs, key=lambda job: -job.size))
-        estimate = {job.key: job.chains for job in waiting}     # a second try starts here
-        flying = {}                         # job key -> (job, when it started)
+        estimate = {job.key: job.chains for job in waiting}  # a second try starts here
+        flying = {}  # job key -> (job, when it started)
         finished = queue.Queue()
         outcomes, bugs, started = Counter(), 0, 0
-        done_size, recent = 0, deque()      # (when, size) of each walk that finished
+        done_size, recent = 0, deque()  # (when, size) of each walk that finished
         granted0, started_at = self.limiter.granted_total, self.clock()
         last_summary, failed = started_at, False
 
         def work(job):
-            done = Done("error", bug=True)  # unless the walk returns: even SystemExit reports
+            done = Done(
+                "error", bug=True
+            )  # unless the walk returns: even SystemExit reports
             try:
                 done = self.walk(job)
             except Exception as exc:
@@ -119,10 +134,14 @@ class Runner:
                     started += not job.retried
                     flying[job.key] = (job, self.clock())
                     wanted += job.chains
-                    threading.Thread(target=work, args=(job,), daemon=True,
-                                     name=f"archive {job.label}").start()
+                    threading.Thread(
+                        target=work,
+                        args=(job,),
+                        daemon=True,
+                        name=f"archive {job.label}",
+                    ).start()
             if not flying:
-                break                       # stopping, or the limit is reached
+                break  # stopping, or the limit is reached
             try:
                 job, done = finished.get(timeout=1.0)
             except queue.Empty:
@@ -138,15 +157,25 @@ class Runner:
                 if done.state == "error" and not job.retried and not done.bug:
                     job.retried, job.chains = True, estimate[job.key]
                     waiting.append(job)
-                    log.info("%s: error after %s; trying it once more at the end of the "
-                             "queue", job.label, took)
+                    log.info(
+                        "%s: error after %s; trying it once more at the end of the "
+                        "queue",
+                        job.label,
+                        took,
+                    )
                 else:
                     outcomes[done.state] += 1
                     if done.state in WALKED:
                         done_size += job.size
                         recent.append((self.clock(), job.size))
-                    log.info("%s: %s (%s members, %s requests, %s)", job.label, done.state,
-                             f"{done.members:,}", f"{done.requests:,}", took)
+                    log.info(
+                        "%s: %s (%s members, %s requests, %s)",
+                        job.label,
+                        done.state,
+                        f"{done.members:,}",
+                        f"{done.requests:,}",
+                        took,
+                    )
                 try:
                     job, done = finished.get_nowait()
                 except queue.Empty:
@@ -154,26 +183,43 @@ class Runner:
             now = self.clock()
             if now - last_summary >= self.summary_every:
                 granted = self.limiter.granted_total
-                rate = (granted - granted0) / (now - last_summary) if now > last_summary else 0.0
+                rate = (
+                    (granted - granted0) / (now - last_summary)
+                    if now > last_summary
+                    else 0.0
+                )
                 granted0, last_summary = granted, now
                 while recent and recent[0][0] < now - 3600:
                     recent.popleft()
-                self._summary(outcomes, flying, waiting, done_size, recent,
-                              now - started_at, rate)
+                self._summary(
+                    outcomes, flying, waiting, done_size, recent, now - started_at, rate
+                )
         return Report(outcomes, started, self.stop.is_set() and not failed, failed)
 
     def _summary(self, outcomes, flying, waiting, done_size, recent, elapsed, rate):
         """What is left, in flight or queued, at the last hour's pace: by count and by
         size. The largest archives go first, so the truth lies between the two."""
         window = min(elapsed, 3600.0)
-        left = sum(job.size for job, _ in flying.values()) + sum(job.size for job in waiting)
+        left = sum(job.size for job, _ in flying.values()) + sum(
+            job.size for job in waiting
+        )
         recent_bytes = sum(size for _, size in recent)
-        by_count = ((len(flying) + len(waiting)) * window / len(recent) if recent
-                    else float("inf"))
+        by_count = (
+            (len(flying) + len(waiting)) * window / len(recent)
+            if recent
+            else float("inf")
+        )
         by_size = left * window / recent_bytes if recent_bytes else float("inf")
-        log.info("progress: %s done, %d in flight, %d queued | %s of %s | "
-                 "%d streams, %.1f requests/s | eta %s by count, %s by size",
-                 f"{sum(outcomes.values()):,}", len(flying), len(waiting),
-                 human_bytes(done_size), human_bytes(done_size + left),
-                 self.limiter.concurrency, rate, human_duration(by_count),
-                 human_duration(by_size))
+        log.info(
+            "progress: %s done, %d in flight, %d queued | %s of %s | "
+            "%d streams, %.1f requests/s | eta %s by count, %s by size",
+            f"{sum(outcomes.values()):,}",
+            len(flying),
+            len(waiting),
+            human_bytes(done_size),
+            human_bytes(done_size + left),
+            self.limiter.concurrency,
+            rate,
+            human_duration(by_count),
+            human_duration(by_size),
+        )

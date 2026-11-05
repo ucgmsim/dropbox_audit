@@ -30,7 +30,9 @@ class VerifyResult:
 
     @property
     def differences(self) -> int:
-        return len(self.only_in_db) + len(self.only_in_rclone) + len(self.size_mismatches)
+        return (
+            len(self.only_in_db) + len(self.only_in_rclone) + len(self.size_mismatches)
+        )
 
     @property
     def ok(self) -> bool:
@@ -39,16 +41,26 @@ class VerifyResult:
 
 def _run_rclone(remote: str, path: str) -> str:
     proc = subprocess.run(
-        ["rclone", "lsjson", "-R", "--files-only", "--checkers", str(VERIFY_CHECKERS),
-         f"{remote}:{path}"],
-        capture_output=True, text=True,
+        [
+            "rclone",
+            "lsjson",
+            "-R",
+            "--files-only",
+            "--checkers",
+            str(VERIFY_CHECKERS),
+            f"{remote}:{path}",
+        ],
+        capture_output=True,
+        text=True,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"rclone lsjson failed: {proc.stderr.strip()[:400]}")
     return proc.stdout
 
 
-def verify_subtree(store, path: str, rclone_fn=None, remote: str | None = None) -> VerifyResult:
+def verify_subtree(
+    store, path: str, rclone_fn=None, remote: str | None = None
+) -> VerifyResult:
     path = "/" + path.strip("/")
     remote = remote or store.get_meta("remote", "dropbox")
     rclone_fn = rclone_fn or (lambda p: _run_rclone(remote, p))
@@ -60,7 +72,7 @@ def verify_subtree(store, path: str, rclone_fn=None, remote: str | None = None) 
         "WHERE lower(dirs.path_display) = ? OR lower(dirs.path_display) LIKE ?",
         (path.lower(), prefix + "%"),
     )
-    db = {full[len(path) + 1:]: size for full, size in rows}
+    db = {full[len(path) + 1 :]: size for full, size in rows}
 
     listing = json.loads(rclone_fn(path) or "[]")
     remote_files = {entry["Path"]: entry["Size"] for entry in listing}

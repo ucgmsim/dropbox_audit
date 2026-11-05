@@ -6,15 +6,35 @@ from dbaudit.archive.tarwalk import Member, WalkResult
 
 
 def parts(count=2, content="ab"):
-    return [Part(idx=i, name=f"a.tar.a{chr(ord('a') + i)}", size=100, offset=100 * i,
-                 path_display=f"/d/a.tar.a{chr(ord('a') + i)}", dbx_id=f"id:{i}",
-                 rev="r", content_hash=content * 32) for i in range(count)]
+    return [
+        Part(
+            idx=i,
+            name=f"a.tar.a{chr(ord('a') + i)}",
+            size=100,
+            offset=100 * i,
+            path_display=f"/d/a.tar.a{chr(ord('a') + i)}",
+            dbx_id=f"id:{i}",
+            rev="r",
+            content_hash=content * 32,
+        )
+        for i in range(count)
+    ]
 
 
 def member(offset, name="f.bin", size=10):
-    return Member(hdr_offset=offset, data_offset=offset + 512, size=size, type="0",
-                  mode=0o644, mtime=1, uname="user", gname="proj00001",
-                  dir="run", name=name, linkname="")
+    return Member(
+        hdr_offset=offset,
+        data_offset=offset + 512,
+        size=size,
+        type="0",
+        mode=0o644,
+        mtime=1,
+        uname="user",
+        gname="proj00001",
+        dir="run",
+        name=name,
+        linkname="",
+    )
 
 
 def new_store(tmp_path):
@@ -47,8 +67,9 @@ def test_re_registering_moved_parts_updates_their_paths(tmp_path):
     """The parts of v01p0_incomplete moved folders; the index must follow them."""
     store = new_store(tmp_path)
     archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
-    moved = [Part(**{**p.__dict__, "path_display": f"/new{p.path_display}"})
-             for p in parts()]
+    moved = [
+        Part(**{**p.__dict__, "path_display": f"/new{p.path_display}"}) for p in parts()
+    ]
     assert store.register("a.tar", "tar", "/new/d", "dropbox", moved) == archive_id
     assert store.parts_of(archive_id)[0].path_display.startswith("/new")
 
@@ -62,8 +83,14 @@ def test_different_content_is_a_different_archive(tmp_path):
 
 def test_a_batch_writes_members_and_the_cursor_together(tmp_path):
     store, archive_id, segment_id = registered(tmp_path)
-    store.commit_batch(archive_id, segment_id, [member(0), member(1024)], 2048,
-                       requests=3, bytes_fetched=4096)
+    store.commit_batch(
+        archive_id,
+        segment_id,
+        [member(0), member(1024)],
+        2048,
+        requests=3,
+        bytes_fetched=4096,
+    )
     assert store.stats(archive_id)["n_members"] == 2
     assert store.segments(archive_id)[0]["cursor_offset"] == 2048
     assert store.get("a.tar")["requests"] == 3
@@ -127,7 +154,9 @@ def test_repairing_a_segment_drops_only_its_own_members(tmp_path):
     store, archive_id, _ = registered(tmp_path)
     segments = store.segments(archive_id)
     store.commit_batch(archive_id, segments[0]["id"], [member(0)], 512)
-    store.commit_batch(archive_id, segments[1]["id"], [member(4096), member(8192)], 8704)
+    store.commit_batch(
+        archive_id, segments[1]["id"], [member(4096), member(8192)], 8704
+    )
     store.drop_members_between(archive_id, 4096, 8704)
     remaining = [r["hdr_offset"] for r in store.query_members(archive_id)]
     assert remaining == [0]
@@ -149,13 +178,19 @@ def test_replacing_a_part_marks_the_old_archive_stale(tmp_path):
 
     assert store.get("a.tar")["id"] == second
 
-    first_row = store.connect().execute(
-        "SELECT state, detail FROM archives WHERE id=?", (first,)).fetchone()
+    first_row = (
+        store.connect()
+        .execute("SELECT state, detail FROM archives WHERE id=?", (first,))
+        .fetchone()
+    )
     assert first_row["state"] == "stale"
     assert str(second) in first_row["detail"]
 
-    elsewhere_row = store.connect().execute(
-        "SELECT state FROM archives WHERE id=?", (elsewhere,)).fetchone()
+    elsewhere_row = (
+        store.connect()
+        .execute("SELECT state FROM archives WHERE id=?", (elsewhere,))
+        .fetchone()
+    )
     assert elsewhere_row["state"] != "stale"
 
 
@@ -166,7 +201,9 @@ def test_resetting_a_segment_drops_its_span_and_rearms_it(tmp_path):
     store, archive_id, _ = registered(tmp_path)
     segments = store.segments(archive_id)
     store.commit_batch(archive_id, segments[0]["id"], [member(0)], 512)
-    store.commit_batch(archive_id, segments[1]["id"], [member(4096), member(8192)], 8704)
+    store.commit_batch(
+        archive_id, segments[1]["id"], [member(4096), member(8192)], 8704
+    )
 
     store.reset_segment(segments[1]["id"], 4608)
 
@@ -204,7 +241,9 @@ def test_retiring_a_segment_clears_a_scan_failure_that_is_no_longer_one(tmp_path
     store, archive_id, _ = registered(tmp_path)
     segments = store.segments(archive_id)
     # A chain that crossed on one run and found nothing on the next.
-    store.finish_segment(segments[1]["id"], WalkResult("crossed", 4608, 0, "crossed at 4608"))
+    store.finish_segment(
+        segments[1]["id"], WalkResult("crossed", 4608, 0, "crossed at 4608")
+    )
     store.fail_segment(segments[1]["id"], "no header between here and the end")
     assert seg(store, archive_id, segments[1]["id"])["error"]
 
@@ -225,8 +264,9 @@ def test_releasing_a_segment_still_charges_what_it_read(tmp_path):
     """
     store, archive_id, _ = registered(tmp_path)
     claimed = store.claim_segment(archive_id, "w1")
-    store.commit_batch(archive_id, claimed["id"], [member(0)], 512,
-                       requests=2, bytes_fetched=1024)
+    store.commit_batch(
+        archive_id, claimed["id"], [member(0)], 512, requests=2, bytes_fetched=1024
+    )
 
     store.release_segment(claimed["id"], requests=3, bytes_fetched=2048)
 
@@ -254,8 +294,10 @@ def test_start_walk_reclaims_walking_and_error_segments(tmp_path):
     """A killed run's segments must come back, or `index` can never finish."""
     store, archive_id, _ = registered(tmp_path)
     walking = store.claim_segment(archive_id, "w1")
-    store.commit_batch(archive_id, walking["id"], [member(0)], 512)   # then the process died
-    errored = store.claim_segment(archive_id, "w2")   # the only segment left pending
+    store.commit_batch(
+        archive_id, walking["id"], [member(0)], 512
+    )  # then the process died
+    errored = store.claim_segment(archive_id, "w2")  # the only segment left pending
     store.fail_segment(errored["id"], "boom")
 
     store.start_walk(archive_id)
@@ -274,8 +316,9 @@ def test_finish_segment_and_fail_segment_add_their_cost_to_the_archive(tmp_path)
     store, archive_id, segment_id = registered(tmp_path)
     other = store.segments(archive_id)[1]["id"]
 
-    store.finish_segment(segment_id, WalkResult("complete", 100, 0, ""),
-                         requests=2, bytes_fetched=1024)
+    store.finish_segment(
+        segment_id, WalkResult("complete", 100, 0, ""), requests=2, bytes_fetched=1024
+    )
     store.fail_segment(other, "boom", requests=3, bytes_fetched=2048)
 
     row = store.get("a.tar")
@@ -303,10 +346,12 @@ def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path)
     segments = store.segments(archive_id)
     seg0, seg1 = segments[0]["id"], segments[1]["id"]
 
-    store.finish_segment(seg0, WalkResult("complete", 100, 1, ""))   # whole span: [0, 100)
+    store.finish_segment(
+        seg0, WalkResult("complete", 100, 1, "")
+    )  # whole span: [0, 100)
 
     store.set_segment_start(seg1, 120)
-    store.mark_joined(seg1)                       # confirms the frontier up to 120
+    store.mark_joined(seg1)  # confirms the frontier up to 120
     store.commit_batch(archive_id, seg1, [], 150)  # mid-walk: cursor advanced to 150
     # segments[2] (scan_from=200, stop_at=None) is left untouched.
 
@@ -315,17 +360,19 @@ def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path)
     assert stats["covered"] == 150  # 100 (seg0, whole span) + 50 (seg1, 150 - 100)
 
 
-def test_a_segment_ended_from_a_start_not_yet_confirmed_covers_only_what_it_walked(tmp_path):
+def test_a_segment_ended_from_a_start_not_yet_confirmed_covers_only_what_it_walked(
+    tmp_path,
+):
     """A scan can find a false start, walk a few headers and end `corrupt`: the join will
     walk its part again from the exit before it. Until a segment's start is joined to the
     chain, it covers what it walked, not its whole part."""
     store, archive_id, _ = registered(tmp_path, count=3)
     segments = store.segments(archive_id)
     seg0, seg1 = segments[0]["id"], segments[1]["id"]
-    store.finish_segment(seg0, WalkResult("crossed", 100, 1, ""))   # joined: [0, 100)
-    store.set_segment_start(seg1, 110)                              # a scan's start
+    store.finish_segment(seg0, WalkResult("crossed", 100, 1, ""))  # joined: [0, 100)
+    store.set_segment_start(seg1, 110)  # a scan's start
     store.finish_segment(seg1, WalkResult("corrupt", 130, 2, "bad header"))
-    assert store.stats(archive_id)["covered"] == 100 + 30           # not 100 + 100
+    assert store.stats(archive_id)["covered"] == 100 + 30  # not 100 + 100
 
 
 # ---- Tests added by fix round 1 (task review Important findings 1 & 2, plus minor gaps) ----
@@ -339,7 +386,9 @@ def test_start_walk_returns_the_confirmed_frontier_and_logs_a_run_start_event(tm
     store, archive_id, _ = registered(tmp_path)
     seg1 = store.segments(archive_id)[1]["id"]  # span [100, 200)
     store.set_segment_start(seg1, 140)
-    store.mark_joined(seg1)  # raises archives.cursor_offset (the confirmed frontier) to 140
+    store.mark_joined(
+        seg1
+    )  # raises archives.cursor_offset (the confirmed frontier) to 140
 
     returned = store.start_walk(archive_id)
 
@@ -347,7 +396,9 @@ def test_start_walk_returns_the_confirmed_frontier_and_logs_a_run_start_event(tm
     stats = store.stats(archive_id)
     assert stats["confirmed"] == 140
     assert stats["run_started_at"] is not None
-    assert stats["run_start_covered"] == 40  # seg1's own covered contribution: 140 - 100
+    assert (
+        stats["run_start_covered"] == 40
+    )  # seg1's own covered contribution: 140 - 100
 
 
 def test_a_stale_archive_stays_stale_across_batches_and_finishing(tmp_path):
@@ -409,15 +460,24 @@ def test_a_stale_archive_found_to_be_pax_keeps_its_stale_flag_and_reason(tmp_pat
     store, archive_id, _ = registered(tmp_path)
     store.mark_stale(archive_id, "fingerprint mismatch")
 
-    store.mark_unsupported(archive_id, "a pax extended header applies to the member at 0")
+    store.mark_unsupported(
+        archive_id, "a pax extended header applies to the member at 0"
+    )
 
     row = store.get("a.tar")
     assert row["state"] == "stale"
     assert row["detail"] == "fingerprint mismatch"
-    logged = store.connect().execute(
-        "SELECT detail FROM events WHERE archive_id=? AND kind='unsupported'",
-        (archive_id,)).fetchall()
-    assert [r[0] for r in logged] == ["a pax extended header applies to the member at 0"]
+    logged = (
+        store.connect()
+        .execute(
+            "SELECT detail FROM events WHERE archive_id=? AND kind='unsupported'",
+            (archive_id,),
+        )
+        .fetchall()
+    )
+    assert [r[0] for r in logged] == [
+        "a pax extended header applies to the member at 0"
+    ]
 
 
 def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
@@ -442,7 +502,9 @@ def test_reregistering_lifts_unsupported(tmp_path):
     archive loses nothing by it -- the next walk meets the pax header again."""
     store = new_store(tmp_path)
     archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
-    store.mark_unsupported(archive_id, "a pax extended header applies to the member at 0")
+    store.mark_unsupported(
+        archive_id, "a pax extended header applies to the member at 0"
+    )
 
     store.register("a.tar", "tar", "/d", "dropbox", parts())
 
@@ -465,7 +527,7 @@ def _ended_in_segment_2(tmp_path):
     """Five segments: 0 crossed into 1, 1 crossed into 2, 2 ended `corrupt`, 3 retired
     `beyond` by the join, 4 with rows and `joined` left from an earlier run. The archive
     carries 2's verdict."""
-    store, archive_id, _ = registered(tmp_path, count=5)      # spans 0, 100, 200..
+    store, archive_id, _ = registered(tmp_path, count=5)  # spans 0, 100, 200..
     segments = store.segments(archive_id)
     store.commit_batch(archive_id, segments[0]["id"], [member(0)], 120)
     store.finish_segment(segments[0]["id"], WalkResult("crossed", 120, 1))
@@ -476,7 +538,9 @@ def _ended_in_segment_2(tmp_path):
     store.set_segment_start(segments[2]["id"], 210)
     store.mark_joined(segments[2]["id"])
     store.commit_batch(archive_id, segments[2]["id"], [member(210)], 280)
-    store.finish_segment(segments[2]["id"], WalkResult("corrupt", 280, 1, "junk at 280"))
+    store.finish_segment(
+        segments[2]["id"], WalkResult("corrupt", 280, 1, "junk at 280")
+    )
     store.set_segment_start(segments[3]["id"], 330)
     store.commit_batch(archive_id, segments[3]["id"], [member(330)], 390)
     store.retire_segment(segments[3]["id"])
@@ -502,20 +566,38 @@ def test_recheck_walks_again_from_the_segment_before_the_verdict(tmp_path):
     assert (again["idx"], ending["idx"]) == (1, 2)
     assert [r["hdr_offset"] for r in store.query_members(archive_id)] == [0]
     rows = store.segments(archive_id)
-    assert (rows[0]["state"], rows[0]["cursor_offset"]) == ("crossed", 120)   # untouched
-    assert (rows[1]["state"], rows[1]["first_header"], rows[1]["joined"],
-            rows[1]["cursor_offset"], rows[1]["exit_offset"]) == ("pending", 120, 1, None,
-                                                                  None)
-    assert (rows[2]["state"], rows[2]["first_header"], rows[2]["joined"],
-            rows[2]["cursor_offset"], rows[2]["members"]) == ("pending", 210, 0, None, 0)
+    assert (rows[0]["state"], rows[0]["cursor_offset"]) == ("crossed", 120)  # untouched
+    assert (
+        rows[1]["state"],
+        rows[1]["first_header"],
+        rows[1]["joined"],
+        rows[1]["cursor_offset"],
+        rows[1]["exit_offset"],
+    ) == ("pending", 120, 1, None, None)
+    assert (
+        rows[2]["state"],
+        rows[2]["first_header"],
+        rows[2]["joined"],
+        rows[2]["cursor_offset"],
+        rows[2]["members"],
+    ) == ("pending", 210, 0, None, 0)
     for later in rows[3:]:
-        assert (later["state"], later["first_header"], later["joined"],
-                later["cursor_offset"], later["members"]) == ("beyond", None, 0, None, 0)
+        assert (
+            later["state"],
+            later["first_header"],
+            later["joined"],
+            later["cursor_offset"],
+            later["members"],
+        ) == ("beyond", None, 0, None, 0)
     archive = store.get("a.tar")
     assert (archive["state"], archive["detail"], archive["cursor_offset"]) == (
-        "registered", None, 120)
-    [event] = store.query("SELECT detail FROM events WHERE archive_id=? AND kind='recheck'",
-                          (archive_id,))
+        "registered",
+        None,
+        120,
+    )
+    [event] = store.query(
+        "SELECT detail FROM events WHERE archive_id=? AND kind='recheck'", (archive_id,)
+    )
     assert "corrupt" in event["detail"] and "junk at 280" in event["detail"]
 
 
@@ -526,12 +608,16 @@ def _walked_again_to_the_same_verdict(store, archive_id):
     store.commit_batch(archive_id, segments[1]["id"], [member(120), member(150)], 210)
     store.finish_segment(segments[1]["id"], WalkResult("crossed", 210, 2))
     store.commit_batch(archive_id, segments[2]["id"], [member(210)], 280)
-    store.finish_segment(segments[2]["id"], WalkResult("corrupt", 280, 1, "junk at 280"))
+    store.finish_segment(
+        segments[2]["id"], WalkResult("corrupt", 280, 1, "junk at 280")
+    )
     store.mark_joined(segments[2]["id"])
     store.finish(archive_id, WalkResult("corrupt", 280, 4, "junk at 280"))
 
 
-def test_a_recheck_that_reaches_the_same_verdict_steps_one_segment_further_back(tmp_path):
+def test_a_recheck_that_reaches_the_same_verdict_steps_one_segment_further_back(
+    tmp_path,
+):
     """Review 7's B2. Walked again from segment 1's start, the chain ends where it did --
     which says nothing about segment 1's start itself: a stored tarball that fills a
     whole part hands a wrong one across two boundaries. So asking again about the same
@@ -547,23 +633,33 @@ def test_a_recheck_that_reaches_the_same_verdict_steps_one_segment_further_back(
     assert store.query_members(archive_id) == []
     rows = store.segments(archive_id)
     assert (rows[0]["state"], rows[0]["first_header"], rows[0]["joined"]) == (
-        "pending", 0, 1)
+        "pending",
+        0,
+        1,
+    )
     # Walked again, and joined to the chain again, from where they began.
-    assert [(r["state"], r["first_header"], r["joined"], r["members"])
-            for r in rows[1:3]] == [("pending", 120, 0, 0), ("pending", 210, 0, 0)]
+    assert [
+        (r["state"], r["first_header"], r["joined"], r["members"]) for r in rows[1:3]
+    ] == [("pending", 120, 0, 0), ("pending", 210, 0, 0)]
     assert [r["state"] for r in rows[3:]] == ["beyond", "beyond"]
     assert store.get("a.tar")["cursor_offset"] == 0
-    [_, event] = store.query("SELECT detail FROM events WHERE archive_id=? AND "
-                             "kind='recheck' ORDER BY rowid", (archive_id,))
+    [_, event] = store.query(
+        "SELECT detail FROM events WHERE archive_id=? AND "
+        "kind='recheck' ORDER BY rowid",
+        (archive_id,),
+    )
     assert "further back" in event["detail"]
 
     _walked_again_to_the_same_verdict(store, archive_id)
-    store.commit_batch(archive_id, store.segments(archive_id)[0]["id"], [member(0)], 120)
-    assert store.recheck(archive_id)[0]["idx"] == 0          # there is nothing further back
+    store.commit_batch(
+        archive_id, store.segments(archive_id)[0]["id"], [member(0)], 120
+    )
+    assert store.recheck(archive_id)[0]["idx"] == 0  # there is nothing further back
 
 
 def test_a_recheck_that_reaches_another_verdict_starts_again_from_the_segment_before_it(
-        tmp_path):
+    tmp_path,
+):
     """The step back is for a verdict that came back the same. One that changed -- here, the
     chain now ends in segment 2 somewhere else -- is asked again from segment 1, as a
     first recheck would."""
@@ -573,7 +669,9 @@ def test_a_recheck_that_reaches_another_verdict_starts_again_from_the_segment_be
     store.commit_batch(archive_id, segments[1]["id"], [member(120), member(150)], 210)
     store.finish_segment(segments[1]["id"], WalkResult("crossed", 210, 2))
     store.commit_batch(archive_id, segments[2]["id"], [member(210), member(250)], 290)
-    store.finish_segment(segments[2]["id"], WalkResult("corrupt", 290, 2, "junk at 290"))
+    store.finish_segment(
+        segments[2]["id"], WalkResult("corrupt", 290, 2, "junk at 290")
+    )
     store.finish(archive_id, WalkResult("corrupt", 290, 4, "junk at 290"))
 
     again, ending = store.recheck(archive_id)
@@ -597,7 +695,9 @@ def test_a_recheck_of_segment_0_walks_it_again_from_offset_0(tmp_path):
     assert store.query_members(archive_id) == []
 
 
-def test_crossing_into_a_retired_segment_puts_everything_retired_after_it_back(tmp_path):
+def test_crossing_into_a_retired_segment_puts_everything_retired_after_it_back(
+    tmp_path,
+):
     """After a recheck the chain may cross where the old verdict said it ended: the
     segment it crosses into is re-armed from its exit, and every one retired after it is
     scanned and walked again."""
@@ -621,15 +721,25 @@ def test_recheck_leaves_a_stale_archive_to_register(tmp_path):
 
     assert store.recheck(archive_id) is None
     assert store.get("a.tar")["state"] == "stale"
-    assert [r["hdr_offset"] for r in store.query_members(archive_id)] == [0, 120, 150, 210,
-                                                                          420]
+    assert [r["hdr_offset"] for r in store.query_members(archive_id)] == [
+        0,
+        120,
+        150,
+        210,
+        420,
+    ]
 
 
 def test_the_events_of_one_archive_are_found_by_an_index(tmp_path):
     """stats() reads an archive's run starts as each walk ends: across thousands of
     archives a scan of every event each time adds up."""
     store = new_store(tmp_path)
-    plan = " ".join(row[-1] for row in store.connect().execute(
-        "EXPLAIN QUERY PLAN SELECT ts, detail FROM events WHERE archive_id=? "
-        "AND kind='run_start'", (1,)))
+    plan = " ".join(
+        row[-1]
+        for row in store.connect().execute(
+            "EXPLAIN QUERY PLAN SELECT ts, detail FROM events WHERE archive_id=? "
+            "AND kind='run_start'",
+            (1,),
+        )
+    )
     assert "INDEX events_archive" in plan

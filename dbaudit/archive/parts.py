@@ -23,7 +23,7 @@ class Part:
     idx: int
     name: str
     size: int
-    offset: int                 # where this part starts in the whole archive
+    offset: int  # where this part starts in the whole archive
     path_display: str = ""
     dbx_id: str = ""
     rev: str = ""
@@ -68,13 +68,15 @@ class ArchiveSet:
         if not entries:
             raise ArchiveSetError(f"no files given for {base_name!r}")
         pattern = re.compile(
-            rf"^{re.escape(base_name)}\.(?:part[-_]?)?(?P<suffix>[a-z]{{2,}}|\d{{2,}})$")
+            rf"^{re.escape(base_name)}\.(?:part[-_]?)?(?P<suffix>[a-z]{{2,}}|\d{{2,}})$"
+        )
         whole = [e for e in entries if e["name"] == base_name]
         if whole:
             if len(entries) > 1:
                 raise ArchiveSetError(
                     f"{base_name!r} exists alongside {len(entries) - 1} other files; "
-                    "an archive is either one whole file or a set of parts")
+                    "an archive is either one whole file or a set of parts"
+                )
             return cls([cls._part(0, whole[0], 0)])
 
         keyed = []
@@ -82,12 +84,15 @@ class ArchiveSet:
             match = pattern.match(entry["name"])
             if match is None:
                 raise ArchiveSetError(
-                    f"{entry['name']!r} is not a part of {base_name!r}")
+                    f"{entry['name']!r} is not a part of {base_name!r}"
+                )
             keyed.append((match.group("suffix"), entry))
 
         widths = {len(s) for s, _ in keyed}
         if len(widths) != 1:
-            raise ArchiveSetError(f"mixed suffix widths for {base_name!r}: {sorted(widths)}")
+            raise ArchiveSetError(
+                f"mixed suffix widths for {base_name!r}: {sorted(widths)}"
+            )
         width = widths.pop()
         numeric = keyed[0][0].isdigit()
         if any(s.isdigit() != numeric for s, _ in keyed):
@@ -104,13 +109,15 @@ class ArchiveSet:
             named = " or ".join(repr(_suffix_text(v, width, numeric)) for v in starts)
             raise ArchiveSetError(
                 f"{base_name!r} is missing its first part ({named}); the lowest part "
-                f"present is {keyed[0][0]!r}")
+                f"present is {keyed[0][0]!r}"
+            )
         for position, (suffix, _) in enumerate(keyed):
             expected = first + position
             if _suffix_value(suffix) != expected:
                 raise ArchiveSetError(
                     f"{base_name!r} is missing part "
-                    f"{_suffix_text(expected, width, numeric)!r}")
+                    f"{_suffix_text(expected, width, numeric)!r}"
+                )
 
         parts, offset = [], 0
         for idx, (_, entry) in enumerate(keyed):
@@ -120,13 +127,22 @@ class ArchiveSet:
 
     @staticmethod
     def _part(idx: int, entry: dict, offset: int) -> Part:
-        return Part(idx=idx, name=entry["name"], size=int(entry["size"]), offset=offset,
-                    path_display=entry.get("path_display", ""), dbx_id=entry.get("id", ""),
-                    rev=entry.get("rev", ""), content_hash=entry.get("content_hash", ""))
+        return Part(
+            idx=idx,
+            name=entry["name"],
+            size=int(entry["size"]),
+            offset=offset,
+            path_display=entry.get("path_display", ""),
+            dbx_id=entry.get("id", ""),
+            rev=entry.get("rev", ""),
+            content_hash=entry.get("content_hash", ""),
+        )
 
     def locate(self, offset: int) -> tuple[int, int]:
         if offset < 0 or offset >= self.total_size:
-            raise ArchiveSetError(f"offset {offset} outside archive of {self.total_size}")
+            raise ArchiveSetError(
+                f"offset {offset} outside archive of {self.total_size}"
+            )
         for part in self.parts:
             if offset < part.offset + part.size:
                 return part.idx, offset - part.offset

@@ -110,15 +110,21 @@ class LocalRangeReader:
 class ConcatFile:
     """A seekable, read-only file over an ArchiveSet. Enough of the interface for tarfile."""
 
-    def __init__(self, archive, reader, window_min: int = WINDOW_MIN,
-                 window_max: int = WINDOW_MAX, shape: int | None = None):
+    def __init__(
+        self,
+        archive,
+        reader,
+        window_min: int = WINDOW_MIN,
+        window_max: int = WINDOW_MAX,
+        shape: int | None = None,
+    ):
         self.archive = archive
         self.reader = reader
         self._window_min = window_min
         self._window_max = window_max
         self._window = window_min
         self._cache = b""
-        self._cache_start = -1          # nothing cached: the first fetch uses window_min
+        self._cache_start = -1  # nothing cached: the first fetch uses window_min
         self._pos = 0
         #: Fetches made so far. The walker tells from this, less the fetches it made only to
         #: read one place again, when a fetch of its own served a header -- part of how it
@@ -157,11 +163,13 @@ class ConcatFile:
         end = min(self._pos + size, self.archive.total_size)
         if end <= self._pos:
             return b""
-        if not (self._cache_start <= self._pos
-                and end <= self._cache_start + len(self._cache)):
+        if not (
+            self._cache_start <= self._pos
+            and end <= self._cache_start + len(self._cache)
+        ):
             self._fill(self._pos, end - self._pos)
         start = self._pos - self._cache_start
-        data = self._cache[start:start + (end - self._pos)]
+        data = self._cache[start : start + (end - self._pos)]
         self._pos += len(data)
         return data
 
@@ -209,10 +217,13 @@ class ConcatFile:
         lead = min(want, self.archive.locate(pos)[1])
         last = self.archive.parts[self.archive.locate(end - 1)[0]]
         tail = min(want, last.offset + last.size - end)
-        chunks = [self.reader.read_range(idx, offset, count)
-                  for idx, offset, count in self.archive.slices(pos - lead,
-                                                                lead + length + tail)]
-        self._cache = b"".join(chunks)[lead:lead + length]
+        chunks = [
+            self.reader.read_range(idx, offset, count)
+            for idx, offset, count in self.archive.slices(
+                pos - lead, lead + length + tail
+            )
+        ]
+        self._cache = b"".join(chunks)[lead : lead + length]
         self._cache_start = pos
         self.fills += 1
 
@@ -228,8 +239,16 @@ class DropboxRangeReader:
     ``Content-Type: application/json``, which Dropbox's content endpoints reject.
     """
 
-    def __init__(self, archive, tokens, limiter, session=None, retries: int = 5,
-                 timeout: int = DEFAULT_TIMEOUT, sleep=None):
+    def __init__(
+        self,
+        archive,
+        tokens,
+        limiter,
+        session=None,
+        retries: int = 5,
+        timeout: int = DEFAULT_TIMEOUT,
+        sleep=None,
+    ):
         self.archive = archive
         self.tokens = tokens
         self.limiter = limiter
@@ -251,7 +270,8 @@ class DropboxRangeReader:
         return {
             "Authorization": f"Bearer {self.tokens.access_token()}",
             "Dropbox-API-Path-Root": json.dumps(
-                {".tag": "root", "root": self.tokens.root_namespace_id()}),
+                {".tag": "root", "root": self.tokens.root_namespace_id()}
+            ),
             "Dropbox-API-Arg": json.dumps({"path": target}),
             "Range": f"bytes={offset}-{offset + length - 1}",
         }
@@ -272,11 +292,13 @@ class DropboxRangeReader:
                 # this is where a parked reader waits.
                 with self.limiter.slot():
                     response = self.session.post(
-                        DOWNLOAD_URL, headers=self._headers(target, offset, length),
-                        timeout=self.timeout)
-            except Exception as exc:                      # network, DNS, read timeout
+                        DOWNLOAD_URL,
+                        headers=self._headers(target, offset, length),
+                        timeout=self.timeout,
+                    )
+            except Exception as exc:  # network, DNS, read timeout
                 last = ReaderError(f"{part.name}: {type(exc).__name__}: {exc}")
-                self.sleep(min(2 ** failures, 30))
+                self.sleep(min(2**failures, 30))
                 failures += 1
                 continue
 
@@ -290,7 +312,9 @@ class DropboxRangeReader:
                 self.limiter.on_rate_limited(_retry_after(response))
                 last = ReaderError(f"{part.name}: rate limited")
                 if self.should_stop is not None and self.should_stop():
-                    raise ReadStopped(f"{part.name}: stopped while Dropbox answered 429")
+                    raise ReadStopped(
+                        f"{part.name}: stopped while Dropbox answered 429"
+                    )
                 continue
             if status == 401:
                 self.tokens.invalidate()
@@ -299,27 +323,33 @@ class DropboxRangeReader:
                 continue
             if status >= 500:
                 last = ReaderError(f"{part.name}: {status} from Dropbox")
-                self.sleep(min(2 ** failures, 30))
+                self.sleep(min(2**failures, 30))
                 failures += 1
                 continue
             if status == 200:
                 raise ReaderError(
                     f"{part.name}: expected 206 for a range request, got 200 -- the "
-                    "server ignored the Range header and sent the whole file")
-            raise ReaderError(f"{part.name}: {status} from Dropbox: "
-                              f"{getattr(response, 'text', '')[:200]}")
+                    "server ignored the Range header and sent the whole file"
+                )
+            raise ReaderError(
+                f"{part.name}: {status} from Dropbox: "
+                f"{getattr(response, 'text', '')[:200]}"
+            )
         raise last or ReaderError(f"{part.name}: no attempts made")
 
     def _validate(self, part, response, offset, length) -> bytes:
         wanted = f"bytes {offset}-{offset + length - 1}/"
         got = response.headers.get("Content-Range", "")
         if not got.startswith(wanted):
-            raise ReaderError(f"{part.name}: server answered a different range: "
-                              f"asked {wanted!r}, got {got!r}")
+            raise ReaderError(
+                f"{part.name}: server answered a different range: "
+                f"asked {wanted!r}, got {got!r}"
+            )
         data = response.content
         if len(data) != length:
-            raise ShortRead(f"{part.name}: asked {length} bytes at {offset}, "
-                            f"got {len(data)}")
+            raise ShortRead(
+                f"{part.name}: asked {length} bytes at {offset}, got {len(data)}"
+            )
         # The limiter takes a worker off on every 429 and puts one back only here.
         # Without this, one 429 costs a stream for the rest of a multi-hour walk and
         # a shared account ratchets the pool down to a single reader.

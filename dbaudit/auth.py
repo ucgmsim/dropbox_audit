@@ -44,7 +44,9 @@ def _rclone_config_dump() -> str:
             ["rclone", "config", "dump"], capture_output=True, text=True, timeout=60
         )
     except FileNotFoundError as exc:
-        raise AuthError("rclone is not on PATH; dbaudit reads its credentials from rclone") from exc
+        raise AuthError(
+            "rclone is not on PATH; dbaudit reads its credentials from rclone"
+        ) from exc
     if proc.returncode != 0:
         raise AuthError(f"`rclone config dump` failed: {proc.stderr.strip()[:400]}")
     return proc.stdout
@@ -71,10 +73,14 @@ def _fetch_account(access_token: str) -> dict:
     if resp.status_code == 429 or resp.status_code >= 500:
         # Dropbox cannot answer just now, which says nothing of the token: not an
         # AuthError, which callers take for dead credentials and never ask again.
-        raise RuntimeError(f"users/get_current_account: {resp.status_code} from Dropbox; "
-                           f"ask again later: {resp.text[:300]}")
+        raise RuntimeError(
+            f"users/get_current_account: {resp.status_code} from Dropbox; "
+            f"ask again later: {resp.text[:300]}"
+        )
     if resp.status_code != 200:
-        raise AuthError(f"users/get_current_account failed: {resp.status_code} {resp.text[:300]}")
+        raise AuthError(
+            f"users/get_current_account failed: {resp.status_code} {resp.text[:300]}"
+        )
     return resp.json()
 
 
@@ -137,7 +143,9 @@ class TokenProvider:
         if not expiry:
             return float("inf")  # non-expiring legacy token
         try:
-            return (_parse_rfc3339(expiry) - dt.datetime.now(dt.timezone.utc)).total_seconds()
+            return (
+                _parse_rfc3339(expiry) - dt.datetime.now(dt.timezone.utc)
+            ).total_seconds()
         except ValueError:
             return float("-inf")  # unparseable: treat as expired so we refresh
 
@@ -196,7 +204,9 @@ class TokenProvider:
         root_info = self.account().get("root_info") or {}
         namespace_id = root_info.get("root_namespace_id")
         if not namespace_id:
-            raise AuthError("account has no root_namespace_id; is this a Dropbox team account?")
+            raise AuthError(
+                "account has no root_namespace_id; is this a Dropbox team account?"
+            )
         return str(namespace_id)
 
     def headers(self) -> dict[str, str]:

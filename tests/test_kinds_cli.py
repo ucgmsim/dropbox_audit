@@ -10,11 +10,20 @@ T2021 = 1609459200
 
 
 def sample(tmp_path):
-    store = listing(tmp_path, file("/R/a/vp3dfile.p", 300),
-                    file("/R/t/faultsz03_bb.tar", 700, "A", modified="2021-01-01T00:00:00Z"))
-    index = index_file(tmp_path, archive("faultsz03_bb.tar", "/R/t",
-                                         [("faultsz03_bb.tar", 700, "A")],
-                                         [("", "bb.bin", 700, T2021)]))
+    store = listing(
+        tmp_path,
+        file("/R/a/vp3dfile.p", 300),
+        file("/R/t/faultsz03_bb.tar", 700, "A", modified="2021-01-01T00:00:00Z"),
+    )
+    index = index_file(
+        tmp_path,
+        archive(
+            "faultsz03_bb.tar",
+            "/R/t",
+            [("faultsz03_bb.tar", 700, "A")],
+            [("", "bb.bin", 700, T2021)],
+        ),
+    )
     return store.path, index
 
 
@@ -24,7 +33,9 @@ def test_kinds_prints_each_group_with_its_loose_and_tarred_bytes(tmp_path, capsy
     out = capsys.readouterr().out
     assert "listed 2026-10-01" in out and "## By kind" in out and "## By age" in out
     assert "## By year" in out
-    line = next(l for l in out.splitlines() if l.strip().startswith("simulated waveforms"))
+    line = next(
+        l for l in out.splitlines() if l.strip().startswith("simulated waveforms")
+    )
     assert line.split()[2:] == ["700", "B", "70.0%", "0", "B", "700", "B"]
     assert "shared out over the members the archive index lists" in out
     assert "Undated" not in out
@@ -32,10 +43,15 @@ def test_kinds_prints_each_group_with_its_loose_and_tarred_bytes(tmp_path, capsy
 
 def test_kinds_says_how_much_it_could_not_date(tmp_path, capsys):
     store = listing(tmp_path, file("/R/t/a.tar", 100, "A"))
-    index = index_file(tmp_path, archive("a.tar", "/R/t", [("a.tar", 100, "A")],
-                                         [("", "x.srf", 100, None)]))
+    index = index_file(
+        tmp_path,
+        archive("a.tar", "/R/t", [("a.tar", 100, "A")], [("", "x.srf", 100, None)]),
+    )
     out = tmp_path / "csv"
-    assert main(["kinds", "--db", store.path, "--archive-db", index, "--out", str(out)]) == 0
+    assert (
+        main(["kinds", "--db", store.path, "--archive-db", index, "--out", str(out)])
+        == 0
+    )
     assert "Undated: 100 B" in capsys.readouterr().out
     with open(out / "kinds_listing.csv") as f:
         (about,) = list(csv.DictReader(f))
@@ -62,12 +78,17 @@ def test_kinds_writes_four_csv_files(tmp_path, capsys):
     assert main(["kinds", "--db", db, "--archive-db", index, "--out", str(out)]) == 0
     with open(out / "kinds.csv") as f:
         table = list(csv.DictReader(f))
-    assert {(r["kind"], r["bytes"], r["loose"], r["tarred"]) for r in table} \
-        == {("vm", "300", "300", "0"), ("wf_bin_bb", "700", "0", "700")}
+    assert {(r["kind"], r["bytes"], r["loose"], r["tarred"]) for r in table} == {
+        ("vm", "300", "300", "0"),
+        ("wf_bin_bb", "700", "0", "700"),
+    }
     with open(out / "kinds_listing.csv") as f:
         (about,) = list(csv.DictReader(f))
-    assert (about["root"], about["listed"], about["finished"]) \
-        == ("/R", "2026-10-01T00:00:00+00:00", "true")
+    assert (about["root"], about["listed"], about["finished"]) == (
+        "/R",
+        "2026-10-01T00:00:00+00:00",
+        "true",
+    )
     for name in ("kinds_by_month.csv", "kinds_older_than.csv"):
         assert (out / name).exists()
 
@@ -92,11 +113,15 @@ def test_kinds_covers_only_the_subtree(tmp_path, capsys):
     assert "Kinds of data in /R/a" in out and "simulated waveforms" not in out
 
 
-@pytest.mark.parametrize("extra,says", [
-    (["--rules", "missing.toml"], "missing.toml"),
-    (["--archive-db", "AUDIT"], "holds no archive index"),
-    (["--subtree", "/R/nowhere"], "is not in"),
-    (["--out", "FILE"], "is not a folder")])
+@pytest.mark.parametrize(
+    "extra,says",
+    [
+        (["--rules", "missing.toml"], "missing.toml"),
+        (["--archive-db", "AUDIT"], "holds no archive index"),
+        (["--subtree", "/R/nowhere"], "is not in"),
+        (["--out", "FILE"], "is not a folder"),
+    ],
+)
 def test_kinds_refuses_what_it_cannot_use(tmp_path, capsys, extra, says):
     db, _ = sample(tmp_path)
     (tmp_path / "f.txt").write_text("x")
@@ -115,6 +140,7 @@ def test_kinds_on_an_uninitialised_database_is_an_error(tmp_path, capsys):
 def offline(monkeypatch):
     def no_network(remote):
         raise RuntimeError("no network in tests")
+
     monkeypatch.setattr("dbaudit.cli._space_usage", no_network)
 
 
@@ -124,7 +150,7 @@ def test_report_ends_with_a_by_kind_section(tmp_path, capsys, monkeypatch):
     assert main(["report", "--db", db, "--archive-db", index]) == 0
     out = capsys.readouterr().out
     assert out.index("## By kind") > out.index("## By file type")
-    section = out[out.index("## By kind"):]
+    section = out[out.index("## By kind") :]
     assert "> 10 years" in section and "simulated waveforms" in section
     assert "shared out over the members the archive index lists" in section
 

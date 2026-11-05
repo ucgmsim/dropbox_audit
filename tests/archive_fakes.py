@@ -43,11 +43,19 @@ def write_parts(directory, data, part_size, base="a.tar"):
     directory = Path(directory)
     entries = []
     for index, start in enumerate(range(0, max(len(data), 1), part_size)):
-        chunk = data[start:start + part_size]
+        chunk = data[start : start + part_size]
         name = f"{base}.{suffix(index)}"
         (directory / name).write_bytes(chunk)
-        entries.append({"name": name, "size": len(chunk), "path_display": f"/d/{name}",
-                        "id": f"id:{name}", "rev": "r", "content_hash": f"{index:064x}"})
+        entries.append(
+            {
+                "name": name,
+                "size": len(chunk),
+                "path_display": f"/d/{name}",
+                "id": f"id:{name}",
+                "rev": "r",
+                "content_hash": f"{index:064x}",
+            }
+        )
     return ArchiveSet.from_entries(entries, base)
 
 
@@ -56,8 +64,8 @@ class World:
 
     def __init__(self, tmp_path):
         self.tmp_path, self.folders, self.local, self.gone = tmp_path, {}, {}, set()
-        self.faults = {}            # folder -> exceptions its next listings raise, in turn
-        self.page_size = None       # entries per listing page; None lists a folder in one
+        self.faults = {}  # folder -> exceptions its next listings raise, in turn
+        self.page_size = None  # entries per listing page; None lists a folder in one
         self.made = 0
 
     def add(self, folder, name, data, part_size=None):
@@ -66,18 +74,25 @@ class World:
         directory.mkdir(parents=True)
         write_parts(directory, data, part_size or max(len(data), 1), base=name)
         files = sorted(directory.iterdir())
-        if len(files) == 1:                         # a whole archive is named plainly
+        if len(files) == 1:  # a whole archive is named plainly
             files[0].rename(directory / name)
         self.local[folder] = directory
         entries = self.folders.setdefault(folder, [])
         for path in sorted(directory.iterdir()):
             body = path.read_bytes()
-            entries.append({".tag": "file", "name": path.name, "size": len(body),
-                            "path_display": f"{folder}/{path.name}",
-                            "id": f"id:{folder}/{path.name}", "rev": "r",
-                            "content_hash": hashlib.sha256(body).hexdigest(),
-                            "client_modified": "2026-01-01T00:00:00Z",
-                            "server_modified": "2026-01-01T00:00:00Z"})
+            entries.append(
+                {
+                    ".tag": "file",
+                    "name": path.name,
+                    "size": len(body),
+                    "path_display": f"{folder}/{path.name}",
+                    "id": f"id:{folder}/{path.name}",
+                    "rev": "r",
+                    "content_hash": hashlib.sha256(body).hexdigest(),
+                    "client_modified": "2026-01-01T00:00:00Z",
+                    "server_modified": "2026-01-01T00:00:00Z",
+                }
+            )
         return directory
 
     def audit_db(self):
@@ -107,17 +122,31 @@ class World:
             def continue_(self, cursor):
                 path, start = cursor.rsplit("|", 1)
                 entries = world.folders.get(path, [])
-                end = len(entries) if world.page_size is None else int(start) + world.page_size
-                return Page(entries=list(entries[int(start):end]), cursor=f"{path}|{end}",
-                            has_more=end < len(entries))
+                end = (
+                    len(entries)
+                    if world.page_size is None
+                    else int(start) + world.page_size
+                )
+                return Page(
+                    entries=list(entries[int(start) : end]),
+                    cursor=f"{path}|{end}",
+                    has_more=end < len(entries),
+                )
 
-        monkeypatch.setattr("dbaudit.cli.build_lister",
-                            lambda remote, tokens=None: (object(), Lister()))
+        monkeypatch.setattr(
+            "dbaudit.cli.build_lister", lambda remote, tokens=None: (object(), Lister())
+        )
         monkeypatch.setattr("dbaudit.cli._reader_for", self.reader)
         # Every listing takes its turn at the run's limiter; at the real rate, the few
         # hundred in a test would take it half a minute.
-        monkeypatch.setattr("dbaudit.cli._run_limiter", lambda args: AdaptiveLimiter(
-            rps=1000.0, max_concurrency=args.max_streams, start_concurrency=args.streams))
+        monkeypatch.setattr(
+            "dbaudit.cli._run_limiter",
+            lambda args: AdaptiveLimiter(
+                rps=1000.0,
+                max_concurrency=args.max_streams,
+                start_concurrency=args.streams,
+            ),
+        )
 
     def reader(self, row, archive_set, tokens=None, limiter=None):
         """`_reader_for`, reading the parts from the archive's folder on local disk."""
@@ -126,5 +155,7 @@ class World:
 
 def members(n, seed=0):
     rng = random.Random(seed)
-    return [(f"run/m{i:03d}.bin", rng.randbytes(rng.choice([10, 700, 5000, 70_000])))
-            for i in range(n)]
+    return [
+        (f"run/m{i:03d}.bin", rng.randbytes(rng.choice([10, 700, 5000, 70_000])))
+        for i in range(n)
+    ]

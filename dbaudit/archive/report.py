@@ -165,7 +165,8 @@ def summary(store, archive_id, top: int = 25) -> dict:
 
     with store.read_transaction():
         archive_row = store.query(
-            "SELECT state, n_parts FROM archives WHERE id=?", (archive_id,))[0]
+            "SELECT state, n_parts FROM archives WHERE id=?", (archive_id,)
+        )[0]
 
         # Only the columns this loop actually reads -- not `SELECT *`, which would
         # also carry `linkname`/`hdr_offset`/`data_offset`/`archive_id` through
@@ -174,7 +175,8 @@ def summary(store, archive_id, top: int = 25) -> dict:
         # memory here is the size of the aggregate dicts below, not the manifest.
         for member in store.stream(
             "SELECT dir, name, size, mtime, uname, gname, type FROM members "
-            "WHERE archive_id=?", (archive_id,),
+            "WHERE archive_id=?",
+            (archive_id,),
         ):
             size = member["size"]
             n_members += 1
@@ -196,7 +198,9 @@ def summary(store, archive_id, top: int = 25) -> dict:
 
         largest = store.query(
             "SELECT dir, name, size FROM members WHERE archive_id=? "
-            "ORDER BY size DESC, hdr_offset ASC LIMIT ?", (archive_id, top))
+            "ORDER BY size DESC, hdr_offset ASC LIMIT ?",
+            (archive_id, top),
+        )
 
     return {
         "state": archive_row["state"],
@@ -207,7 +211,9 @@ def summary(store, archive_id, top: int = 25) -> dict:
         "by_depth": {depth: _by_bytes_desc(table) for depth, table in by_depth.items()},
         "by_extension": _by_bytes_desc(by_extension),
         "largest": largest,
-        "mtime_span": (_iso_date(earliest), _iso_date(latest)) if earliest is not None else None,
+        "mtime_span": (_iso_date(earliest), _iso_date(latest))
+        if earliest is not None
+        else None,
         "owners": _by_count_desc(owners),
         "types": _by_count_desc(types),
     }
@@ -247,36 +253,69 @@ def write_csv(store, archive_id, out_dir) -> list[str]:
     with store.read_transaction():
         with open(manifest_path, "w", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["path", "size", "mtime", "mode", "uname", "gname", "type",
-                              "hdr_offset", "data_offset"])
+            writer.writerow(
+                [
+                    "path",
+                    "size",
+                    "mtime",
+                    "mode",
+                    "uname",
+                    "gname",
+                    "type",
+                    "hdr_offset",
+                    "data_offset",
+                ]
+            )
             for member in store.stream(
                 "SELECT dir, name, size, mtime, mode, uname, gname, type, hdr_offset, "
                 "data_offset FROM members WHERE archive_id=? ORDER BY hdr_offset",
                 (archive_id,),
             ):
-                path = f"{member['dir']}/{member['name']}" if member["dir"] else member["name"]
+                path = (
+                    f"{member['dir']}/{member['name']}"
+                    if member["dir"]
+                    else member["name"]
+                )
                 mtime = _iso(member["mtime"]) if member["mtime"] is not None else ""
                 mode = f"{(member['mode'] or 0):04o}"
-                writer.writerow([path, member["size"], mtime, mode, member["uname"] or "",
-                                  member["gname"] or "", member["type"], member["hdr_offset"],
-                                  member["data_offset"]])
+                writer.writerow(
+                    [
+                        path,
+                        member["size"],
+                        mtime,
+                        mode,
+                        member["uname"] or "",
+                        member["gname"] or "",
+                        member["type"],
+                        member["hdr_offset"],
+                        member["data_offset"],
+                    ]
+                )
                 _bump(by_dir, member["dir"] or ROOT_LABEL, member["size"])
-                _bump(by_extension, _extension(member["name"]) or NO_EXTENSION, member["size"])
+                _bump(
+                    by_extension,
+                    _extension(member["name"]) or NO_EXTENSION,
+                    member["size"],
+                )
     written.append(str(manifest_path))
 
     dir_path = out_dir / "by_dir.csv"
     with open(dir_path, "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["dir", "count", "bytes"])
-        writer.writerows([key, agg["count"], agg["bytes"]] for key, agg in _by_bytes_desc(by_dir))
+        writer.writerows(
+            [key, agg["count"], agg["bytes"]] for key, agg in _by_bytes_desc(by_dir)
+        )
     written.append(str(dir_path))
 
     ext_path = out_dir / "by_extension.csv"
     with open(ext_path, "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["extension", "count", "bytes"])
-        writer.writerows([key, agg["count"], agg["bytes"]]
-                          for key, agg in _by_bytes_desc(by_extension))
+        writer.writerows(
+            [key, agg["count"], agg["bytes"]]
+            for key, agg in _by_bytes_desc(by_extension)
+        )
     written.append(str(ext_path))
 
     return written

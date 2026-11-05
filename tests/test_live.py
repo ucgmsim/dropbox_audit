@@ -22,8 +22,12 @@ PYTHON = sys.executable
 
 
 def dbaudit(*args, expect=0):
-    proc = subprocess.run([PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True)
-    assert proc.returncode == expect, f"{args}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    proc = subprocess.run(
+        [PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True
+    )
+    assert proc.returncode == expect, (
+        f"{args}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
     return proc.stdout + proc.stderr
 
 
@@ -44,12 +48,16 @@ def test_interrupted_crawl_resumes_to_the_same_totals(tmp_path):
     db = str(tmp_path / "resume.db")
     dbaudit("init", "--db", db, "--root", SUBTREE, "--min-free-gb", "1")
 
-    killed = subprocess.Popen([PYTHON, "-m", "dbaudit", "run", "--db", db, "--workers", "2"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    killed = subprocess.Popen(
+        [PYTHON, "-m", "dbaudit", "run", "--db", db, "--workers", "2"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
     try:
         killed.wait(timeout=4)
     except subprocess.TimeoutExpired:
-        killed.kill()          # SIGKILL: no chance to clean up
+        killed.kill()  # SIGKILL: no chance to clean up
         killed.wait()
 
     dbaudit("run", "--db", db, "--workers", "4")
@@ -66,9 +74,11 @@ def test_interrupted_crawl_resumes_to_the_same_totals(tmp_path):
     reference = str(tmp_path / "ref.db")
     dbaudit("init", "--db", reference, "--root", SUBTREE, "--min-free-gb", "1")
     dbaudit("run", "--db", reference, "--workers", "4")
-    ref_files, ref_bytes = sqlite3.connect(reference).execute(
-        "SELECT COUNT(*), SUM(size) FROM files"
-    ).fetchone()
+    ref_files, ref_bytes = (
+        sqlite3.connect(reference)
+        .execute("SELECT COUNT(*), SUM(size) FROM files")
+        .fetchone()
+    )
 
     assert (files, total) == (ref_files, ref_bytes)
 
@@ -87,6 +97,11 @@ def test_report_runs_on_real_data(tmp_path):
     dbaudit("init", "--db", db, "--root", SUBTREE, "--min-free-gb", "1")
     dbaudit("run", "--db", db, "--workers", "4")
     out = dbaudit("report", "--db", db, "--top", "5")
-    for section in ("Reconciliation", "Reclaimable duplicates", "Cold data",
-                    "Largest directories", "By file type"):
+    for section in (
+        "Reconciliation",
+        "Reclaimable duplicates",
+        "Cold data",
+        "Largest directories",
+        "By file type",
+    ):
         assert section in out, out

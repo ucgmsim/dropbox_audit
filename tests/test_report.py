@@ -18,10 +18,16 @@ def mk(name, size, digest, ts="2020-01-01T00:00:00Z", d="/R"):
 
     content_hash = hashlib.sha256(digest.encode()).hexdigest()
     return {
-        ".tag": "file", "id": f"id:{d}/{name}", "name": name, "size": size,
-        "path_display": f"{d}/{name}", "path_lower": f"{d}/{name}".lower(),
-        "content_hash": content_hash[:64], "rev": "r",
-        "client_modified": ts, "server_modified": ts,
+        ".tag": "file",
+        "id": f"id:{d}/{name}",
+        "name": name,
+        "size": size,
+        "path_display": f"{d}/{name}",
+        "path_lower": f"{d}/{name}".lower(),
+        "content_hash": content_hash[:64],
+        "rev": "r",
+        "client_modified": ts,
+        "server_modified": ts,
     }
 
 
@@ -37,8 +43,10 @@ def seed(tmp_path, entries):
 
 
 def test_duplicates_report_reclaimable_bytes(tmp_path):
-    store = seed(tmp_path, [mk("a", 100, "a"), mk("b", 100, "a"), mk("c", 100, "a"),
-                            mk("d", 7, "b")])
+    store = seed(
+        tmp_path,
+        [mk("a", 100, "a"), mk("b", 100, "a"), mk("c", 100, "a"), mk("d", 7, "b")],
+    )
     rows = duplicate_report(store, limit=10)
     assert len(rows) == 1
     assert rows[0].copies == 3 and rows[0].reclaimable == 200
@@ -54,8 +62,13 @@ def test_files_with_no_hash_are_not_treated_as_duplicates(tmp_path):
 
 
 def test_cold_bytes_buckets_by_year(tmp_path):
-    store = seed(tmp_path, [mk("old", 10, "a", "2015-06-01T00:00:00Z"),
-                            mk("new", 20, "b", "2026-01-01T00:00:00Z")])
+    store = seed(
+        tmp_path,
+        [
+            mk("old", 10, "a", "2015-06-01T00:00:00Z"),
+            mk("new", 20, "b", "2026-01-01T00:00:00Z"),
+        ],
+    )
     by_year = {r.year: r.bytes for r in cold_bytes(store)}
     assert by_year[2015] == 10 and by_year[2026] == 20
 
@@ -63,15 +76,22 @@ def test_cold_bytes_buckets_by_year(tmp_path):
 def test_bytes_older_than(tmp_path):
     import calendar
 
-    store = seed(tmp_path, [mk("old", 10, "a", "2015-06-01T00:00:00Z"),
-                            mk("new", 20, "b", "2026-01-01T00:00:00Z")])
+    store = seed(
+        tmp_path,
+        [
+            mk("old", 10, "a", "2015-06-01T00:00:00Z"),
+            mk("new", 20, "b", "2026-01-01T00:00:00Z"),
+        ],
+    )
     now = calendar.timegm((2026, 6, 1, 0, 0, 0, 0, 0, 0))
     count, total = bytes_older_than(store, years=5, now=now)
     assert (count, total) == (1, 10)
 
 
 def test_top_dirs_rolls_up_recursively(tmp_path):
-    store = seed(tmp_path, [mk("x", 5, "a", d="/R/sub"), mk("y", 7, "b", d="/R/sub/deeper")])
+    store = seed(
+        tmp_path, [mk("x", 5, "a", d="/R/sub"), mk("y", 7, "b", d="/R/sub/deeper")]
+    )
     top = {r.path: r.bytes for r in top_dirs(store, limit=10)}
     assert top["/R"] == 12
     assert top["/R/sub"] == 12
@@ -79,7 +99,9 @@ def test_top_dirs_rolls_up_recursively(tmp_path):
 
 
 def test_top_dirs_counts_files_recursively(tmp_path):
-    store = seed(tmp_path, [mk("x", 5, "a", d="/R/sub"), mk("y", 7, "b", d="/R/sub/deeper")])
+    store = seed(
+        tmp_path, [mk("x", 5, "a", d="/R/sub"), mk("y", 7, "b", d="/R/sub/deeper")]
+    )
     counts = {r.path: r.files for r in top_dirs(store, limit=10)}
     assert counts["/R"] == 2 and counts["/R/sub/deeper"] == 1
 
@@ -103,8 +125,15 @@ def test_small_file_hotspots(tmp_path):
 
 
 def test_extension_profile_ranks_by_bytes(tmp_path):
-    store = seed(tmp_path, [mk("a.tar", 1000, "a"), mk("b.txt", 5, "b"), mk("c.tar", 500, "c"),
-                            mk("noext", 1, "d")])
+    store = seed(
+        tmp_path,
+        [
+            mk("a.tar", 1000, "a"),
+            mk("b.txt", 5, "b"),
+            mk("c.tar", 500, "c"),
+            mk("noext", 1, "d"),
+        ],
+    )
     rows = extension_profile(store)
     assert rows[0].ext == "tar" and rows[0].files == 2 and rows[0].bytes == 1500
     assert any(r.ext == "(none)" for r in rows)
@@ -116,7 +145,9 @@ def test_extension_ignores_dotted_names_that_are_not_extensions(tmp_path):
 
 
 def test_top_level_summary_is_per_immediate_child(tmp_path):
-    store = seed(tmp_path, [mk("x", 5, "a", d="/R/alice"), mk("y", 7, "b", d="/R/bob/deep")])
+    store = seed(
+        tmp_path, [mk("x", 5, "a", d="/R/alice"), mk("y", 7, "b", d="/R/bob/deep")]
+    )
     rows = {r.path: r.bytes for r in top_level_summary(store)}
     assert rows == {"/R/alice": 5, "/R/bob": 7}
 
@@ -161,8 +192,10 @@ def test_cold_figures_go_by_the_files_own_date(tmp_path):
     """Dropbox's server_modified can be years newer than the content; it is not used."""
     import calendar
 
-    moved = dict(mk("moved", 10, "a", "2015-06-01T00:00:00Z"),
-                 server_modified="2026-01-01T00:00:00Z")
+    moved = dict(
+        mk("moved", 10, "a", "2015-06-01T00:00:00Z"),
+        server_modified="2026-01-01T00:00:00Z",
+    )
     store = seed(tmp_path, [moved, mk("fresh", 20, "b", "2026-01-01T00:00:00Z")])
     now = calendar.timegm((2026, 6, 1, 0, 0, 0, 0, 0, 0))
     assert bytes_older_than(store, years=5, now=now) == (1, 10)
@@ -170,12 +203,18 @@ def test_cold_figures_go_by_the_files_own_date(tmp_path):
 
 
 def test_cold_bytes_and_file_types_can_cover_one_subtree(tmp_path):
-    store = seed(tmp_path, [
-        mk("a.tar", 100, "a", "2015-06-01T00:00:00Z", d="/R/Keep"),
-        mk("b.tar", 7, "b", "2016-06-01T00:00:00Z", d="/R/Keep/deeper"),
-        mk("c.nc", 50, "c", "2017-06-01T00:00:00Z", d="/R/Keeper"),
-        mk("d.nc", 9, "d", "2018-06-01T00:00:00Z"),
-    ])
-    assert {r.year: r.bytes for r in cold_bytes(store, under="/R/keep")} == {2015: 100, 2016: 7}
+    store = seed(
+        tmp_path,
+        [
+            mk("a.tar", 100, "a", "2015-06-01T00:00:00Z", d="/R/Keep"),
+            mk("b.tar", 7, "b", "2016-06-01T00:00:00Z", d="/R/Keep/deeper"),
+            mk("c.nc", 50, "c", "2017-06-01T00:00:00Z", d="/R/Keeper"),
+            mk("d.nc", 9, "d", "2018-06-01T00:00:00Z"),
+        ],
+    )
+    assert {r.year: r.bytes for r in cold_bytes(store, under="/R/keep")} == {
+        2015: 100,
+        2016: 7,
+    }
     rows = extension_profile(store, under="/R/Keep/")
     assert [(r.ext, r.files, r.bytes) for r in rows] == [("tar", 2, 107)]

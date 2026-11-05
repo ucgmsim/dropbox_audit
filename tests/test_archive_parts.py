@@ -4,8 +4,17 @@ from dbaudit.archive.parts import ArchiveSet, ArchiveSetError
 
 
 def entries(*specs):
-    return [{"name": n, "size": s, "path_display": f"/d/{n}", "id": f"id:{n}",
-             "rev": "r", "content_hash": "ab" * 32} for n, s in specs]
+    return [
+        {
+            "name": n,
+            "size": s,
+            "path_display": f"/d/{n}",
+            "id": f"id:{n}",
+            "rev": "r",
+            "content_hash": "ab" * 32,
+        }
+        for n, s in specs
+    ]
 
 
 def test_orders_split_suffixes_and_maps_offsets():
@@ -26,10 +35,11 @@ def test_a_whole_tar_is_a_one_part_set():
 
 def test_reads_that_straddle_a_boundary_split_per_part():
     s = ArchiveSet.from_entries(
-        entries(("a.tar.aa", 10), ("a.tar.ab", 10), ("a.tar.ac", 10)), "a.tar")
+        entries(("a.tar.aa", 10), ("a.tar.ab", 10), ("a.tar.ac", 10)), "a.tar"
+    )
     assert s.slices(8, 6) == [(0, 8, 2), (1, 0, 4)]
     assert s.slices(5, 20) == [(0, 5, 5), (1, 0, 10), (2, 0, 5)]
-    assert s.slices(25, 99) == [(2, 5, 5)]      # clipped at the end of the archive
+    assert s.slices(25, 99) == [(2, 5, 5)]  # clipped at the end of the archive
 
 
 def test_a_missing_part_is_refused_and_named():
@@ -40,7 +50,9 @@ def test_a_missing_part_is_refused_and_named():
 def test_numeric_and_part_dash_suffixes_are_understood():
     s = ArchiveSet.from_entries(entries(("a.tar.001", 1), ("a.tar.000", 1)), "a.tar")
     assert [p.name for p in s.parts] == ["a.tar.000", "a.tar.001"]
-    s2 = ArchiveSet.from_entries(entries(("a.tar.part-01", 1), ("a.tar.part-00", 1)), "a.tar")
+    s2 = ArchiveSet.from_entries(
+        entries(("a.tar.part-01", 1), ("a.tar.part-00", 1)), "a.tar"
+    )
     assert [p.name for p in s2.parts] == ["a.tar.part-00", "a.tar.part-01"]
 
 
@@ -60,11 +72,14 @@ def test_set_hash_survives_a_move_but_not_a_content_change():
     assert ArchiveSet.from_entries(changed, "a.tar").set_hash() != base
 
 
-@pytest.mark.parametrize("names, missing", [
-    (("a.tar.ab", "a.tar.ac"), "aa"),
-    (("a.tar.aab", "a.tar.aac"), "aaa"),
-    (("a.tar.02", "a.tar.03"), "01"),
-])
+@pytest.mark.parametrize(
+    "names, missing",
+    [
+        (("a.tar.ab", "a.tar.ac"), "aa"),
+        (("a.tar.aab", "a.tar.aac"), "aaa"),
+        (("a.tar.02", "a.tar.03"), "01"),
+    ],
+)
 def test_a_set_missing_its_first_part_is_refused_and_the_part_named(names, missing):
     """Only gaps *between* parts used to be caught, so with the first part gone the
     second quietly became part 0 -- and `index` then called the archive corrupt at
@@ -75,11 +90,14 @@ def test_a_set_missing_its_first_part_is_refused_and_the_part_named(names, missi
         ArchiveSet.from_entries(entries(*((n, 1) for n in names)), "a.tar")
 
 
-@pytest.mark.parametrize("names", [
-    ("a.tar.00", "a.tar.01"),        # split -d
-    ("a.tar.01", "a.tar.02"),        # tools that count from one
-    ("a.tar.aa",),
-])
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("a.tar.00", "a.tar.01"),  # split -d
+        ("a.tar.01", "a.tar.02"),  # tools that count from one
+        ("a.tar.aa",),
+    ],
+)
 def test_a_sequence_may_start_where_split_starts_it(names):
     s = ArchiveSet.from_entries(entries(*((n, 1) for n in names)), "a.tar")
     assert [p.name for p in s.parts] == list(names)

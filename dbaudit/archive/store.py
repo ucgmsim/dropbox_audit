@@ -28,7 +28,9 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 #: to one of these outcomes, so every byte of the span counts as covered regardless
 #: of exactly where the cursor or first_header sit. 'error' is deliberately absent:
 #: a segment that failed has not necessarily covered anything.
-FINISHED_SEGMENT_STATES = frozenset({"crossed", "complete", "truncated", "corrupt", "beyond"})
+FINISHED_SEGMENT_STATES = frozenset(
+    {"crossed", "complete", "truncated", "corrupt", "beyond"}
+)
 
 
 def _as_int(value):
@@ -131,7 +133,8 @@ class ArchiveStore:
         """
         self.connect().execute(
             "INSERT INTO events (ts, archive_id, kind, detail) VALUES (?, ?, ?, ?)",
-            (time.time(), archive_id, kind, (detail or "")[:500]))
+            (time.time(), archive_id, kind, (detail or "")[:500]),
+        )
 
     # ---- archives ---------------------------------------------------------
 
@@ -181,21 +184,51 @@ class ArchiveStore:
                                   ELSE state END,
                        detail=CASE WHEN state IN ('stale', 'unsupported') THEN NULL
                                    ELSE detail END""",
-                (name, kind, source, folder, sum(p.size for p in parts), len(parts),
-                 set_hash, time.time()))
+                (
+                    name,
+                    kind,
+                    source,
+                    folder,
+                    sum(p.size for p in parts),
+                    len(parts),
+                    set_hash,
+                    time.time(),
+                ),
+            )
             archive_id = conn.execute(
-                "SELECT id FROM archives WHERE set_hash=?", (set_hash,)).fetchone()[0]
+                "SELECT id FROM archives WHERE set_hash=?", (set_hash,)
+            ).fetchone()[0]
             conn.execute("DELETE FROM parts WHERE archive_id=?", (archive_id,))
             conn.executemany(
                 """INSERT INTO parts (archive_id, idx, name, path_display, dbx_id, rev,
                                       size, offset, content_hash)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(archive_id, p.idx, p.name, p.path_display, p.dbx_id, p.rev, p.size,
-                  p.offset, p.content_hash) for p in parts])
+                [
+                    (
+                        archive_id,
+                        p.idx,
+                        p.name,
+                        p.path_display,
+                        p.dbx_id,
+                        p.rev,
+                        p.size,
+                        p.offset,
+                        p.content_hash,
+                    )
+                    for p in parts
+                ],
+            )
             conn.execute(
                 """UPDATE archives SET state='stale', detail=?
                    WHERE name=? AND folder IS ? AND set_hash!=? AND id!=?""",
-                (f"superseded by archive {archive_id}", name, folder, set_hash, archive_id))
+                (
+                    f"superseded by archive {archive_id}",
+                    name,
+                    folder,
+                    set_hash,
+                    archive_id,
+                ),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -218,21 +251,37 @@ class ArchiveStore:
         conn = self.connect()
         row = conn.execute(
             "SELECT * FROM archives WHERE name=? AND state!='stale' ORDER BY id DESC LIMIT 1",
-            (name,)).fetchone()
+            (name,),
+        ).fetchone()
         if row is None:
             row = conn.execute(
-                "SELECT * FROM archives WHERE name=? ORDER BY id DESC LIMIT 1",
-                (name,)).fetchone()
+                "SELECT * FROM archives WHERE name=? ORDER BY id DESC LIMIT 1", (name,)
+            ).fetchone()
         return row
 
     def parts_of(self, archive_id) -> list[Part]:
-        rows = self.connect().execute(
-            "SELECT idx, name, size, offset, path_display, dbx_id, rev, content_hash "
-            "FROM parts WHERE archive_id=? ORDER BY idx", (archive_id,)).fetchall()
-        return [Part(idx=r["idx"], name=r["name"], size=r["size"], offset=r["offset"],
-                     path_display=r["path_display"] or "", dbx_id=r["dbx_id"] or "",
-                     rev=r["rev"] or "", content_hash=r["content_hash"] or "")
-                for r in rows]
+        rows = (
+            self.connect()
+            .execute(
+                "SELECT idx, name, size, offset, path_display, dbx_id, rev, content_hash "
+                "FROM parts WHERE archive_id=? ORDER BY idx",
+                (archive_id,),
+            )
+            .fetchall()
+        )
+        return [
+            Part(
+                idx=r["idx"],
+                name=r["name"],
+                size=r["size"],
+                offset=r["offset"],
+                path_display=r["path_display"] or "",
+                dbx_id=r["dbx_id"] or "",
+                rev=r["rev"] or "",
+                content_hash=r["content_hash"] or "",
+            )
+            for r in rows
+        ]
 
     def start_walk(self, archive_id) -> int:
         """Resume a walk: reclaim what a dead run left behind, and return the
@@ -264,15 +313,18 @@ class ArchiveStore:
                        started_at=COALESCE(started_at, ?),
                        error=NULL, finished_at=NULL
                    WHERE id=?""",
-                (now, archive_id))
+                (now, archive_id),
+            )
             conn.execute(
                 """UPDATE segments SET state='pending', owner=NULL, error=NULL
                    WHERE archive_id=? AND state IN ('walking', 'error')""",
-                (archive_id,))
+                (archive_id,),
+            )
             covered = self._covered(conn, archive_id)
             self.log_event(archive_id, "run_start", str(covered))
             cursor_offset = conn.execute(
-                "SELECT cursor_offset FROM archives WHERE id=?", (archive_id,)).fetchone()[0]
+                "SELECT cursor_offset FROM archives WHERE id=?", (archive_id,)
+            ).fetchone()[0]
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -310,7 +362,8 @@ class ArchiveStore:
             conn.execute("BEGIN IMMEDIATE")
             n_members, member_bytes = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM members WHERE archive_id=?",
-                (archive_id,)).fetchone()
+                (archive_id,),
+            ).fetchone()
             conn.execute(
                 """UPDATE archives SET
                        state=CASE WHEN state='stale' THEN 'stale' ELSE ? END,
@@ -319,8 +372,17 @@ class ArchiveStore:
                        n_members=?,
                        member_bytes=?, cursor_offset=?, finished_at=?
                    WHERE id=?""",
-                (result.state, result.end_offset, result.detail, n_members, member_bytes,
-                 result.end_offset, time.time(), archive_id))
+                (
+                    result.state,
+                    result.end_offset,
+                    result.detail,
+                    n_members,
+                    member_bytes,
+                    result.end_offset,
+                    time.time(),
+                    archive_id,
+                ),
+            )
             self.log_event(archive_id, "finish", result.detail)
             conn.execute("COMMIT")
         except Exception:
@@ -345,7 +407,8 @@ class ArchiveStore:
                        detail=CASE WHEN state='stale' THEN detail ELSE ? END,
                        finished_at=?
                    WHERE id=?""",
-                (detail, time.time(), archive_id))
+                (detail, time.time(), archive_id),
+            )
             self.log_event(archive_id, "unsupported", detail)
             conn.execute("COMMIT")
         except Exception:
@@ -371,7 +434,8 @@ class ArchiveStore:
                        state=CASE WHEN state='stale' THEN 'stale' ELSE 'error' END,
                        error=?, finished_at=?
                    WHERE id=?""",
-                (error, time.time(), archive_id))
+                (error, time.time(), archive_id),
+            )
             self.log_event(archive_id, "fail", error)
             conn.execute("COMMIT")
         except Exception:
@@ -388,8 +452,10 @@ class ArchiveStore:
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE archives SET state='stale', detail=? WHERE id=?",
-                         (detail, archive_id))
+            conn.execute(
+                "UPDATE archives SET state='stale', detail=? WHERE id=?",
+                (detail, archive_id),
+            )
             self.log_event(archive_id, "stale", detail)
             conn.execute("COMMIT")
         except Exception:
@@ -410,13 +476,17 @@ class ArchiveStore:
         row = conn.execute(
             "SELECT state, total_size, requests, bytes_fetched, cursor_offset, "
             "       started_at, updated_at FROM archives WHERE id=?",
-            (archive_id,)).fetchone()
+            (archive_id,),
+        ).fetchone()
         n_members, member_bytes = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM members WHERE archive_id=?",
-            (archive_id,)).fetchone()
+            (archive_id,),
+        ).fetchone()
         event = conn.execute(
             "SELECT ts, detail FROM events WHERE archive_id=? AND kind='run_start' "
-            "ORDER BY ts DESC LIMIT 1", (archive_id,)).fetchone()
+            "ORDER BY ts DESC LIMIT 1",
+            (archive_id,),
+        ).fetchone()
         return {
             "state": row["state"],
             "total_size": row["total_size"],
@@ -447,15 +517,19 @@ class ArchiveStore:
         start can end `corrupt` a few headers in, and the join walks that part again.
         """
         total_size = conn.execute(
-            "SELECT total_size FROM archives WHERE id=?", (archive_id,)).fetchone()[0]
+            "SELECT total_size FROM archives WHERE id=?", (archive_id,)
+        ).fetchone()[0]
         segments = conn.execute(
             "SELECT scan_from, stop_at, first_header, cursor_offset, exit_offset, joined, "
-            "state FROM segments WHERE archive_id=?", (archive_id,)).fetchall()
+            "state FROM segments WHERE archive_id=?",
+            (archive_id,),
+        ).fetchall()
         covered = 0
         for seg in segments:
             span_end = seg["stop_at"] if seg["stop_at"] is not None else total_size
-            if seg["state"] == "beyond" or (seg["state"] in FINISHED_SEGMENT_STATES
-                                            and seg["joined"]):
+            if seg["state"] == "beyond" or (
+                seg["state"] in FINISHED_SEGMENT_STATES and seg["joined"]
+            ):
                 reached = span_end
             elif seg["state"] in FINISHED_SEGMENT_STATES:
                 reached = seg["exit_offset"]
@@ -476,13 +550,18 @@ class ArchiveStore:
         their maintenance cost on every insert before any walk has finished.
         """
         conn = self.connect()
-        conn.execute("CREATE INDEX IF NOT EXISTS members_dir ON members(archive_id, dir)")
-        conn.execute("CREATE INDEX IF NOT EXISTS members_size ON members(archive_id, size DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS members_dir ON members(archive_id, dir)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS members_size ON members(archive_id, size DESC)"
+        )
 
     # ---- members ------------------------------------------------------------
 
-    def commit_batch(self, archive_id, segment_id, members, next_offset,
-                     requests=0, bytes_fetched=0) -> None:
+    def commit_batch(
+        self, archive_id, segment_id, members, next_offset, requests=0, bytes_fetched=0
+    ) -> None:
         """Members and the resume cursor in one transaction: the whole resumability
         story. The cursor belongs to the segment, because each chain resumes
         independently; the archive row carries only the totals `stats` reports.
@@ -514,18 +593,34 @@ class ArchiveStore:
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE segments SET cursor_offset=? WHERE id=?",
-                         (next_offset, segment_id))
+            conn.execute(
+                "UPDATE segments SET cursor_offset=? WHERE id=?",
+                (next_offset, segment_id),
+            )
 
             def rows():
                 for m in members:
-                    yield (archive_id, m.hdr_offset, m.data_offset, _as_int(m.size), m.type,
-                           m.mode, m.mtime, m.uname, m.gname, m.dir, m.name, m.linkname)
+                    yield (
+                        archive_id,
+                        m.hdr_offset,
+                        m.data_offset,
+                        _as_int(m.size),
+                        m.type,
+                        m.mode,
+                        m.mtime,
+                        m.uname,
+                        m.gname,
+                        m.dir,
+                        m.name,
+                        m.linkname,
+                    )
 
             conn.executemany(
                 """INSERT OR REPLACE INTO members (archive_id, hdr_offset, data_offset,
                        size, type, mode, mtime, uname, gname, dir, name, linkname)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows())
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows(),
+            )
             conn.execute(
                 """UPDATE segments SET members = (
                        SELECT COUNT(*) FROM members
@@ -533,14 +628,16 @@ class ArchiveStore:
                          AND members.hdr_offset >= segments.scan_from
                          AND (segments.stop_at IS NULL OR members.hdr_offset < segments.stop_at)
                    ) WHERE id=?""",
-                (segment_id,))
+                (segment_id,),
+            )
             conn.execute(
                 """UPDATE archives SET
                        state=CASE WHEN state='stale' THEN 'stale' ELSE 'walking' END,
                        requests=requests+?, bytes_fetched=bytes_fetched+?,
                        started_at=COALESCE(started_at, ?), updated_at=?
                    WHERE id=?""",
-                (requests, bytes_fetched, time.time(), time.time(), archive_id))
+                (requests, bytes_fetched, time.time(), time.time(), archive_id),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -549,9 +646,14 @@ class ArchiveStore:
     def member_at(self, archive_id, hdr_offset):
         """The member whose header sits at ``hdr_offset``, or None -- how `cat` knows
         what must follow the member it extracts."""
-        return self.connect().execute(
-            "SELECT * FROM members WHERE archive_id=? AND hdr_offset=?",
-            (archive_id, hdr_offset)).fetchone()
+        return (
+            self.connect()
+            .execute(
+                "SELECT * FROM members WHERE archive_id=? AND hdr_offset=?",
+                (archive_id, hdr_offset),
+            )
+            .fetchone()
+        )
 
     def repeated_paths(self, archive_id, limit: int) -> list[sqlite3.Row]:
         """Every row whose path is recorded more than once, in header order, at most
@@ -563,20 +665,27 @@ class ArchiveStore:
         tarball stored inside the archive, or a long-named member's header without its
         long-name block, has a path recorded nowhere else.
         """
-        return self.connect().execute(
-            """SELECT m.* FROM members AS m
+        return (
+            self.connect()
+            .execute(
+                """SELECT m.* FROM members AS m
                JOIN (SELECT dir, name FROM members WHERE archive_id=?
                      GROUP BY dir, name HAVING COUNT(*) > 1) AS r
                  ON m.dir = r.dir AND m.name = r.name
                WHERE m.archive_id=?
                ORDER BY m.hdr_offset LIMIT ?""",
-            (archive_id, archive_id, limit)).fetchall()
+                (archive_id, archive_id, limit),
+            )
+            .fetchall()
+        )
 
     def charge(self, archive_id, requests: int, bytes_fetched: int) -> None:
         """Add reads made outside any segment -- an audit's -- to the archive's cost."""
         self.connect().execute(
             "UPDATE archives SET requests=requests+?, bytes_fetched=bytes_fetched+? "
-            "WHERE id=?", (requests, bytes_fetched, archive_id))
+            "WHERE id=?",
+            (requests, bytes_fetched, archive_id),
+        )
 
     def find_members(self, archive_id, path) -> list[sqlite3.Row]:
         """Every member whose (dir, name) matches `path`, oldest header first.
@@ -588,15 +697,25 @@ class ArchiveStore:
         """
         stripped = path.rstrip("/")
         head, _, tail = stripped.rpartition("/")
-        return self.connect().execute(
-            "SELECT * FROM members WHERE archive_id=? AND dir=? AND name=? "
-            "ORDER BY hdr_offset",
-            (archive_id, head, tail or stripped)).fetchall()
+        return (
+            self.connect()
+            .execute(
+                "SELECT * FROM members WHERE archive_id=? AND dir=? AND name=? "
+                "ORDER BY hdr_offset",
+                (archive_id, head, tail or stripped),
+            )
+            .fetchall()
+        )
 
     def query_members(self, archive_id) -> list[sqlite3.Row]:
-        return self.connect().execute(
-            "SELECT * FROM members WHERE archive_id=? ORDER BY hdr_offset",
-            (archive_id,)).fetchall()
+        return (
+            self.connect()
+            .execute(
+                "SELECT * FROM members WHERE archive_id=? ORDER BY hdr_offset",
+                (archive_id,),
+            )
+            .fetchall()
+        )
 
     def drop_members_between(self, archive_id, start, end) -> None:
         """Throw away rows in ``[start, end)``: they were never on the confirmed
@@ -607,11 +726,13 @@ class ArchiveStore:
         if end is None:
             conn.execute(
                 "DELETE FROM members WHERE archive_id=? AND hdr_offset>=?",
-                (archive_id, start))
+                (archive_id, start),
+            )
         else:
             conn.execute(
                 "DELETE FROM members WHERE archive_id=? AND hdr_offset>=? AND hdr_offset<?",
-                (archive_id, start, end))
+                (archive_id, start, end),
+            )
 
     # ---- segments -----------------------------------------------------------
 
@@ -628,28 +749,47 @@ class ArchiveStore:
         rows = []
         for index, part in enumerate(parts):
             stop_at = parts[index + 1].offset if index + 1 < len(parts) else None
-            rows.append((archive_id, index, part.offset, stop_at,
-                         0 if index == 0 else None,
-                         1 if index == 0 else 0))
+            rows.append(
+                (
+                    archive_id,
+                    index,
+                    part.offset,
+                    stop_at,
+                    0 if index == 0 else None,
+                    1 if index == 0 else 0,
+                )
+            )
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.executemany(
                 """INSERT OR IGNORE INTO segments
                        (archive_id, idx, scan_from, stop_at, first_header, joined)
-                   VALUES (?, ?, ?, ?, ?, ?)""", rows)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
 
     def segments(self, archive_id) -> list[sqlite3.Row]:
-        return self.connect().execute(
-            "SELECT * FROM segments WHERE archive_id=? ORDER BY idx", (archive_id,)).fetchall()
+        return (
+            self.connect()
+            .execute(
+                "SELECT * FROM segments WHERE archive_id=? ORDER BY idx", (archive_id,)
+            )
+            .fetchall()
+        )
 
     def segment(self, archive_id, idx) -> sqlite3.Row | None:
-        return self.connect().execute(
-            "SELECT * FROM segments WHERE archive_id=? AND idx=?", (archive_id, idx)).fetchone()
+        return (
+            self.connect()
+            .execute(
+                "SELECT * FROM segments WHERE archive_id=? AND idx=?", (archive_id, idx)
+            )
+            .fetchone()
+        )
 
     def claim_segment(self, archive_id, owner):
         """Atomically take the lowest-index pending segment, or None.
@@ -660,12 +800,17 @@ class ArchiveStore:
         the caller sees the claimed row's *post*-claim values (state='walking',
         its own owner) rather than a stale pre-claim read.
         """
-        return self.connect().execute(
-            "UPDATE segments SET state='walking', owner=? "
-            "WHERE id = (SELECT id FROM segments WHERE archive_id=? AND state='pending' "
-            "            ORDER BY idx LIMIT 1) "
-            "RETURNING *",
-            (owner, archive_id)).fetchone()
+        return (
+            self.connect()
+            .execute(
+                "UPDATE segments SET state='walking', owner=? "
+                "WHERE id = (SELECT id FROM segments WHERE archive_id=? AND state='pending' "
+                "            ORDER BY idx LIMIT 1) "
+                "RETURNING *",
+                (owner, archive_id),
+            )
+            .fetchone()
+        )
 
     def set_segment_start(self, segment_id, offset) -> None:
         """Record where a scan found this segment's first header, before any batch
@@ -677,7 +822,8 @@ class ArchiveStore:
         bare `first_header` differently from a `cursor_offset`.
         """
         self.connect().execute(
-            "UPDATE segments SET first_header=? WHERE id=?", (offset, segment_id))
+            "UPDATE segments SET first_header=? WHERE id=?", (offset, segment_id)
+        )
 
     def mark_joined(self, segment_id) -> None:
         """Confirm a segment's start, and raise the archive's frontier to match.
@@ -692,12 +838,14 @@ class ArchiveStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT archive_id, first_header FROM segments WHERE id=?",
-                (segment_id,)).fetchone()
+                (segment_id,),
+            ).fetchone()
             conn.execute("UPDATE segments SET joined=1 WHERE id=?", (segment_id,))
             if row["first_header"] is not None:
                 conn.execute(
                     "UPDATE archives SET cursor_offset=MAX(cursor_offset, ?) WHERE id=?",
-                    (row["first_header"], row["archive_id"]))
+                    (row["first_header"], row["archive_id"]),
+                )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -716,17 +864,22 @@ class ArchiveStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT archive_id, scan_from, stop_at FROM segments WHERE id=?",
-                (segment_id,)).fetchone()
-            self.drop_members_between(row["archive_id"], row["scan_from"], row["stop_at"])
+                (segment_id,),
+            ).fetchone()
+            self.drop_members_between(
+                row["archive_id"], row["scan_from"], row["stop_at"]
+            )
             conn.execute(
                 """UPDATE segments SET first_header=?, cursor_offset=NULL, exit_offset=NULL,
                        detail=NULL, error=NULL, owner=NULL, members=0, state='pending',
                        joined=1
                    WHERE id=?""",
-                (first_header, segment_id))
+                (first_header, segment_id),
+            )
             conn.execute(
                 "UPDATE archives SET cursor_offset=MAX(cursor_offset, ?) WHERE id=?",
-                (first_header, row["archive_id"]))
+                (first_header, row["archive_id"]),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -768,13 +921,14 @@ class ArchiveStore:
             conn.execute("BEGIN IMMEDIATE")
             archive = conn.execute(
                 "SELECT state, detail, error, end_offset FROM archives WHERE id=?",
-                (archive_id,)).fetchone()
+                (archive_id,),
+            ).fetchone()
             if archive["state"] == "stale":
                 conn.execute("ROLLBACK")
                 return None
             segments = conn.execute(
-                "SELECT * FROM segments WHERE archive_id=? ORDER BY idx",
-                (archive_id,)).fetchall()
+                "SELECT * FROM segments WHERE archive_id=? ORDER BY idx", (archive_id,)
+            ).fetchall()
             # The last segment has no stop_at, so it never crosses: there is always one.
             ending = next(s for s in segments if s["state"] != "crossed")
             verdict = [ending["idx"], archive["state"], archive["end_offset"]]
@@ -785,38 +939,51 @@ class ArchiveStore:
             again = segments[max((last["from"] if repeated else ending["idx"]) - 1, 0)]
             for segment in segments:
                 if segment["idx"] >= again["idx"]:
-                    self.drop_members_between(archive_id, segment["scan_from"],
-                                              segment["stop_at"])
+                    self.drop_members_between(
+                        archive_id, segment["scan_from"], segment["stop_at"]
+                    )
             conn.execute(
                 """UPDATE segments SET cursor_offset=NULL, exit_offset=NULL, detail=NULL,
                        error=NULL, owner=NULL, members=0, state='pending'
                    WHERE id=?""",
-                (again["id"],))
+                (again["id"],),
+            )
             conn.execute(
                 """UPDATE segments SET cursor_offset=NULL, exit_offset=NULL, detail=NULL,
                        error=NULL, owner=NULL, members=0, state='pending', joined=0
                    WHERE archive_id=? AND idx>? AND idx<=?""",
-                (archive_id, again["idx"], ending["idx"]))
+                (archive_id, again["idx"], ending["idx"]),
+            )
             conn.execute(
                 """UPDATE segments SET first_header=NULL, cursor_offset=NULL,
                        exit_offset=NULL, detail=NULL, error=NULL, owner=NULL, members=0,
                        state='beyond', joined=0
                    WHERE archive_id=? AND idx>?""",
-                (archive_id, ending["idx"]))
+                (archive_id, ending["idx"]),
+            )
             conn.execute(
                 """UPDATE archives SET state='registered', detail=NULL, error=NULL,
                        end_offset=NULL, finished_at=NULL, cursor_offset=?
                    WHERE id=?""",
-                (again["first_header"] or 0, archive_id))
-            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                         (key, json.dumps({"from": again["idx"], "verdict": verdict})))
-            further = (" -- one segment further back than the last recheck, which ended "
-                       "the same way" if repeated else "")
+                (again["first_header"] or 0, archive_id),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (key, json.dumps({"from": again["idx"], "verdict": verdict})),
+            )
+            further = (
+                " -- one segment further back than the last recheck, which ended "
+                "the same way"
+                if repeated
+                else ""
+            )
             self.log_event(
-                archive_id, "recheck",
+                archive_id,
+                "recheck",
                 f"segment {again['idx']} walked again from {again['first_header']}, then "
                 f"on{further}: the walk had ended {archive['state']} in segment "
-                f"{ending['idx']}: {archive['detail'] or archive['error'] or ''}")
+                f"{ending['idx']}: {archive['detail'] or archive['error'] or ''}",
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -833,7 +1000,8 @@ class ArchiveStore:
             """UPDATE segments SET first_header=NULL, cursor_offset=NULL, exit_offset=NULL,
                    detail=NULL, error=NULL, owner=NULL, members=0, state='pending', joined=0
                WHERE archive_id=? AND idx>=? AND state='beyond'""",
-            (archive_id, from_idx))
+            (archive_id, from_idx),
+        )
 
     def retire_segment(self, segment_id) -> None:
         """A segment lying entirely past where the archive's chain ended.
@@ -855,12 +1023,16 @@ class ArchiveStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT archive_id, scan_from, stop_at FROM segments WHERE id=?",
-                (segment_id,)).fetchone()
-            self.drop_members_between(row["archive_id"], row["scan_from"], row["stop_at"])
+                (segment_id,),
+            ).fetchone()
+            self.drop_members_between(
+                row["archive_id"], row["scan_from"], row["stop_at"]
+            )
             conn.execute(
                 "UPDATE segments SET state='beyond', members=0, joined=0, error=NULL "
                 "WHERE id=?",
-                (segment_id,))
+                (segment_id,),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -883,15 +1055,18 @@ class ArchiveStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             archive_id = conn.execute(
-                "SELECT archive_id FROM segments WHERE id=?", (segment_id,)).fetchone()[0]
+                "SELECT archive_id FROM segments WHERE id=?", (segment_id,)
+            ).fetchone()[0]
             conn.execute(
                 "UPDATE segments SET state='pending', owner=NULL "
                 "WHERE id=? AND state='walking'",
-                (segment_id,))
+                (segment_id,),
+            )
             conn.execute(
                 "UPDATE archives SET requests=requests+?, bytes_fetched=bytes_fetched+? "
                 "WHERE id=?",
-                (requests, bytes_fetched, archive_id))
+                (requests, bytes_fetched, archive_id),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -909,14 +1084,17 @@ class ArchiveStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             archive_id = conn.execute(
-                "SELECT archive_id FROM segments WHERE id=?", (segment_id,)).fetchone()[0]
+                "SELECT archive_id FROM segments WHERE id=?", (segment_id,)
+            ).fetchone()[0]
             conn.execute(
                 "UPDATE segments SET state=?, exit_offset=?, detail=?, owner=NULL WHERE id=?",
-                (result.state, result.end_offset, result.detail, segment_id))
+                (result.state, result.end_offset, result.detail, segment_id),
+            )
             conn.execute(
                 "UPDATE archives SET requests=requests+?, bytes_fetched=bytes_fetched+? "
                 "WHERE id=?",
-                (requests, bytes_fetched, archive_id))
+                (requests, bytes_fetched, archive_id),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -928,14 +1106,17 @@ class ArchiveStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             archive_id = conn.execute(
-                "SELECT archive_id FROM segments WHERE id=?", (segment_id,)).fetchone()[0]
+                "SELECT archive_id FROM segments WHERE id=?", (segment_id,)
+            ).fetchone()[0]
             conn.execute(
                 "UPDATE segments SET state='error', error=?, owner=NULL WHERE id=?",
-                (error, segment_id))
+                (error, segment_id),
+            )
             conn.execute(
                 "UPDATE archives SET requests=requests+?, bytes_fetched=bytes_fetched+? "
                 "WHERE id=?",
-                (requests, bytes_fetched, archive_id))
+                (requests, bytes_fetched, archive_id),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -970,15 +1151,24 @@ class ArchiveStore:
         conn = self.connect()
         conn.execute("ATTACH DATABASE ? AS src", (str(source),))
         try:
-            differ = [table for table in sorted(self._tables("main") | self._tables("src"))
-                      if self._columns("main", table) != self._columns("src", table)]
+            differ = [
+                table
+                for table in sorted(self._tables("main") | self._tables("src"))
+                if self._columns("main", table) != self._columns("src", table)
+            ]
             if differ:
-                raise ValueError(f"{source} and {self.path} differ in tables or columns "
-                                 f"({', '.join(differ)})")
+                raise ValueError(
+                    f"{source} and {self.path} differ in tables or columns "
+                    f"({', '.join(differ)})"
+                )
             conn.execute("BEGIN IMMEDIATE")
             try:
-                moved = [self._import_one(conn, row, source) for row in conn.execute(
-                    "SELECT * FROM src.archives ORDER BY id").fetchall()]
+                moved = [
+                    self._import_one(conn, row, source)
+                    for row in conn.execute(
+                        "SELECT * FROM src.archives ORDER BY id"
+                    ).fetchall()
+                ]
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -988,37 +1178,61 @@ class ArchiveStore:
         return moved
 
     def _tables(self, schema) -> set[str]:
-        return {row[0] for row in self.connect().execute(
-            f"SELECT name FROM {schema}.sqlite_master WHERE type='table'")}
+        return {
+            row[0]
+            for row in self.connect().execute(
+                f"SELECT name FROM {schema}.sqlite_master WHERE type='table'"
+            )
+        }
 
     def _columns(self, schema, table) -> list[tuple[str, str]]:
-        return [(row["name"], row["type"]) for row in self.connect().execute(
-            f"PRAGMA {schema}.table_info({table})")]
+        return [
+            (row["name"], row["type"])
+            for row in self.connect().execute(f"PRAGMA {schema}.table_info({table})")
+        ]
 
     def _import_one(self, conn, row, source) -> tuple[int, int, int | None]:
-        old = conn.execute("SELECT id FROM main.archives WHERE set_hash=?",
-                           (row["set_hash"],)).fetchone()
+        old = conn.execute(
+            "SELECT id FROM main.archives WHERE set_hash=?", (row["set_hash"],)
+        ).fetchone()
         if old is not None:
             self._drop(conn, old["id"])
-        columns = [name for name, _ in self._columns("main", "archives") if name != "id"]
+        columns = [
+            name for name, _ in self._columns("main", "archives") if name != "id"
+        ]
         new = conn.execute(
             f"INSERT INTO main.archives ({', '.join(columns)}) "
             f"VALUES ({', '.join('?' * len(columns))})",
-            [row[name] for name in columns]).lastrowid
-        for table, leave_out, blank in (("parts", (), ()), ("segments", ("id",), ("owner",)),
-                                        ("members", (), ()), ("events", (), ())):
-            columns = [name for name, _ in self._columns("main", table)
-                       if name not in leave_out]
-            chosen = ["?" if name == "archive_id" else "NULL" if name in blank else name
-                      for name in columns]
-            conn.execute(f"INSERT INTO main.{table} ({', '.join(columns)}) "
-                         f"SELECT {', '.join(chosen)} FROM src.{table} WHERE archive_id=?",
-                         (new, row["id"]))
-        note = conn.execute("SELECT value FROM src.meta WHERE key=?",
-                            (f"recheck:{row['id']}",)).fetchone()
+            [row[name] for name in columns],
+        ).lastrowid
+        for table, leave_out, blank in (
+            ("parts", (), ()),
+            ("segments", ("id",), ("owner",)),
+            ("members", (), ()),
+            ("events", (), ()),
+        ):
+            columns = [
+                name
+                for name, _ in self._columns("main", table)
+                if name not in leave_out
+            ]
+            chosen = [
+                "?" if name == "archive_id" else "NULL" if name in blank else name
+                for name in columns
+            ]
+            conn.execute(
+                f"INSERT INTO main.{table} ({', '.join(columns)}) "
+                f"SELECT {', '.join(chosen)} FROM src.{table} WHERE archive_id=?",
+                (new, row["id"]),
+            )
+        note = conn.execute(
+            "SELECT value FROM src.meta WHERE key=?", (f"recheck:{row['id']}",)
+        ).fetchone()
         if note is not None:
-            conn.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)",
-                         (f"recheck:{new}", note["value"]))
+            conn.execute(
+                "INSERT OR REPLACE INTO main.meta (key, value) VALUES (?, ?)",
+                (f"recheck:{new}", note["value"]),
+            )
         # As `register` does: of the archives of one name in one folder, the latest
         # registered is what the folder holds, and other content there is stale. One
         # already live stands first: register keeps the time a content was first seen,
@@ -1026,11 +1240,19 @@ class ArchiveStore:
         latest = conn.execute(
             "SELECT id, set_hash FROM main.archives WHERE name=? AND folder IS ? "
             "ORDER BY state='stale', created_at DESC, id DESC LIMIT 1",
-            (row["name"], row["folder"])).fetchone()
-        conn.execute("UPDATE main.archives SET state='stale', detail=? "
-                     "WHERE name=? AND folder IS ? AND set_hash!=? AND id!=?",
-                     (f"superseded by archive {latest['id']}", row["name"], row["folder"],
-                      latest["set_hash"], latest["id"]))
+            (row["name"], row["folder"]),
+        ).fetchone()
+        conn.execute(
+            "UPDATE main.archives SET state='stale', detail=? "
+            "WHERE name=? AND folder IS ? AND set_hash!=? AND id!=?",
+            (
+                f"superseded by archive {latest['id']}",
+                row["name"],
+                row["folder"],
+                latest["set_hash"],
+                latest["id"],
+            ),
+        )
         replaced = f", replacing archive {old['id']}" if old is not None else ""
         self.log_event(new, "import", f"archive {row['id']} of {source}{replaced}")
         return row["id"], new, old["id"] if old is not None else None

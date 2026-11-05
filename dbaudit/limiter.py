@@ -29,10 +29,12 @@ from contextlib import contextmanager
 
 log = logging.getLogger("dbaudit.limiter")
 
-RATE_STEP = 0.5       # requests/s added after an interval the rate was the bottleneck of
-MIN_RPS = 1.0         # a 429 never halves the rate below this
-SATURATED = 0.9       # share of the rate an interval's requests must reach to count
-OVERLOAD_WINDOW = 1.0  # seconds after the first 429 of an overload that later ones join it
+RATE_STEP = 0.5  # requests/s added after an interval the rate was the bottleneck of
+MIN_RPS = 1.0  # a 429 never halves the rate below this
+SATURATED = 0.9  # share of the rate an interval's requests must reach to count
+OVERLOAD_WINDOW = (
+    1.0  # seconds after the first 429 of an overload that later ones join it
+)
 
 
 class AdaptiveLimiter:
@@ -63,10 +65,16 @@ class AdaptiveLimiter:
         self._lock = threading.Lock()
         # Below the ceiling, the climb waits a full clean interval from the start: the
         # first request is no evidence that Dropbox will take more.
-        start = self.max_concurrency if start_concurrency is None else int(start_concurrency)
+        start = (
+            self.max_concurrency
+            if start_concurrency is None
+            else int(start_concurrency)
+        )
         if not self.min_concurrency <= start <= self.max_concurrency:
-            raise ValueError(f"start_concurrency {start} is outside "
-                             f"[{self.min_concurrency}, {self.max_concurrency}]")
+            raise ValueError(
+                f"start_concurrency {start} is outside "
+                f"[{self.min_concurrency}, {self.max_concurrency}]"
+            )
         self._concurrency = start
         self._in_flight = 0
         self._tokens = float(burst)
@@ -75,9 +83,9 @@ class AdaptiveLimiter:
         self._overload_began = float("-inf")
         self._last_429 = clock() if start < self.max_concurrency else float("-inf")
         self._interval_start = clock()  # the clean interval the rate is judged over
-        self._granted = 0               # requests let through since it began
+        self._granted = 0  # requests let through since it began
         self.rate_limit_events = 0
-        self._granted_total = 0          # every request let through, for progress
+        self._granted_total = 0  # every request let through, for progress
 
     # ---- observable state ---------------------------------------------
 
@@ -152,7 +160,9 @@ class AdaptiveLimiter:
             # overload, so one halving of the rate and one worker fewer. Together is
             # during its pause, or within OVERLOAD_WINDOW of its first 429: a pause of
             # "retry after 0" would make each of them an overload of its own.
-            first = now >= max(self._paused_until, self._overload_began + OVERLOAD_WINDOW)
+            first = now >= max(
+                self._paused_until, self._overload_began + OVERLOAD_WINDOW
+            )
             if first:
                 self._overload_began = now
             self._paused_until = max(self._paused_until, now + float(retry_after))
@@ -164,8 +174,12 @@ class AdaptiveLimiter:
             self._granted = 0
             rate, concurrency = self.rps, self._concurrency
         if first:
-            log.warning("rate limited by Dropbox: concurrency down to %d, request rate "
-                        "down to %.2f/s", concurrency, rate)
+            log.warning(
+                "rate limited by Dropbox: concurrency down to %d, request rate "
+                "down to %.2f/s",
+                concurrency,
+                rate,
+            )
 
     def on_success(self) -> None:
         raised = stepped = None
@@ -173,13 +187,17 @@ class AdaptiveLimiter:
             now = self.clock()
             elapsed = now - self._interval_start
             if elapsed > self.recover_after:
-                if (self.rps < self.max_rps
-                        and self._granted >= SATURATED * self.rps * elapsed):
+                if (
+                    self.rps < self.max_rps
+                    and self._granted >= SATURATED * self.rps * elapsed
+                ):
                     self.rps = min(self.max_rps, self.rps + RATE_STEP)
                     raised = self.rps
                 self._interval_start, self._granted = now, 0
-            if (self._concurrency < self.max_concurrency
-                    and now - self._last_429 > self.recover_after):
+            if (
+                self._concurrency < self.max_concurrency
+                and now - self._last_429 > self.recover_after
+            ):
                 self._concurrency += 1
                 stepped = self._concurrency
                 # Restart the clean-interval window so we step up gradually rather

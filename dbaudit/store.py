@@ -61,9 +61,15 @@ def _epoch(stamp: str | None) -> int | None:
     try:
         return calendar.timegm(
             (
-                int(stamp[0:4]), int(stamp[5:7]), int(stamp[8:10]),
-                int(stamp[11:13]), int(stamp[14:16]), int(stamp[17:19]),
-                0, 0, 0,
+                int(stamp[0:4]),
+                int(stamp[5:7]),
+                int(stamp[8:10]),
+                int(stamp[11:13]),
+                int(stamp[14:16]),
+                int(stamp[17:19]),
+                0,
+                0,
+                0,
             )
         )
     except (ValueError, IndexError):
@@ -86,7 +92,7 @@ def _extension(name: str) -> str:
     dot = name.rfind(".")
     if dot <= 0 or dot == len(name) - 1 or len(name) - dot - 1 > MAX_EXT_LEN:
         return ""
-    return name[dot + 1:].lower()
+    return name[dot + 1 :].lower()
 
 
 class Store:
@@ -121,7 +127,11 @@ class Store:
 
     def _caches(self):
         self.connect()
-        return self._local.dir_cache, self._local.principal_cache, self._local.time_cache
+        return (
+            self._local.dir_cache,
+            self._local.principal_cache,
+            self._local.time_cache,
+        )
 
     def _drop_caches(self) -> None:
         """Called after a rollback: cached ids may reference rows that no longer exist."""
@@ -146,16 +156,22 @@ class Store:
         """True once `init` has created the schema. Probing must not raise."""
         if not os.path.exists(self.path):
             return False
-        row = self.connect().execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
+            )
+            .fetchone()
+        )
         return row is not None
 
     def get_meta(self, key: str, default=None):
         try:
-            row = self.connect().execute(
-                "SELECT value FROM meta WHERE key=?", (key,)
-            ).fetchone()
+            row = (
+                self.connect()
+                .execute("SELECT value FROM meta WHERE key=?", (key,))
+                .fetchone()
+            )
         except sqlite3.OperationalError:
             return default  # schema not created yet
         return default if row is None else row[0]
@@ -181,10 +197,14 @@ class Store:
         return conn.execute("SELECT id FROM shards WHERE path=?", (path,)).fetchone()[0]
 
     def get_shard(self, shard_id: int) -> Shard | None:
-        row = self.connect().execute(
-            "SELECT id, path, depth, mode, state, cursor, pages, entries FROM shards WHERE id=?",
-            (shard_id,),
-        ).fetchone()
+        row = (
+            self.connect()
+            .execute(
+                "SELECT id, path, depth, mode, state, cursor, pages, entries FROM shards WHERE id=?",
+                (shard_id,),
+            )
+            .fetchone()
+        )
         return Shard(*row) if row else None
 
     def claim_shard(self, owner: str) -> Shard | None:
@@ -273,24 +293,36 @@ class Store:
         """
         # A shard that never committed a page has no rows to drop and no cursor, so it
         # is spared clear_cursor's scan of `files`, which has no index on shard_id.
-        listed = [row[0] for row in self.connect().execute(
-            "SELECT id FROM shards WHERE state='error' AND pages > 0").fetchall()]
+        listed = [
+            row[0]
+            for row in self.connect()
+            .execute("SELECT id FROM shards WHERE state='error' AND pages > 0")
+            .fetchall()
+        ]
         for shard_id in listed:
             self.clear_cursor(shard_id)
-        return self.connect().execute(
-            "UPDATE shards SET state='pending', owner=NULL, error=NULL, finished_at=NULL "
-            "WHERE state='error'"
-        ).rowcount
+        return (
+            self.connect()
+            .execute(
+                "UPDATE shards SET state='pending', owner=NULL, error=NULL, finished_at=NULL "
+                "WHERE state='error'"
+            )
+            .rowcount
+        )
 
     def pending_count(self) -> int:
-        return self.connect().execute(
-            "SELECT COUNT(*) FROM shards WHERE state='pending'"
-        ).fetchone()[0]
+        return (
+            self.connect()
+            .execute("SELECT COUNT(*) FROM shards WHERE state='pending'")
+            .fetchone()[0]
+        )
 
     def running_count(self) -> int:
-        return self.connect().execute(
-            "SELECT COUNT(*) FROM shards WHERE state='running'"
-        ).fetchone()[0]
+        return (
+            self.connect()
+            .execute("SELECT COUNT(*) FROM shards WHERE state='running'")
+            .fetchone()[0]
+        )
 
     def shard_count(self) -> int:
         return self.connect().execute("SELECT COUNT(*) FROM shards").fetchone()[0]
@@ -312,7 +344,9 @@ class Store:
         cache[account_id] = pid
         return pid
 
-    def ensure_dir(self, conn, path_display: str, cache, shard_id=None, created=None) -> int:
+    def ensure_dir(
+        self, conn, path_display: str, cache, shard_id=None, created=None
+    ) -> int:
         """Return the id of ``path_display``, creating it and any missing ancestors.
 
         Called with the parent path of every file, so it must be cheap; the cache
@@ -344,7 +378,9 @@ class Store:
         )
         if created is not None and conn.total_changes > before:
             created[0] += 1
-        dir_id = conn.execute("SELECT id FROM dirs WHERE path_lower=?", (key,)).fetchone()[0]
+        dir_id = conn.execute(
+            "SELECT id FROM dirs WHERE path_lower=?", (key,)
+        ).fetchone()[0]
         if len(cache) >= DIR_CACHE_LIMIT:
             cache.clear()
         cache[key] = dir_id
@@ -380,7 +416,9 @@ class Store:
                     # Rare, but seen with some shared-folder entries. Place it under
                     # the shard root rather than dropping it, and leave a trace.
                     name = entry.get("name") or "<unnamed>"
-                    path_display = f"{shard_path.rstrip('/')}/{name}" if shard_path else f"/{name}"
+                    path_display = (
+                        f"{shard_path.rstrip('/')}/{name}" if shard_path else f"/{name}"
+                    )
                     conn.execute(
                         "INSERT INTO api_events(ts, kind, detail) VALUES(?, 'no_path_display', ?)",
                         (time.time(), path_display[:500]),
@@ -388,7 +426,9 @@ class Store:
 
                 if tag == "file":
                     parent = path_display.rsplit("/", 1)[0] or "/"
-                    dir_id = self.ensure_dir(conn, parent, dir_cache, shard_id, created_dirs)
+                    dir_id = self.ensure_dir(
+                        conn, parent, dir_cache, shard_id, created_dirs
+                    )
                     size = int(entry["size"])
                     content_hash = entry.get("content_hash")
                     sharing = entry.get("sharing_info") or {}
@@ -402,9 +442,15 @@ class Store:
                             size,
                             self._hash_bytes(conn, content_hash, path_display),
                             entry.get("rev"),
-                            self._cached_epoch(entry.get("client_modified"), time_cache),
-                            self._cached_epoch(entry.get("server_modified"), time_cache),
-                            self._principal_id(conn, principal_cache, sharing.get("modified_by")),
+                            self._cached_epoch(
+                                entry.get("client_modified"), time_cache
+                            ),
+                            self._cached_epoch(
+                                entry.get("server_modified"), time_cache
+                            ),
+                            self._principal_id(
+                                conn, principal_cache, sharing.get("modified_by")
+                            ),
                             1 if entry.get("is_downloadable", True) else 0,
                             shard_id,
                         )
@@ -413,7 +459,9 @@ class Store:
                     stats.bytes += size
 
                 elif tag == "folder":
-                    dir_id = self.ensure_dir(conn, path_display, dir_cache, shard_id, created_dirs)
+                    dir_id = self.ensure_dir(
+                        conn, path_display, dir_cache, shard_id, created_dirs
+                    )
                     sharing = entry.get("sharing_info") or {}
                     shared_folder_id = entry.get("shared_folder_id")
                     conn.execute(
@@ -470,8 +518,16 @@ class Store:
                 "  finished_at=CASE WHEN ? THEN finished_at ELSE ? END "
                 "WHERE id=?",
                 (
-                    cursor, len(entries), stats.files, stats.dirs, stats.bytes, time.time(),
-                    1 if has_more else 0, 1 if has_more else 0, time.time(), shard_id,
+                    cursor,
+                    len(entries),
+                    stats.files,
+                    stats.dirs,
+                    stats.bytes,
+                    time.time(),
+                    1 if has_more else 0,
+                    1 if has_more else 0,
+                    time.time(),
+                    shard_id,
                 ),
             )
             conn.execute("COMMIT")
@@ -540,7 +596,18 @@ class Store:
             "       COALESCE(SUM(state='error'),0) FROM shards"
         ).fetchone()
         return dict(
-            zip(("files", "dirs", "bytes", "pages", "shards_done", "shards_total", "shards_error"), row)
+            zip(
+                (
+                    "files",
+                    "dirs",
+                    "bytes",
+                    "pages",
+                    "shards_done",
+                    "shards_total",
+                    "shards_error",
+                ),
+                row,
+            )
         )
 
     def build_indexes(self) -> None:

@@ -23,7 +23,8 @@ import pytest
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("DBAUDIT_LIVE") != "1",
-    reason="set DBAUDIT_LIVE=1 to run against the real Dropbox account")
+    reason="set DBAUDIT_LIVE=1 to run against the real Dropbox account",
+)
 
 FOLDER = "/TeamSpace/Public/Simulations/v01p0/FaultSZ03"
 NAME = "FaultSZ03_Source.tar"
@@ -31,7 +32,9 @@ PYTHON = sys.executable
 
 
 def dbaudit(*args, expect=0):
-    proc = subprocess.run([PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True)
+    proc = subprocess.run(
+        [PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True
+    )
     assert proc.returncode == expect, f"{args}\n{proc.stdout}\n{proc.stderr}"
     return proc.stdout + proc.stderr
 
@@ -43,7 +46,9 @@ def live(tmp_path_factory):
     db = str(root / "archives.db")
     dbaudit("archive", "register", "--db", db, "--folder", FOLDER, "--name", NAME)
     local = root / NAME
-    subprocess.run(["rclone", "copyto", f"dropbox:{FOLDER}/{NAME}", str(local)], check=True)
+    subprocess.run(
+        ["rclone", "copyto", f"dropbox:{FOLDER}/{NAME}", str(local)], check=True
+    )
     return db, local
 
 
@@ -56,15 +61,23 @@ def test_a_real_archive_matches_a_downloaded_copy(live):
         expected = sorted((m.name, m.size, m.offset) for m in reference)
     # Two empty listings compare equal, so the comparison below is only evidence if
     # the reference actually found members. This archive holds 109.
-    assert len(expected) > 100, f"reference listing looks wrong: {len(expected)} members"
+    assert len(expected) > 100, (
+        f"reference listing looks wrong: {len(expected)} members"
+    )
 
     from dbaudit.archive.store import ArchiveStore
 
     store = ArchiveStore(db)
     archive_id = store.get(NAME)["id"]
     rows = store.query_members(archive_id)
-    got = sorted(((f"{r['dir']}/{r['name']}" if r["dir"] else r["name"]),
-                  r["size"], r["hdr_offset"]) for r in rows)
+    got = sorted(
+        (
+            (f"{r['dir']}/{r['name']}" if r["dir"] else r["name"]),
+            r["size"],
+            r["hdr_offset"],
+        )
+        for r in rows
+    )
     assert got == expected
 
 
@@ -93,7 +106,8 @@ def test_our_content_hash_is_the_one_dropbox_computed(live):
     assert part.size == local.stat().st_size
     assert local.stat().st_size < DROPBOX_HASH_BLOCK, (
         "this archive now spans several hash blocks; tighten this test to pin the "
-        "block boundary as well as the construction")
+        "block boundary as well as the construction"
+    )
 
 
 def test_cat_extracts_a_member_matching_the_downloaded_copy(live, tmp_path):
@@ -113,15 +127,31 @@ def test_cat_extracts_a_member_matching_the_downloaded_copy(live, tmp_path):
 
     store = ArchiveStore(db)
     archive_id = store.get(NAME)["id"]
-    regular = [r for r in store.query_members(archive_id) if r["type"] in REGULAR_MEMBER_TYPES]
+    regular = [
+        r for r in store.query_members(archive_id) if r["type"] in REGULAR_MEMBER_TYPES
+    ]
     assert regular, "no regular member found to compare"
     largest = max(regular, key=lambda r: r["size"])
-    member_path = f"{largest['dir']}/{largest['name']}" if largest["dir"] else largest["name"]
+    member_path = (
+        f"{largest['dir']}/{largest['name']}" if largest["dir"] else largest["name"]
+    )
     assert largest["size"] > 1000, f"largest member is only {largest['size']} bytes"
 
     out = tmp_path / "member.bin"
-    dbaudit("archive", "cat", "--db", db, "--archive", NAME, "--member", member_path,
-            "--offset", str(largest["hdr_offset"]), "--out", str(out))
+    dbaudit(
+        "archive",
+        "cat",
+        "--db",
+        db,
+        "--archive",
+        NAME,
+        "--member",
+        member_path,
+        "--offset",
+        str(largest["hdr_offset"]),
+        "--out",
+        str(out),
+    )
 
     with tarfile.open(local, mode="r:") as reference:
         expected = reference.extractfile(member_path).read()

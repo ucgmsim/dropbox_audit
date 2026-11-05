@@ -38,7 +38,8 @@ TRAILING_LIMIT = 1 << 20
 #: fix, not a narrowing for its own sake.
 REGULAR_MEMBER_TYPES = frozenset(
     b.decode("ascii", "replace")
-    for b in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE))
+    for b in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.CONTTYPE)
+)
 
 #: tarfile's wording when a header sequence runs off the end of the data, as opposed to
 #: finding something there that is not a header. Stable across CPython versions; the tests
@@ -94,7 +95,7 @@ class UnsupportedArchive(Exception):
     """
 
 
-@dataclass(frozen=True, slots=True)        # a walk can hold tens of thousands at once
+@dataclass(frozen=True, slots=True)  # a walk can hold tens of thousands at once
 class Member:
     hdr_offset: int
     data_offset: int
@@ -113,26 +114,40 @@ class Member:
         path = info.name.rstrip("/") if info.isdir() else info.name
         head, _, tail = path.rpartition("/")
         return cls(
-            hdr_offset=info.offset, data_offset=info.offset_data, size=info.size,
-            type=info.type.decode("ascii", "replace") if isinstance(info.type, bytes)
+            hdr_offset=info.offset,
+            data_offset=info.offset_data,
+            size=info.size,
+            type=info.type.decode("ascii", "replace")
+            if isinstance(info.type, bytes)
             else str(info.type),
-            mode=info.mode or 0, mtime=int(info.mtime), uname=info.uname or "",
-            gname=info.gname or "", dir=head, name=tail or path,
-            linkname=info.linkname or "")
+            mode=info.mode or 0,
+            mtime=int(info.mtime),
+            uname=info.uname or "",
+            gname=info.gname or "",
+            dir=head,
+            name=tail or path,
+            linkname=info.linkname or "",
+        )
 
 
 @dataclass(frozen=True)
 class WalkResult:
-    state: str              # complete | truncated | corrupt | crossed | stopped
-                            # (and, inside walk(), pax -- raised as UnsupportedArchive --
-                            # and rescued, which is not an outcome)
+    state: str  # complete | truncated | corrupt | crossed | stopped
+    # (and, inside walk(), pax -- raised as UnsupportedArchive --
+    # and rescued, which is not an outcome)
     end_offset: int
     members: int
     detail: str = ""
 
 
-def walk(concat, start_offset: int, commit, batch_size: int = 2000,
-         stop_at: int | None = None, should_stop=None) -> WalkResult:
+def walk(
+    concat,
+    start_offset: int,
+    commit,
+    batch_size: int = 2000,
+    stop_at: int | None = None,
+    should_stop=None,
+) -> WalkResult:
     """Walk from ``start_offset``, calling ``commit(members, next_offset)`` per batch.
 
     No outcome is believed on one read, except a stop. The members served by the walk's
@@ -192,24 +207,37 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     # A verdict is its state, the offset it names and where the walk stopped reading
     # headers -- not its wording -- and the first of two agreeing readings is reported.
     position, seen, rescued, disagreements, stalled = start_offset, 0, [], 0, 0
-    prior, versions = None, {}      # the pass being read again, and how it read each place
+    prior, versions = None, {}  # the pass being read again, and how it read each place
     while True:
-        this = _walk_chain(concat, position, commit, batch_size, stop_at, should_stop,
-                           seen, rescued, versions)
+        this = _walk_chain(
+            concat,
+            position,
+            commit,
+            batch_size,
+            stop_at,
+            should_stop,
+            seen,
+            rescued,
+            versions,
+        )
         seen, result = this.seen, this.result
         if result.state == "stopped":
             break
         if prior is not None:
             if "rescued" not in (prior.result.state, result.state):
                 if this.reached() == prior.reached():
-                    if this.window:         # else it read none: it ended where it began
-                        _commit_in_batches(commit, [(b, m) for b, _, m in this.window],
-                                           this.vpos, batch_size)
+                    if this.window:  # else it read none: it ended where it began
+                        _commit_in_batches(
+                            commit,
+                            [(b, m) for b, _, m in this.window],
+                            this.vpos,
+                            batch_size,
+                        )
                     result = replace(prior.result, members=seen)
                     break
                 disagreements += 1
                 if not this.diverged:
-                    rescued.append(this.vpos)   # the two readings parted here
+                    rescued.append(this.vpos)  # the two readings parted here
             elif this.diverged:
                 # No two verdicts to compare, but it went against the pass before it all
                 # the same. Uncounted, a header that reads one way on one pass and the
@@ -225,13 +253,17 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
                 stalled += 1
             if disagreements > REREAD_LIMIT or stalled > REREAD_LIMIT:
                 where = ", ".join(str(o) for o in dict.fromkeys(rescued))
-                last = (f"was cut short at {result.end_offset}, where a fresh read "
-                        f"contradicted it" if result.state == "rescued" else
-                        f"said {result.state} at {result.end_offset} and was never "
-                        f"confirmed")
+                last = (
+                    f"was cut short at {result.end_offset}, where a fresh read "
+                    f"contradicted it"
+                    if result.state == "rescued"
+                    else f"said {result.state} at {result.end_offset} and was never "
+                    f"confirmed"
+                )
                 raise UnsettledRead(
-                    f"reads kept contradicting each other at {where}; the last pass {last}")
-        seen -= len(this.window)            # read again, and counted, by the next pass
+                    f"reads kept contradicting each other at {where}; the last pass {last}"
+                )
+        seen -= len(this.window)  # read again, and counted, by the next pass
         # The next pass compares with how this one read each place, and commits members of
         # its own: this one's, tens of thousands in a dense run, are not kept for it.
         versions, this.window = this.versions(), []
@@ -241,8 +273,9 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
     if rescued:
         where = ", ".join(str(o) for o in dict.fromkeys(rescued))
         note = f"re-read at {where}: a read there was contradicted by the next"
-        result = replace(result, detail=f"{result.detail}; {note}" if result.detail
-                         else note)
+        result = replace(
+            result, detail=f"{result.detail}; {note}" if result.detail else note
+        )
     if result.state == "pax":
         raise UnsupportedArchive(result.detail)
     return result
@@ -251,13 +284,14 @@ def walk(concat, start_offset: int, commit, batch_size: int = 2000,
 @dataclass
 class _Pass:
     """One pass along the chain, as the pass that reads it again needs it."""
+
     result: WalkResult
-    held_from: int          # where its held-back members begin: the next pass starts there
-    window: list            # (before, key, member) of each held-back member, in order
-    vpos: int               # where the header sequence it did not record begins
-    version: object         # what it read at vpos: a key, None for no member, or _NOT_READ
+    held_from: int  # where its held-back members begin: the next pass starts there
+    window: list  # (before, key, member) of each held-back member, in order
+    vpos: int  # where the header sequence it did not record begins
+    version: object  # what it read at vpos: a key, None for no member, or _NOT_READ
     seen: int
-    diverged: bool          # a tie-break took it off the path of the pass before it
+    diverged: bool  # a tie-break took it off the path of the pass before it
 
     def reached(self):
         return self.result.state, self.result.end_offset, self.vpos
@@ -284,12 +318,23 @@ def _commit_in_batches(commit, entries, end: int, batch_size: int) -> None:
     step = max(batch_size, 1)
     for first in range(0, max(len(entries), 1), step):
         rest = first + step
-        commit([member for _, member in entries[first:rest]],
-               entries[rest][0] if rest < len(entries) else end)
+        commit(
+            [member for _, member in entries[first:rest]],
+            entries[rest][0] if rest < len(entries) else end,
+        )
 
 
-def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, should_stop,
-                seen: int, rescued: list, versions: dict):
+def _walk_chain(
+    concat,
+    start_offset: int,
+    commit,
+    batch_size: int,
+    stop_at,
+    should_stop,
+    seen: int,
+    rescued: list,
+    versions: dict,
+):
     """One pass of the chain from ``start_offset``; returns its `_Pass`.
 
     Each member is held back until the walk has read on through CONFIRM_FILLS more
@@ -307,10 +352,10 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
     prior reading exists, the comparison has already checked them.)
     """
     total = concat.archive.total_size
-    window = deque()                # (before, fetch stamp, key, member), held back
-    batch = []                      # (before, member) out of the window, not yet committed
+    window = deque()  # (before, fetch stamp, key, member), held back
+    batch = []  # (before, member) out of the window, not yet committed
     diverged = False
-    rereads = 0                     # fetches that only re-read one place: not the walk's
+    rereads = 0  # fetches that only re-read one place: not the walk's
 
     def held_from(default):
         return window[0][0] if window else default
@@ -320,8 +365,15 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
         says what that means, and is asked only once the batch is committed."""
         start = held_from(start_offset)
         _commit_in_batches(commit, batch, start, batch_size)
-        return _Pass(verdict(seen), start, [(b, k, m) for b, _, k, m in window], vpos,
-                     version, seen, diverged)
+        return _Pass(
+            verdict(seen),
+            start,
+            [(b, k, m) for b, _, k, m in window],
+            vpos,
+            version,
+            seen,
+            diverged,
+        )
 
     def found_nothing(before, how):
         """The verdict where no member begins at ``before``, as a walk arriving there
@@ -330,7 +382,9 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
             return lambda n: _classify_end(concat, before, n)
         if how in _RAN_OUT:
             return lambda n: WalkResult("truncated", total, n, how)
-        return lambda n: WalkResult("corrupt", before, n, f"{how} after the header at {before}")
+        return lambda n: WalkResult(
+            "corrupt", before, n, f"{how} after the header at {before}"
+        )
 
     # How far the walk has read, in fetches: the stamp each header gets, and ``reach``, where
     # what the fetches counted so far hold ends. A header sequence the walk's own fetches
@@ -344,8 +398,9 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
         archive = tarfile.open(fileobj=concat, mode="r:")
     except tarfile.ReadError as exc:
         detail = str(exc)
-        return finish(start_offset, None,
-                      lambda n: _classify_end(concat, start_offset, n, detail))
+        return finish(
+            start_offset, None, lambda n: _classify_end(concat, start_offset, n, detail)
+        )
 
     # Where the next member's header sequence begins. Not always its own offset: tarfile
     # reports a member after a `g` header at the member's header, past the `g`.
@@ -363,10 +418,10 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
         if info is None:
             break
         new, own = concat.fills - rereads - own, concat.fills - rereads
-        if new:                             # fetches of the walk's own served this one
-            if info.offset_data > reach:    # not only fetched again
+        if new:  # fetches of the walk's own served this one
+            if info.offset_data > reach:  # not only fetched again
                 stamp, reach = stamp + new, concat.cached()[1]
-        elif before >= reach:               # read on, past it, out of a fetch not counted
+        elif before >= reach:  # read on, past it, out of a fetch not counted
             start, end = concat.cached()
             if stamp:
                 # A fetch made mid-pass -- a re-read's, or one that only fetched again --
@@ -386,7 +441,7 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
         if isinstance(info, _NoMember):
             return finish(before, None, found_nothing(before, info.how))
         key = _key(info, archive.offset)
-        theirs = versions.pop(before, _NOT_READ)    # compared once: let go of it
+        theirs = versions.pop(before, _NOT_READ)  # compared once: let go of it
         if theirs is not _NOT_READ and theirs != key and not info.pax_headers:
             fetched = concat.fills
             try:
@@ -412,10 +467,12 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
             # Two reads agree an `x` or `g` extended header applies to this member. Keep
             # what was walked before it, with the cursor where its headers begin: a
             # resume from past a `g` would walk on with no global header in force.
-            message = (f"a pax extended header applies to the member at {before} "
-                       f"({info.name!r}): this is a pax-format archive, which dbaudit does "
-                       f"not index -- its names and sizes can sit outside the checksummed "
-                       f"header")
+            message = (
+                f"a pax extended header applies to the member at {before} "
+                f"({info.name!r}): this is a pax-format archive, which dbaudit does "
+                f"not index -- its names and sizes can sit outside the checksummed "
+                f"header"
+            )
             return finish(before, key, lambda n: WalkResult("pax", before, n, message))
         window.append((before, stamp, key, Member.from_tarinfo(info)))
         while window[0][1] <= stamp - CONFIRM_FILLS:
@@ -423,15 +480,22 @@ def _walk_chain(concat, start_offset: int, commit, batch_size: int, stop_at, sho
             batch.append((gone, member))
         seen += 1
         before = archive.offset
-        archive.members.clear()             # the walk is a stream; do not accumulate
+        archive.members.clear()  # the walk is a stream; do not accumulate
         if stop_at is not None and before >= stop_at:
             return finish(before, _NOT_READ, lambda n: WalkResult("crossed", before, n))
         if should_stop is not None and should_stop():
             resume = held_from(before)
             _commit_in_batches(commit, batch, resume, batch_size)
             kept = seen - len(window)
-            return _Pass(WalkResult("stopped", resume, kept), resume, [], before,
-                         _NOT_READ, kept, diverged)
+            return _Pass(
+                WalkResult("stopped", resume, kept),
+                resume,
+                [],
+                before,
+                _NOT_READ,
+                kept,
+                diverged,
+            )
         if len(batch) >= batch_size:
             _commit_in_batches(commit, batch, held_from(before), batch_size)
             batch = []
@@ -475,8 +539,9 @@ def _settled(concat, archive, info, before, rescued):
             previous = None
             continue
         member, after = fresh
-        believable = (not member.pax_headers
-                      and _long_fields_agree(concat, member, encoding, errors))
+        believable = not member.pax_headers and _long_fields_agree(
+            concat, member, encoding, errors
+        )
         if believable or _identity(member) == previous:
             if _identity(member) != _identity(info):
                 rescued.append(before)
@@ -489,12 +554,14 @@ def _settled(concat, archive, info, before, rescued):
         previous = _identity(member)
     raise UnsettledRead(
         f"the member at {before} read differently every time, and never without a long "
-        f"name, link target or pax header that no second read confirmed")
+        f"name, link target or pax header that no second read confirmed"
+    )
 
 
 @dataclass(frozen=True)
 class _NoMember:
     """Reads agree no member begins here; ``how`` is as `_read_here` reports it."""
+
     how: str | None
 
 
@@ -503,20 +570,30 @@ def _long_fields_agree(concat, info, encoding, errors) -> bool:
     after their blocks says. True for a member with no such blocks. The header was
     read a moment ago, so it is still in the window: checking costs no request."""
     if info.offset_data - info.offset <= BLOCK or info.issparse():
-        return True                 # one header; or sparse maps, not names, before it
+        return True  # one header; or sparse maps, not names, before it
     here = concat.tell()
     concat.seek(info.offset_data - BLOCK)
     header = concat.read(BLOCK)
     concat.seek(here)
     name_field = header[0:100].split(b"\0", 1)[0].rstrip(b"/")
     link_field = header[157:257].split(b"\0", 1)[0]
-    return (info.name.encode(encoding, errors).startswith(name_field)
-            and info.linkname.encode(encoding, errors).startswith(link_field))
+    return info.name.encode(encoding, errors).startswith(
+        name_field
+    ) and info.linkname.encode(encoding, errors).startswith(link_field)
 
 
 def _identity(info):
-    return (info.name, info.linkname, info.size, info.type, info.mode, info.mtime,
-            info.uname, info.gname, info.offset_data)
+    return (
+        info.name,
+        info.linkname,
+        info.size,
+        info.type,
+        info.mode,
+        info.mtime,
+        info.uname,
+        info.gname,
+        info.offset_data,
+    )
 
 
 def _read_here(concat, offset, encoding=tarfile.ENCODING, errors="surrogateescape"):
@@ -534,7 +611,7 @@ def _read_here(concat, offset, encoding=tarfile.ENCODING, errors="surrogateescap
         info = one.firstmember
         return None if info is None else (info, one.offset)
     finally:
-        one.close()                 # the ConcatFile is the caller's; this leaves it open
+        one.close()  # the ConcatFile is the caller's; this leaves it open
 
 
 def _read_one(concat, offset, encoding=tarfile.ENCODING, errors="surrogateescape"):
@@ -563,7 +640,8 @@ def _tie_break(concat, archive, before, mine, theirs, rescued):
             return found
     raise UnsettledRead(
         f"the header at {before} read differently every time, and no two reads of it "
-        f"agreed")
+        f"agreed"
+    )
 
 
 def read_member(concat, offset) -> Member | None:
@@ -585,8 +663,12 @@ def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
     total = concat.archive.total_size
     remainder = total - end
     if remainder < TERMINATOR:
-        return WalkResult("truncated", end, seen,
-                          detail or f"{remainder} bytes left, need {TERMINATOR}")
+        return WalkResult(
+            "truncated",
+            end,
+            seen,
+            detail or f"{remainder} bytes left, need {TERMINATOR}",
+        )
     concat.seek(end)
     probe = concat.read(TERMINATOR)
     if any(probe):
@@ -596,19 +678,29 @@ def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
         what = detail or "not a header and not a terminator"
         return WalkResult("corrupt", end, seen, f"{what} at {end}: {probe.hex()}")
     if remainder > TRAILING_LIMIT:
-        return WalkResult("corrupt", end, seen,
-                          f"terminator at {end} with {remainder} bytes after it")
+        return WalkResult(
+            "corrupt", end, seen, f"terminator at {end} with {remainder} bytes after it"
+        )
     concat.seek(end)
     tail = concat.read(remainder)
     bad = _first_non_zero(tail)
     if bad is not None:
-        return WalkResult("corrupt", end, seen,
-                          f"non-zero byte at {end + bad}, after the terminator at {end}")
+        return WalkResult(
+            "corrupt",
+            end,
+            seen,
+            f"non-zero byte at {end + bad}, after the terminator at {end}",
+        )
     return WalkResult("complete", end, seen, detail)
 
 
-def find_chain_start(concat, from_offset: int, scan_read: int = 16 << 20,
-                     limit: int | None = None, should_stop=None) -> int | None:
+def find_chain_start(
+    concat,
+    from_offset: int,
+    scan_read: int = 16 << 20,
+    limit: int | None = None,
+    should_stop=None,
+) -> int | None:
     """The first checksum-valid header at or after ``from_offset``.
 
     A part boundary falls wherever split(1) put it, which is almost always inside a
@@ -628,7 +720,9 @@ def find_chain_start(concat, from_offset: int, scan_read: int = 16 << 20,
     holds, the scan raises `ScanStopped`.
     """
     total = concat.archive.total_size
-    offset = -(-from_offset // BLOCK) * BLOCK   # round up: a header only starts on a block
+    offset = (
+        -(-from_offset // BLOCK) * BLOCK
+    )  # round up: a header only starts on a block
     scanned = 0
     while offset < total and (limit is None or scanned < limit):
         if should_stop is not None and should_stop():
@@ -641,7 +735,7 @@ def find_chain_start(concat, from_offset: int, scan_read: int = 16 << 20,
         if not buf:
             return None
         for position in range(0, len(buf) - BLOCK + 1, BLOCK):
-            block = buf[position:position + BLOCK]
+            block = buf[position : position + BLOCK]
             if block[257:262] != b"ustar":
                 continue
             try:
