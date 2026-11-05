@@ -58,7 +58,7 @@ class ArchiveSet:
         return sum(p.size for p in self.parts)
 
     @classmethod
-    def from_entries(cls, entries: list[dict], base_name: str) -> "ArchiveSet":
+    def from_entries(cls, entries: list[dict], base_name: str) -> ArchiveSet:
         """Order Dropbox (or local) entries into a gapless part sequence.
 
         ``base_name`` is the archive's own name, e.g. ``v01p0_incomplete.tar``. Parts are

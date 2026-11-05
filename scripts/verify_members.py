@@ -16,7 +16,10 @@ checks the fresh read against the checksummed header after those blocks.
 
 from __future__ import annotations
 
-import argparse, os, sqlite3, sys
+import argparse
+import os
+import sqlite3
+import sys
 
 for _root in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.getcwd()):
     if os.path.isdir(os.path.join(_root, "dbaudit")):

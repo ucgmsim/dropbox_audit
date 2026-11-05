@@ -5,7 +5,6 @@ import sqlite3
 
 import pytest
 
-from dbaudit.archive.store import ArchiveStore
 from dbaudit.kinds import (
     BY_NAME,
     LF_SPLIT,
@@ -14,7 +13,6 @@ from dbaudit.kinds import (
     YEAR,
     KindsError,
     Rules,
-    Tally,
     archive_index,
     tally,
     walk,

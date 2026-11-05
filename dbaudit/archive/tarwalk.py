@@ -110,7 +110,7 @@ class Member:
     linkname: str
 
     @classmethod
-    def from_tarinfo(cls, info) -> "Member":
+    def from_tarinfo(cls, info) -> Member:
         path = info.name.rstrip("/") if info.isdir() else info.name
         head, _, tail = path.rpartition("/")
         return cls(

@@ -12,7 +12,13 @@ duplicates, and the report says so. Windows that differ settle it outright.
 
 from __future__ import annotations
 
-import argparse, collections, hashlib, os, sqlite3, sys, threading
+import argparse
+import collections
+import hashlib
+import os
+import sqlite3
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 for _root in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.getcwd()):

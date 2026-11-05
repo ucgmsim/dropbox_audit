@@ -34,7 +34,7 @@ def _parse_rfc3339(text: str) -> dt.datetime:
     s = _FRACTIONAL_SECONDS.sub(lambda m: "." + m.group(1)[:6], s, count=1)
     parsed = dt.datetime.fromisoformat(s)
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        parsed = parsed.replace(tzinfo=dt.UTC)
     return parsed
 
 
@@ -143,9 +143,7 @@ class TokenProvider:
         if not expiry:
             return float("inf")  # non-expiring legacy token
         try:
-            return (
-                _parse_rfc3339(expiry) - dt.datetime.now(dt.timezone.utc)
-            ).total_seconds()
+            return (_parse_rfc3339(expiry) - dt.datetime.now(dt.UTC)).total_seconds()
         except ValueError:
             return float("-inf")  # unparseable: treat as expired so we refresh
 

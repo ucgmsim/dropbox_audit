@@ -2287,7 +2287,8 @@ def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(tmp_path, capsys):
     and says how to finish the index, rather than extract it with exit 0."""
     import argparse
     import threading
-    import dbaudit.cli as cli
+
+    from dbaudit import cli
 
     old, new = _random(50, 9_000), _random(51, 9_000)
     inner = build_tar([("run/x.bin", old), ("run/y.bin", _random(52, 4_000))])

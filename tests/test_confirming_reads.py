@@ -11,8 +11,8 @@ import io
 import random
 import tarfile
 
-import dbaudit.archive.tarwalk as tarwalk
-import dbaudit.cli as cli
+from dbaudit import cli
+from dbaudit.archive import tarwalk
 from dbaudit.archive.reader import ConcatFile, LocalRangeReader
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import walk

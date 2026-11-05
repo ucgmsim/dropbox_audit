@@ -35,13 +35,15 @@ import zlib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, NoReturn
 
 import typer
 
+from . import kinds, tree
+from . import report as reports
 from .api import (
     ApiError,
     AuthExpired,
@@ -50,6 +52,7 @@ from .api import (
     RateLimited,
     TransientError,
 )
+from .archive import report as archive_report
 from .archive.candidates import find_candidates
 from .archive.parts import ArchiveSet, ArchiveSetError
 from .archive.reader import (
@@ -61,7 +64,6 @@ from .archive.reader import (
     ReaderError,
     ReadStopped,
 )
-from .archive import report as archive_report
 from .archive.runner import Done, Job, Runner
 from .archive.store import ArchiveStore
 from .archive.tarwalk import (
@@ -83,9 +85,6 @@ from .lock import InstanceLock, LockHeld
 from .store import Store
 from .units import human_bytes, human_duration
 from .verify import verify_subtree
-from . import kinds
-from . import report as reports
-from . import tree
 
 log = logging.getLogger("dbaudit")
 
@@ -861,7 +860,7 @@ def cmd_kinds(args) -> int:
         about = {
             "root": root,
             "subtree": found[1] if found else "",
-            "listed": datetime.fromtimestamp(listed, timezone.utc).isoformat(),
+            "listed": datetime.fromtimestamp(listed, UTC).isoformat(),
             "finished": "true" if finished else "false",
             "audit_db": args.db,
             "archive_db": args.archive_db or "",

@@ -1,5 +1,4 @@
 import io
-import random
 import tarfile
 
 import pytest
@@ -2619,7 +2618,7 @@ def test_a_second_reading_is_not_handed_the_members_the_first_one_held_back(
     thousands, and every chain in the pool keeps them while it reads them again."""
     import gc
 
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     data = build_tar(_dense(where="run/held"))
     archive = write_parts(tmp_path, data, part_size=len(data))
@@ -2658,7 +2657,7 @@ def test_a_second_reading_lets_go_of_the_first_as_it_passes_it(tmp_path, monkeyp
     """Review 7's B3. Each header sequence is compared once, so the second reading drops
     the first reading's version of each as it passes it: the two readings' held-back
     windows are never both held whole."""
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     data = build_tar(_dense())
     archive = write_parts(tmp_path, data, part_size=len(data))
@@ -2721,7 +2720,7 @@ def test_a_run_of_members_each_read_twice_still_commits_as_it_goes(
     verdict -- a stop or a crash walked the run again from its start -- and the verdict's
     second reading read every member of it twice again. How far the walk has read decides
     what it holds back, whichever fetch the headers came out of."""
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     count = 2000
     data = _uncopied_long_names(count)
@@ -2755,7 +2754,7 @@ def test_a_server_that_lies_about_most_headers_is_given_up_on(tmp_path, monkeypa
     having read every member it held back again: 601 passes and 181,499 requests for a
     0.9 MiB archive. Rescues one after another inside one held-back window, with nothing
     committed in between, are a server lying too often to walk through, and count."""
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     data = build_tar([(f"d/f{i:06d}", b"z" * 1000) for i in range(200)])
     offsets = _header_offsets(data)
@@ -2796,7 +2795,7 @@ def test_a_header_sequence_two_fetches_serve_counts_as_two(tmp_path, monkeypatch
     """A long name's blocks and the header after them can take two fetches of a small
     window, and both are the walk's own. Counted as one, the walk holds back a fetch more
     than it says -- and reads it again, at a request's cost, before every verdict."""
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     members = [
         ("run/a.bin", b"a" * 100),
@@ -3017,7 +3016,7 @@ def test_a_header_sequence_that_runs_on_into_the_next_fetch_counts_it(
     that is the walk reading on, and counts. Judged by where it begins, it would be held
     back only as long as the members before it -- though the fetch that served the rest of
     it may be the bad one."""
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     members = [
         ("run/a.bin", b""),
@@ -3058,7 +3057,7 @@ def test_a_header_where_what_was_counted_ends_lies_past_it(tmp_path, monkeypatch
     fetches, a run of members two to a window then counts one every two members, as the
     walk's own fetches would; taken as inside, it counts one every three, holding back half
     as much again -- and reading it all again before the verdict."""
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     count, window = 42, 4096  # each member 2,048 bytes: two to a window
     data = _uncopied_long_names(count)
@@ -3154,7 +3153,7 @@ def test_a_walk_on_from_a_chain_start_scan_counts_from_where_the_scan_ends(
     fetches after it went uncounted for up to that length, and nothing the scan served
     left what is held back before the verdict. The scan's read holds what it holds; the
     walk's own fetches past it count."""
-    import dbaudit.archive.tarwalk as tarwalk
+    from dbaudit.archive import tarwalk
 
     window, scan, scan_from = 4096, 65536, 1024
     members = [("run/big.bin", b"\1" * 40_000)] + [

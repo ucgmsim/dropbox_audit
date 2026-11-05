@@ -1,6 +1,6 @@
 import pytest
 
-import dbaudit.cli as cli
+from dbaudit import cli
 from dbaudit.archive.reader import WINDOW_MAX, WINDOW_MIN
 from dbaudit.cli import human_bytes, human_duration, main
 from dbaudit.store import Store

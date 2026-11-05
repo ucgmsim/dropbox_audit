@@ -19,7 +19,14 @@ whoever owns the data.
 
 from __future__ import annotations
 
-import argparse, os, sqlite3, struct, sys, tarfile, threading, time
+import argparse
+import os
+import sqlite3
+import struct
+import sys
+import tarfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 for _root in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.getcwd()):
@@ -35,7 +42,7 @@ from dbaudit.archive.reader import (
     DropboxRangeReader,
     LocalRangeReader,
 )
-from dbaudit.archive.tarwalk import BLOCK, UnsettledRead, find_chain_start, walk
+from dbaudit.archive.tarwalk import BLOCK, UnsettledRead, walk
 from dbaudit.auth import TokenProvider
 from dbaudit.limiter import AdaptiveLimiter
 

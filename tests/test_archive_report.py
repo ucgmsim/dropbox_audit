@@ -13,7 +13,7 @@ completeness warning).
 import csv
 import tarfile
 import time as time_mod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dbaudit.archive.report import summary, write_csv
 from dbaudit.archive.store import ArchiveStore
@@ -256,8 +256,8 @@ def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(tmp_path, monkeyp
     against the UTC-computed date catches it even on a test machine whose own local
     zone happens to already be UTC.
     """
-    earliest_ts = int(datetime(2001, 9, 9, 23, 30, 0, tzinfo=timezone.utc).timestamp())
-    latest_ts = int(datetime(2020, 1, 1, 23, 30, 0, tzinfo=timezone.utc).timestamp())
+    earliest_ts = int(datetime(2001, 9, 9, 23, 30, 0, tzinfo=UTC).timestamp())
+    latest_ts = int(datetime(2020, 1, 1, 23, 30, 0, tzinfo=UTC).timestamp())
     members = [
         ("run/a.bin", b"a", {"mtime": earliest_ts}),
         ("run/b.bin", b"b", {"mtime": latest_ts}),
@@ -273,8 +273,8 @@ def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(tmp_path, monkeyp
         time_mod.tzset()
 
     expected = (
-        datetime.fromtimestamp(earliest_ts, tz=timezone.utc).date().isoformat(),
-        datetime.fromtimestamp(latest_ts, tz=timezone.utc).date().isoformat(),
+        datetime.fromtimestamp(earliest_ts, tz=UTC).date().isoformat(),
+        datetime.fromtimestamp(latest_ts, tz=UTC).date().isoformat(),
     )
     assert result["mtime_span"] == expected
 

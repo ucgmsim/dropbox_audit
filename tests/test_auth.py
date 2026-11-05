@@ -120,7 +120,7 @@ def test_expiry_within_refresh_margin_is_treated_as_stale():
     """A token expiring in 60s must be refreshed before a long page fetch starts."""
     import datetime as dt
 
-    soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60)).strftime(
+    soon = (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     stale = json.dumps(
@@ -151,7 +151,7 @@ def test_refresh_is_not_attempted_on_every_call():
     """
     import datetime as dt
 
-    soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=300)).strftime(
+    soon = (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=300)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     stale = json.dumps(

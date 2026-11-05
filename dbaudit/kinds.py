@@ -512,7 +512,7 @@ def _months():
     """A function giving a Unix time's UTC month as "YYYY-MM", remembered day by day, or
     None for a time no calendar holds."""
 
-    @functools.lru_cache(maxsize=None)
+    @functools.cache
     def of_day(day: int) -> str | None:
         try:
             return time.strftime("%Y-%m", time.gmtime(day * 86400))

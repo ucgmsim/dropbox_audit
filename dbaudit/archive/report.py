@@ -40,7 +40,7 @@ crash. Three design choices follow directly from that:
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dbaudit.store import _extension
@@ -62,7 +62,7 @@ def _utc(ts: int) -> datetime:
     failure) and never `fromtimestamp(ts)` without a zone (silently the *process's*
     local zone -- correct on a UTC machine, silently wrong on any other).
     """
-    return datetime.fromtimestamp(ts, tz=timezone.utc)
+    return datetime.fromtimestamp(ts, tz=UTC)
 
 
 def _iso(ts: int) -> str:
@@ -250,53 +250,50 @@ def write_csv(store, archive_id, out_dir) -> list[str]:
     by_extension: dict = {}
 
     manifest_path = out_dir / "manifest.csv"
-    with store.read_transaction():
-        with open(manifest_path, "w", newline="") as handle:
-            writer = csv.writer(handle)
+    with store.read_transaction(), open(manifest_path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "path",
+                "size",
+                "mtime",
+                "mode",
+                "uname",
+                "gname",
+                "type",
+                "hdr_offset",
+                "data_offset",
+            ]
+        )
+        for member in store.stream(
+            "SELECT dir, name, size, mtime, mode, uname, gname, type, hdr_offset, "
+            "data_offset FROM members WHERE archive_id=? ORDER BY hdr_offset",
+            (archive_id,),
+        ):
+            path = (
+                f"{member['dir']}/{member['name']}" if member["dir"] else member["name"]
+            )
+            mtime = _iso(member["mtime"]) if member["mtime"] is not None else ""
+            mode = f"{(member['mode'] or 0):04o}"
             writer.writerow(
                 [
-                    "path",
-                    "size",
-                    "mtime",
-                    "mode",
-                    "uname",
-                    "gname",
-                    "type",
-                    "hdr_offset",
-                    "data_offset",
+                    path,
+                    member["size"],
+                    mtime,
+                    mode,
+                    member["uname"] or "",
+                    member["gname"] or "",
+                    member["type"],
+                    member["hdr_offset"],
+                    member["data_offset"],
                 ]
             )
-            for member in store.stream(
-                "SELECT dir, name, size, mtime, mode, uname, gname, type, hdr_offset, "
-                "data_offset FROM members WHERE archive_id=? ORDER BY hdr_offset",
-                (archive_id,),
-            ):
-                path = (
-                    f"{member['dir']}/{member['name']}"
-                    if member["dir"]
-                    else member["name"]
-                )
-                mtime = _iso(member["mtime"]) if member["mtime"] is not None else ""
-                mode = f"{(member['mode'] or 0):04o}"
-                writer.writerow(
-                    [
-                        path,
-                        member["size"],
-                        mtime,
-                        mode,
-                        member["uname"] or "",
-                        member["gname"] or "",
-                        member["type"],
-                        member["hdr_offset"],
-                        member["data_offset"],
-                    ]
-                )
-                _bump(by_dir, member["dir"] or ROOT_LABEL, member["size"])
-                _bump(
-                    by_extension,
-                    _extension(member["name"]) or NO_EXTENSION,
-                    member["size"],
-                )
+            _bump(by_dir, member["dir"] or ROOT_LABEL, member["size"])
+            _bump(
+                by_extension,
+                _extension(member["name"]) or NO_EXTENSION,
+                member["size"],
+            )
     written.append(str(manifest_path))
 
     dir_path = out_dir / "by_dir.csv"

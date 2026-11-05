@@ -8,17 +8,18 @@ monkeypatched `build_lister`, and where such a test has to read bytes it substit
 import bz2
 import contextlib
 import gzip
-import tarfile
 import io
 import logging
 import lzma
 import os
 import random
 import signal
+import tarfile
 import threading
 
 import pytest
 
+from dbaudit import cli
 from dbaudit.api import AuthExpired, Page, RateLimited, TransientError
 from dbaudit.archive.reader import (
     DropboxRangeReader,
@@ -28,7 +29,6 @@ from dbaudit.archive.reader import (
 )
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
-from dbaudit import cli
 from dbaudit.cli import LISTING_ATTEMPTS, main
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import build_tar, write_parts

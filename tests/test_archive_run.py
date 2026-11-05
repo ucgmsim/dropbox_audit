@@ -26,7 +26,6 @@ from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.auth import AuthError
 from dbaudit.cli import LISTING_ATTEMPTS, _run_limiter, main
-from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import World, build_tar, members
 

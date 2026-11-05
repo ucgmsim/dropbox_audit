@@ -20,7 +20,9 @@ from .parts import ArchiveSet, ArchiveSetError
 PART = re.compile(r"^(?P<base>.+\.tar)\.(?:part[-_]?)?(?P<suffix>[a-z]{2,}|\d{2,})$")
 # A compressed tar cannot be walked header by header, and `gz`, `xz` or `zst` would
 # otherwise parse as a part suffix.
-COMPRESSED = re.compile(r"\.(tgz|tar\.(gz|bz2|xz|zst|zstd|lz4|lzma|lz|z|br))$", re.I)
+COMPRESSED = re.compile(
+    r"\.(tgz|tar\.(gz|bz2|xz|zst|zstd|lz4|lzma|lz|z|br))$", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
