@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType, SimpleNamespace
-from typing import Annotated, NoReturn
+from typing import Annotated, NoReturn, Protocol
 
 import typer
 
@@ -1274,13 +1274,20 @@ LISTING_ATTEMPTS = 8
 LISTING_BACKOFF = 2.0
 
 
+class TokenCache(Protocol):
+    """A token holder that can drop its cached token, as `TokenProvider` does."""
+
+    def invalidate(self) -> None:
+        """Drop the cached token, so the next request fetches a fresh one."""
+
+
 def _listed(
     lister: Lister,
     limiter: AdaptiveLimiter,
     folder: str,
     name: str,
     stop: threading.Event | None = None,
-    tokens: TokenProvider | None = None,
+    tokens: TokenCache | None = None,
 ) -> list[dict[str, object]] | None:
     """Run `_folder_entries` through the shared limiter, the way the crawl lists.
 
@@ -1301,8 +1308,8 @@ def _listed(
         The prefix a file's name must start with.
     stop : threading.Event or None
         Set to abandon the listing; None never stops.
-    tokens : TokenProvider or None
-        The provider whose token is dropped after a 401.
+    tokens : TokenCache or None
+        The holder whose token is dropped after a 401.
 
     Returns
     -------
