@@ -738,7 +738,7 @@ def test_a_tarballs_members_count_toward_its_folder_by_kind(tmp_path):
 
 def test_a_subtree_page_counts_kinds_below_it_only(tmp_path):
     store = listing(tmp_path, file("/R/a/vp3dfile.p", 300), file("/R/b/x.srf", 700))
-    page, summary, _ = tree.build(store, "/R/a", 1, 1000, "audit.db")
+    _page, summary, _ = tree.build(store, "/R/a", 1, 1000, "audit.db")
     assert summary.kinds.total() == 300
 
 

@@ -4,9 +4,12 @@ from dbaudit.lock import InstanceLock, LockHeldError
 
 
 def test_second_instance_is_refused(tmp_path):
-    with InstanceLock(tmp_path / "l"), pytest.raises(LockHeldError):
-        with InstanceLock(tmp_path / "l"):
-            pass
+    with (
+        InstanceLock(tmp_path / "l"),
+        pytest.raises(LockHeldError),
+        InstanceLock(tmp_path / "l"),
+    ):
+        pass
 
 
 def test_lock_released_on_exit(tmp_path):
@@ -19,10 +22,12 @@ def test_lock_released_on_exit(tmp_path):
 def test_lock_names_the_holder(tmp_path):
     import os
 
-    with InstanceLock(tmp_path / "l"):
-        with pytest.raises(LockHeldError, match=str(os.getpid())):
-            with InstanceLock(tmp_path / "l"):
-                pass
+    with (
+        InstanceLock(tmp_path / "l"),
+        pytest.raises(LockHeldError, match=str(os.getpid())),
+        InstanceLock(tmp_path / "l"),
+    ):
+        pass
 
 
 def test_lock_released_when_body_raises(tmp_path):

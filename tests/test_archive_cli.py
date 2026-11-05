@@ -2482,7 +2482,7 @@ def _condemned(tmp_path, monkeypatch, part_size=None):
 def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
     tmp_path, monkeypatch, capsys
 ):
-    db, liar = _condemned(tmp_path, monkeypatch)
+    db, _liar = _condemned(tmp_path, monkeypatch)
     capsys.readouterr()
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
@@ -2507,7 +2507,7 @@ def test_recheck_walks_again_the_segments_the_verdict_retired(
     """Split, the verdict lands in a middle segment, and the join retires every segment
     after it as `beyond`. Asking again must walk those too, from fresh scans, and join
     them to the chain -- not leave the walk blocked on a segment nobody will claim."""
-    db, liar = _condemned(tmp_path, monkeypatch, part_size=4096)
+    db, _liar = _condemned(tmp_path, monkeypatch, part_size=4096)
     store = ArchiveStore(db)
     archive_id = store.get("a.tar")["id"]
     states = [s["state"] for s in store.segments(archive_id)]

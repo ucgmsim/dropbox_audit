@@ -23,7 +23,10 @@ from tests.listing_fakes import archive_index as index_file
 T = {y: calendar.timegm((y, 1, 1, 0, 0, 0)) for y in range(2019, 2027)}
 
 
-def rows(store, rules=Rules(), index=None, under=None):
+_RULES = Rules()
+
+
+def rows(store, rules=_RULES, index=None, under=None):
     return sorted(walk(store, rules, archive_index(index) if index else None, under))
 
 

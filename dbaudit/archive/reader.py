@@ -298,7 +298,7 @@ class DropboxRangeReader:
                         headers=self._headers(target, offset, length),
                         timeout=self.timeout,
                     )
-            except Exception as exc:  # network, DNS, read timeout
+            except Exception as exc:  # noqa: BLE001  # any transport failure is retried with backoff, then reported as a ReaderError
                 last = ReaderError(f"{part.name}: {type(exc).__name__}: {exc}")
                 self.sleep(min(2**failures, 30))
                 failures += 1
@@ -365,7 +365,7 @@ def _retry_after(response) -> float:
     body = {}
     try:
         body = response.json()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110  # best effort: an unreadable body just means no Retry-After hint
         pass
     error = body.get("error") if isinstance(body, dict) else None
     value = error.get("retry_after") if isinstance(error, dict) else None

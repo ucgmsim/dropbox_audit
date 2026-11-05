@@ -80,7 +80,7 @@ def test_summary_rolls_up_by_directory_and_extension(tmp_path):
 
 
 def test_export_writes_the_manifest_and_rollups(tmp_path):
-    store, archive_id, db = indexed(tmp_path)
+    store, archive_id, _db = indexed(tmp_path)
     out = tmp_path / "exports"
     write_csv(store, archive_id, out)
     names = {p.name for p in out.iterdir()}
@@ -92,7 +92,7 @@ def test_export_writes_the_manifest_and_rollups(tmp_path):
 
 
 def test_report_and_export_on_unknown_archive_or_missing_db_exit_2(tmp_path, capsys):
-    store, archive_id, db = indexed(tmp_path)
+    _store, _archive_id, db = indexed(tmp_path)
     capsys.readouterr()
 
     assert main(["archive", "report", "--db", db, "--archive", "nope.tar"]) == 2
@@ -262,7 +262,7 @@ def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(tmp_path, monkeyp
         ("run/a.bin", b"a", {"mtime": earliest_ts}),
         ("run/b.bin", b"b", {"mtime": latest_ts}),
     ]
-    store, archive_id, db = build_and_index(tmp_path, members)
+    store, archive_id, _db = build_and_index(tmp_path, members)
 
     monkeypatch.setenv("TZ", "Pacific/Kiritimati")  # UTC+14, no DST
     time_mod.tzset()
@@ -377,7 +377,7 @@ def test_top_limits_the_largest_list(tmp_path):
 
 
 def test_export_command_creates_the_out_dir_and_names_what_it_wrote(tmp_path, capsys):
-    store, archive_id, db = indexed(tmp_path)
+    _store, _archive_id, db = indexed(tmp_path)
     out_dir = tmp_path / "new_export_dir"
     assert not out_dir.exists()
     capsys.readouterr()

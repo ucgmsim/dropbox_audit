@@ -41,7 +41,11 @@ def _parse_rfc3339(text: str) -> dt.datetime:
 def _rclone_config_dump() -> str:
     try:
         proc = subprocess.run(
-            ["rclone", "config", "dump"], capture_output=True, text=True, timeout=60
+            ["rclone", "config", "dump"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
         )
     except FileNotFoundError as exc:
         raise AuthError(
@@ -59,6 +63,7 @@ def _rclone_force_refresh(remote: str) -> None:
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
 
 

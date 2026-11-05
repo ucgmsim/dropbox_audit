@@ -245,7 +245,7 @@ def test_the_starting_concurrency_lies_between_the_floor_and_the_ceiling():
 
 
 def test_the_limiter_counts_every_request_it_lets_through():
-    clock, lim = make()
+    _clock, lim = make()
     for _ in range(5):
         with lim.slot():
             pass

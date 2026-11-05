@@ -395,7 +395,7 @@ def _walk_chain(
     stamp, own, reach = 0, concat.fills, 0
     concat.seek(start_offset)
     try:
-        archive = tarfile.open(fileobj=concat, mode="r:")
+        archive = tarfile.open(fileobj=concat, mode="r:")  # noqa: SIM115  # the walk reads from it until it ends
     except tarfile.ReadError as exc:
         detail = str(exc)
         return finish(
@@ -462,7 +462,9 @@ def _walk_chain(
             archive.offset = after
             diverged = diverged or key != theirs
         elif theirs is _NOT_READ and len(rescued) > settled:
-            return finish(before, key, lambda n: WalkResult("rescued", before, n))
+            return finish(
+                before, key, lambda n, before=before: WalkResult("rescued", before, n)
+            )
         if info.pax_headers:
             # Two reads agree an `x` or `g` extended header applies to this member. Keep
             # what was walked before it, with the cursor where its headers begin: a
@@ -473,7 +475,13 @@ def _walk_chain(
                 f"not index -- its names and sizes can sit outside the checksummed "
                 f"header"
             )
-            return finish(before, key, lambda n: WalkResult("pax", before, n, message))
+            return finish(
+                before,
+                key,
+                lambda n, before=before, message=message: WalkResult(
+                    "pax", before, n, message
+                ),
+            )
         window.append((before, stamp, key, Member.from_tarinfo(info)))
         while window[0][1] <= stamp - CONFIRM_FILLS:
             gone, _, _, member = window.popleft()
@@ -482,7 +490,11 @@ def _walk_chain(
         before = archive.offset
         archive.members.clear()  # the walk is a stream; do not accumulate
         if stop_at is not None and before >= stop_at:
-            return finish(before, _NOT_READ, lambda n: WalkResult("crossed", before, n))
+            return finish(
+                before,
+                _NOT_READ,
+                lambda n, before=before: WalkResult("crossed", before, n),
+            )
         if should_stop is not None and should_stop():
             resume = held_from(before)
             _commit_in_batches(commit, batch, resume, batch_size)
@@ -602,7 +614,7 @@ def _read_here(concat, offset, encoding=tarfile.ENCODING, errors="surrogateescap
     the ReadError tarfile raised, or None if it simply saw none."""
     concat.seek(offset)
     try:
-        one = tarfile.open(fileobj=concat, mode="r:", encoding=encoding, errors=errors)
+        one = tarfile.open(fileobj=concat, mode="r:", encoding=encoding, errors=errors)  # noqa: SIM115  # closed in the finally below
     except tarfile.ReadError as exc:
         return str(exc)
     try:

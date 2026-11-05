@@ -138,7 +138,7 @@ def test_import_copies_every_archive_under_new_ids_with_everything_recorded(
 def test_import_replaces_an_archive_of_the_same_content_and_everything_it_held(
     tmp_path, monkeypatch
 ):
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     source, target = str(tmp_path / "source.db"), str(tmp_path / "target.db")
     assert run(source, audit) == 0
     assert (
@@ -200,7 +200,7 @@ def test_import_replaces_an_archive_of_the_same_content_and_everything_it_held(
 def test_an_imported_mid_walk_archive_finishes_with_the_members_a_fresh_walk_records(
     tmp_path, monkeypatch
 ):
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     source, target, fresh = (
         str(tmp_path / n) for n in ("source.db", "target.db", "fresh.db")
     )
@@ -261,7 +261,7 @@ def test_an_imported_mid_walk_archive_finishes_with_the_members_a_fresh_walk_rec
 
 
 def test_import_refuses_while_either_database_is_held(tmp_path, monkeypatch, capsys):
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     source, target = str(tmp_path / "source.db"), str(tmp_path / "target.db")
     assert run(source, audit) == 0
     for held in (source, target):
@@ -272,7 +272,7 @@ def test_import_refuses_while_either_database_is_held(tmp_path, monkeypatch, cap
 
 
 def test_import_refuses_databases_whose_tables_differ(tmp_path, monkeypatch, capsys):
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     source, target = str(tmp_path / "source.db"), str(tmp_path / "target.db")
     assert run(source, audit) == 0
     assert (
@@ -305,7 +305,7 @@ def test_import_refuses_databases_whose_tables_differ(tmp_path, monkeypatch, cap
 def test_import_from_nothing_or_itself_or_into_another_kind_is_a_usage_error(
     tmp_path, monkeypatch, which
 ):
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     target = str(tmp_path / "target.db")
     assert run(target, audit) == 0
     if which == "not an archive database":
@@ -377,7 +377,7 @@ def test_forget_drops_an_archive_so_the_next_run_walks_it_from_scratch(
 def test_forget_refuses_an_archive_that_is_not_there_and_a_held_database(
     tmp_path, monkeypatch
 ):
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     db = str(tmp_path / "archives.db")
     assert run(db, audit) == 0
     assert forget(db, "one.tar", "/R/elsewhere") == 2
@@ -434,7 +434,7 @@ def test_import_leaves_only_the_latest_content_of_one_name_in_one_folder(
 def test_import_and_forget_take_the_lock_a_run_was_given(tmp_path, monkeypatch):
     """A run started with --lock PATH holds PATH, not DB.lock: import and forget take
     --lock too, so they wait for that run rather than write beside it."""
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     db, other = str(tmp_path / "a.db"), str(tmp_path / "b.db")
     assert run(db, audit) == 0 and run(other, audit) == 0
     lock = str(tmp_path / "elsewhere.lock")
@@ -504,7 +504,7 @@ def test_import_keeps_the_live_content_of_a_folder_that_went_back(tmp_path):
 
 
 def test_import_waits_for_a_source_run_started_with_its_own_lock(tmp_path, monkeypatch):
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     db, other = str(tmp_path / "a.db"), str(tmp_path / "b.db")
     assert run(db, audit) == 0 and run(other, audit) == 0
     lock = str(tmp_path / "elsewhere.lock")
@@ -521,7 +521,7 @@ def test_a_lock_in_a_folder_that_does_not_exist_is_a_usage_error(
     tmp_path, monkeypatch, capsys
 ):
     """Said plainly, not as a traceback from opening the lock file."""
-    world, audit = three(tmp_path, monkeypatch)
+    _world, audit = three(tmp_path, monkeypatch)
     db, other = str(tmp_path / "a.db"), str(tmp_path / "b.db")
     assert run(db, audit) == 0 and run(other, audit) == 0
     lock = str(tmp_path / "nowhere" / "x.lock")

@@ -202,7 +202,7 @@ def test_a_corrupt_header_is_not_mistaken_for_the_end(tmp_path):
     data = bytearray(build_tar(MEMBERS))
     third = 512 + (-(-len(MEMBERS[0][1]) // 512) * 512)  # header of the second member
     data[third : third + 8] = b"\xff" * 8
-    seen, _, result = collect(tmp_path, bytes(data))
+    _seen, _, result = collect(tmp_path, bytes(data))
     assert result.state == "corrupt"
     assert result.end_offset == third
     # Ruling D: the whole probe is recorded, not just that some detail exists.
@@ -219,7 +219,7 @@ def test_a_corrupt_second_terminator_block_is_not_hidden_by_a_truncated_probe(tm
     end = sum(512 + (-(-len(payload) // 512) * 512) for _, payload in MEMBERS)
     assert data[end : end + 1024] == b"\x00" * 1024  # build_tar's own terminator
     data[end + 512 : end + 520] = b"\xff" * 8  # corrupt only the second block
-    seen, _, result = collect(tmp_path, bytes(data))
+    _seen, _, result = collect(tmp_path, bytes(data))
     assert result.state == "corrupt"
     assert result.end_offset == end
     assert "ff" * 8 in result.detail
@@ -710,7 +710,7 @@ def test_the_check_costs_nothing_when_the_writer_follows_gnu(tmp_path, form):
         data, _ = _long_link_archive()
     else:
         data = bytes(_long_name_archive()[0])
-    rows, result, reader = _rows(tmp_path, data=data)
+    _, result, reader = _rows(tmp_path, data=data)
 
     assert result.state == "complete"
     assert reader.requests == 2
@@ -855,7 +855,7 @@ def test_a_fresh_read_that_also_comes_back_wrong_is_simply_read_again(tmp_path):
     name's own header so no member starts there at all. That is one more bad read, not
     a verdict: fetch 3 is read, agrees with its header, and is kept."""
     data, _ = _long_name_archive()
-    rows, result, reader = _rows(
+    rows, result, _reader = _rows(
         tmp_path, _Scripted, bytes(data), script={1: (1536, 512), 2: (1024, 512)}
     )
 
@@ -872,7 +872,7 @@ def test_a_fresh_read_carrying_pax_is_not_believed_on_its_own_either(tmp_path):
     data, _ = _long_name_archive()
     pax = _pax_tar([("x/" + "p" * 120 + ".bin", b"q" * 700, None)])
     assert pax[156:157] == b"x"
-    rows, result, reader = _rows(
+    rows, result, _reader = _rows(
         tmp_path, _Scripted, bytes(data), script={1: (1536, 512), 2: (1024, pax[:1536])}
     )
 
@@ -2046,7 +2046,7 @@ def test_a_global_header_only_the_second_readings_bad_read_saw_stops_applying(tm
         )
         return result, rows, reader
 
-    clean, _, honest = run(lie=False)
+    _clean, _, honest = run(lie=False)
     result, rows, reader = run(lie=True)
 
     assert reader.lied == 1, "the test did not actually inject the bad read"
@@ -2567,7 +2567,7 @@ def test_a_crossing_or_a_stop_anywhere_in_a_dense_run_commits_no_more_than_a_bat
             0,
             rows.commit,
             batch_size=10,
-            should_stop=lambda: next(checks) == when,
+            should_stop=lambda checks=checks, when=when: next(checks) == when,
         )
         assert result.state == "stopped" and rows.consistent()
         largest.add(max(len(offsets) for _, offsets, _ in rows.calls))

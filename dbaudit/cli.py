@@ -217,7 +217,7 @@ def cmd_init(args) -> int:
     except AuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # any failure looking up the account is reported and exits 2
         print(
             f"error: could not look up the account: {type(exc).__name__}: {exc}",
             file=sys.stderr,
@@ -225,7 +225,7 @@ def cmd_init(args) -> int:
         return 2
     try:
         page = lister.list_folder(root, recursive=False)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # any failure listing the root is reported and exits 2
         print(
             f"error: could not list {root}: {type(exc).__name__}: {exc}",
             file=sys.stderr,
@@ -260,7 +260,7 @@ def _progress_reporter(store, stop: threading.Event, interval: float) -> None:
     while not stop.wait(interval):
         try:
             prog = store.progress()
-        except Exception:
+        except Exception:  # noqa: BLE001, S112  # a failed progress read only skips this tick of the reporter
             continue
         now = time.time()
         rate = ""
@@ -531,7 +531,7 @@ def cmd_report(args) -> int:
         print("  The unaccounted figure is version history, deleted-but-retained data,")
         print("  AND anything outside this crawl root. It isolates version/deleted")
         print("  overhead only when the root covers everything the account owns.")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # the live space figures are optional; the report goes on without them
         print(f"  (could not read live space usage: {type(exc).__name__}: {exc})")
         print(f"  measured live bytes under {root}: {human_bytes(live)}")
 
@@ -1071,7 +1071,7 @@ def cmd_archive_register(args) -> int:
     except AuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # a missing directory, or a failed listing
+    except Exception as exc:  # noqa: BLE001  # any failure reading the folder is reported and exits 2
         print(
             f"error: could not read {args.local_dir or args.folder}: "
             f"{type(exc).__name__}: {exc}",
@@ -1297,7 +1297,7 @@ def _walk_segment(run, segment) -> None:
             segment["id"], f"{_PAX_SIGHTING}{exc}", requests, fetched
         )
         return
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001  # one bad part must not kill the run; it is recorded as a failed segment
         # One bad part must not kill the run: record why it died and what it cost, and
         # let the worker take the next segment.
         requests, fetched = delta()
@@ -1672,7 +1672,7 @@ def _walk_archive(
             fingerprinted = _fingerprint(store, row, args.remote, tokens, limiter, stop)
         except AuthError as exc:
             return _Walked(row["state"], 2, [f"error: {exc}"], started=False)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # any failure listing the parts is reported as the archive's result
             return _Walked(
                 row["state"],
                 1,
@@ -1778,7 +1778,7 @@ def _walk_archive(
                 redo = _audit_repeated_paths(run)
             except (_StoppedError, ReadStoppedError):
                 break  # no verdict yet, and no failure: audited next run
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001  # a failed repeated-path audit is recorded on the archive, not raised
                 audit_failed = (
                     f"could not read again the rows under repeated paths: "
                     f"{type(exc).__name__}: {exc}"
@@ -1813,7 +1813,7 @@ def _walk_archive(
             # Listed even when stopping: a verdict is recorded only after this check. A walk
             # with no verdict to record skips it; the next lists the folder before it begins.
             missing, changed = _fingerprint(store, row, args.remote, tokens, limiter)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # a failed re-list is logged; the walk's verdict still stands
             log.warning(
                 "could not re-list %s to fingerprint it: %s: %s",
                 row["folder"],
@@ -1841,7 +1841,7 @@ def _walk_archive(
             compressed = _compression(row, archive_set, tokens, limiter, run.stopping)
         except ReadStoppedError:
             outcome = None  # stopped before the label was settled: no verdict yet
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001  # a failed compression check is recorded as unchecked, not raised
             unchecked = (
                 f"could not read its first bytes to check for compression: "
                 f"{type(exc).__name__}: {exc}"
@@ -2793,7 +2793,7 @@ def _headers_mismatch(block, member):
             f"its data begins {info.offset_data - len(block):+,} bytes from the index's"
         )
     found = Member.from_tarinfo(info)
-    for field in (
+    for attr in (
         "dir",
         "name",
         "size",
@@ -2804,8 +2804,8 @@ def _headers_mismatch(block, member):
         "gname",
         "linkname",
     ):
-        if getattr(found, field) != member[field]:
-            return f"{field} {getattr(found, field)!r}, not {member[field]!r}"
+        if getattr(found, attr) != member[attr]:
+            return f"{attr} {getattr(found, attr)!r}, not {member[attr]!r}"
     return None
 
 

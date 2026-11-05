@@ -23,7 +23,7 @@ PYTHON = sys.executable
 
 def dbaudit(*args, expect=0):
     proc = subprocess.run(
-        [PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True
+        [PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True, check=False
     )
     assert proc.returncode == expect, (
         f"{args}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"

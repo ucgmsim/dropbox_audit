@@ -158,7 +158,7 @@ def test_export_csv_writes_every_report(tmp_path):
     assert len(written) == 5
     names = {p.rsplit("/", 1)[-1] for p in written}
     assert "duplicates.csv" in names and "top_dirs.csv" in names
-    body = open(tmp_path / "out" / "duplicates.csv").read()
+    body = (tmp_path / "out" / "duplicates.csv").read_text()
     assert "reclaimable" in body and "100" in body
 
 

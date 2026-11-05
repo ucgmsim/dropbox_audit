@@ -40,7 +40,7 @@ def _as_int(value):
     docstring for why the conversion happens mid-transaction rather than before.
     """
     if not isinstance(value, int):
-        raise ValueError(f"member size is not an int: {value!r}")
+        raise ValueError(f"member size is not an int: {value!r}")  # noqa: TRY004  # ValueError is the raised type; TypeError would change behaviour
     return value
 
 

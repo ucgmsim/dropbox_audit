@@ -425,7 +425,7 @@ def test_a_finished_stale_archive_keeps_its_stale_reason(tmp_path):
     a flag, and the same argument applies to the reason behind it -- so `finish`
     must guard `detail` the same way it guards `state`. The walk's own outcome is
     not lost even so: it stays on `segments.detail` and in the `finish` event."""
-    store, archive_id, segment_id = registered(tmp_path)
+    store, archive_id, _segment_id = registered(tmp_path)
     store.mark_stale(archive_id, "fingerprint mismatch")
 
     store.finish(archive_id, WalkResult("corrupt", 512, 1, "bad header at 512"))

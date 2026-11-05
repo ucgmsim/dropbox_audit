@@ -1,5 +1,7 @@
 """Sizes and durations as people read them, in every command's output and log lines."""
 
+import math
+
 
 def human_bytes(n: float) -> str:
     for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
@@ -10,7 +12,7 @@ def human_bytes(n: float) -> str:
 
 
 def human_duration(seconds: float) -> str:
-    if seconds != seconds or seconds in (float("inf"), float("-inf")) or seconds < 0:
+    if math.isnan(seconds) or seconds in (float("inf"), float("-inf")) or seconds < 0:
         return "unknown"
     seconds = int(seconds)
     days, rem = divmod(seconds, 86400)

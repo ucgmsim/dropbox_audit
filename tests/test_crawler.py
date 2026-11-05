@@ -405,7 +405,7 @@ def test_splitting_stays_far_below_splitting_everything(tmp_path):
 
 
 def test_queue_target_defaults_to_twice_the_workers(tmp_path):
-    store, crawler = build(tmp_path, FakeLister(TREE), workers=5)
+    _store, crawler = build(tmp_path, FakeLister(TREE), workers=5)
     assert crawler.queue_target == 10
 
 

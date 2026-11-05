@@ -49,7 +49,7 @@ def three(tmp_path, monkeypatch):
 
 
 def test_every_archive_the_listing_names_is_walked(tmp_path, monkeypatch):
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit) == 0
     found = rows(db)
     assert {f: (r["state"], r["n_members"]) for f, r in found.items()} == {
@@ -63,7 +63,7 @@ def test_every_archive_the_listing_names_is_walked(tmp_path, monkeypatch):
 def test_a_dry_run_says_what_it_would_walk_and_reads_nothing(
     tmp_path, monkeypatch, capsys
 ):
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
 
     def landmine(*args, **kwargs):
         raise AssertionError("a dry run must not contact Dropbox")
@@ -77,7 +77,7 @@ def test_a_dry_run_says_what_it_would_walk_and_reads_nothing(
 
 
 def test_a_second_run_finds_nothing_left_to_walk(tmp_path, monkeypatch, capsys):
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit) == 0
     capsys.readouterr()
     monkeypatch.setattr(
@@ -389,7 +389,7 @@ def test_a_set_of_parts_with_a_gap_at_its_turn_is_refused_and_the_run_goes_on(
 
 
 def test_an_archive_mid_walk_resumes_and_finishes(tmp_path, monkeypatch, capsys):
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     assert (
         main(
             ["archive", "register", "--db", db, "--folder", "/R/b", "--name", "two.tar"]
@@ -445,19 +445,19 @@ def test_parts_that_changed_since_registration_are_walked_as_new_content(
 
 
 def test_a_held_database_refuses_with_status_3(tmp_path, monkeypatch):
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     with InstanceLock(f"{db}.lock"):
         assert run(db, audit) == 3
 
 
 def test_streams_beyond_their_ceiling_are_a_usage_error(tmp_path, monkeypatch):
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit, "--streams", "30", "--max-streams", "24") == 2
     assert run(db, str(tmp_path / "no-such.db")) == 2
 
 
 def test_a_negative_limit_is_a_usage_error(tmp_path, monkeypatch):
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit, "--limit", "-1") == 2
 
 
@@ -465,7 +465,7 @@ def test_a_db_in_a_folder_that_does_not_exist_is_a_usage_error(
     tmp_path, monkeypatch, capsys
 ):
     """Said plainly, not as a traceback from SQLite."""
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     missing = str(tmp_path / "nowhere" / "a.db")
     assert run(missing, audit) == 2
     assert run(db, audit) == 0
@@ -477,7 +477,7 @@ def test_a_db_that_is_not_an_archive_database_is_refused_untouched(
     tmp_path, monkeypatch
 ):
     """The audit database given as --db by mistake gains no tables."""
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, _db, audit = three(tmp_path, monkeypatch)
 
     def tables(path):
         return {
@@ -879,7 +879,7 @@ def test_the_next_archive_starts_while_another_finishes_its_last_chain(
 def test_an_archive_between_rounds_still_counts_as_one_chain(tmp_path, monkeypatch):
     """Once its workers have all finished it is still in flight -- joining, auditing,
     listing its folder again -- and uses a stream for that."""
-    world, db, audit = three(tmp_path, monkeypatch)
+    _world, db, audit = three(tmp_path, monkeypatch)
     made, real = [], cli._run_jobs
 
     def run_jobs(*args):

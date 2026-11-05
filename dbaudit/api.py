@@ -143,7 +143,7 @@ class HttpLister:
 
         try:
             body = resp.json()
-        except Exception:
+        except Exception:  # noqa: BLE001  # a garbled error body must not hide the HTTP status; the raw text is kept instead
             body = {"raw": getattr(resp, "text", "")[:300]}
         raise _classify(resp.status_code, body, getattr(resp, "headers", {}) or {})
 
