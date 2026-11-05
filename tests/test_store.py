@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from dbaudit.store import Store, _epoch
+from tests.stores import closing
 
 FILE = {
     ".tag": "file",
@@ -30,7 +31,7 @@ FOLDER = {
 
 
 def new_store(tmp_path: Path):
-    store = Store(tmp_path / "a.db")
+    store = closing(Store(tmp_path / "a.db"))
     store.init_schema()
     store.set_meta("root", "/TeamSpace")
     return store
@@ -322,7 +323,7 @@ def test_an_empty_or_malformed_stamp_has_no_epoch():
 
 
 def test_a_metadata_key_is_the_default_before_the_schema_exists(tmp_path: Path):
-    store = Store(tmp_path / "a.db")
+    store = closing(Store(tmp_path / "a.db"))
     assert store.get_meta("root") is None
     assert store.get_meta("root", "fallback") == "fallback"
 

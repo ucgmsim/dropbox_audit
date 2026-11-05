@@ -25,6 +25,7 @@ from dbaudit.tree import Summary
 from dbaudit.verify import VerifyResult, verify_subtree
 from tests.fakes import TREE, FakeLister
 from tests.listing_fakes import LISTED, archive, archive_index, file, listing
+from tests.stores import closing
 
 # GitHub Actions sets GITHUB_ACTIONS=true on every runner. Typer reads that
 # variable when it is imported and, if it is set, styles its help and error
@@ -43,7 +44,7 @@ def plain(text: str) -> str:
 
 def seeded_db(tmp_path: Path):
     db = tmp_path / "a.db"
-    store = Store(db)
+    store = closing(Store(db))
     store.init_schema()
     store.set_meta("root", "/R")
     store.add_shard("/R/a", 1, "recursive")
@@ -81,8 +82,8 @@ def test_verify_on_a_database_with_no_root_is_an_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An `init` stopped after the schema and before the root leaves such a database."""
-    store = Store(tmp_path / "a.db")
-    store.init_schema()
+    with Store(tmp_path / "a.db") as store:
+        store.init_schema()
     assert main(["verify", "--db", str(tmp_path / "a.db")]) == 2
     assert "not initialised" in capsys.readouterr().err
 
@@ -111,9 +112,9 @@ def test_run_refuses_when_another_instance_holds_the_lock(
     from dbaudit.lock import InstanceLock
 
     db = tmp_path / "a.db"
-    store = Store(db)
-    store.init_schema()
-    store.set_meta("root", "/R")
+    with Store(db) as store:
+        store.init_schema()
+        store.set_meta("root", "/R")
     with InstanceLock(f"{db}.lock"):
         assert main(["run", "--db", str(db)]) == 3
     assert "held by" in capsys.readouterr().err

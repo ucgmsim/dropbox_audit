@@ -1,4 +1,5 @@
 import calendar
+import contextlib
 import hashlib
 import os
 import sqlite3
@@ -36,7 +37,10 @@ def rows(
     index: str | None = None,
     under: str | None = None,
 ):
-    return sorted(walk(store, rules, archive_index(index) if index else None, under))
+    if not index:
+        return sorted(walk(store, rules, None, under))
+    with contextlib.closing(archive_index(index)) as opened:
+        return sorted(walk(store, rules, opened, under))
 
 
 def by_kind(found: Iterable[WalkRow]):
@@ -283,7 +287,7 @@ def test_a_walk_leaves_both_databases_as_they_were(tmp_path: Path):
         files = (store.path, store.path + "-wal", index, index + "-wal")
         return (
             [
-                hashlib.sha256(open(f, "rb").read()).hexdigest()
+                hashlib.sha256(Path(f).read_bytes()).hexdigest()
                 if os.path.exists(f) and os.path.getsize(f)
                 else None
                 for f in files

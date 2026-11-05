@@ -63,23 +63,23 @@ def test_interrupted_crawl_resumes_to_the_same_totals(tmp_path: Path):
 
     dbaudit("run", "--db", db, "--workers", "4")
 
+    import contextlib
     import sqlite3
 
-    conn = sqlite3.connect(db)
-    files, total = conn.execute("SELECT COUNT(*), SUM(size) FROM files").fetchone()
-    duplicates = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT dbx_id FROM files GROUP BY dbx_id HAVING COUNT(*) > 1)"
-    ).fetchone()[0]
+    with contextlib.closing(sqlite3.connect(db)) as conn:
+        files, total = conn.execute("SELECT COUNT(*), SUM(size) FROM files").fetchone()
+        duplicates = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT dbx_id FROM files GROUP BY dbx_id HAVING COUNT(*) > 1)"
+        ).fetchone()[0]
     assert duplicates == 0
 
     reference = str(tmp_path / "ref.db")
     dbaudit("init", "--db", reference, "--root", SUBTREE, "--min-free-gb", "1")
     dbaudit("run", "--db", reference, "--workers", "4")
-    ref_files, ref_bytes = (
-        sqlite3.connect(reference)
-        .execute("SELECT COUNT(*), SUM(size) FROM files")
-        .fetchone()
-    )
+    with contextlib.closing(sqlite3.connect(reference)) as conn:
+        ref_files, ref_bytes = conn.execute(
+            "SELECT COUNT(*), SUM(size) FROM files"
+        ).fetchone()
 
     assert (files, total) == (ref_files, ref_bytes)
 

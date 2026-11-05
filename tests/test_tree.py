@@ -1,4 +1,5 @@
 import calendar
+import contextlib
 import hashlib
 import io
 import os
@@ -11,6 +12,7 @@ from dbaudit import kinds, report, tree
 from dbaudit.store import Store
 from tests.listing_fakes import archive
 from tests.listing_fakes import archive_index as index_file
+from tests.stores import closing
 
 LISTED = calendar.timegm((2026, 10, 1, 0, 0, 0, 0, 0, 0))
 
@@ -46,7 +48,7 @@ def folder(path: str) -> dict:
 
 
 def listing(tmp_path: Path, *entries):
-    store = Store(tmp_path / "audit.db")
+    store = closing(Store(tmp_path / "audit.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     shard = store.add_shard("/R", 1)
@@ -549,7 +551,7 @@ def test_a_page_of_empty_files_divides_by_nothing(tmp_path: Path):
 
 
 def test_an_empty_listing_is_a_page_of_zeros(tmp_path: Path):
-    store = Store(tmp_path / "audit.db")
+    store = closing(Store(tmp_path / "audit.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     outline = Outline(page_text(store))
@@ -562,7 +564,7 @@ def test_a_crawl_writing_while_the_page_is_built_cannot_reach_it(
     """Every query reads one snapshot. Read separately, a big file committed after
     measuring lands in a folder measured as small, which has no row to hold it."""
     store = listing(tmp_path, file("/R/a/x", 5), file("/R/b/y", 50))
-    crawler = Store(tmp_path / "audit.db")
+    crawler = closing(Store(tmp_path / "audit.db"))
     measure = tree.measure
 
     def measure_then_crawl(*args):
@@ -669,7 +671,8 @@ def test_the_command_will_not_overwrite_the_database_or_write_nowhere(
     assert "names the database itself" in capsys.readouterr().err
     assert main(["tree", "--db", db, "--out", str(tmp_path / "no" / "t.html")]) == 2
     assert "is not a folder" in capsys.readouterr().err
-    assert tree.find_dir(Store(db), "/R/big") is not None  # the database is untouched
+    # the database is untouched
+    assert tree.find_dir(closing(Store(db)), "/R/big") is not None
 
 
 def test_the_command_will_not_write_over_the_database_by_another_name(
@@ -765,7 +768,8 @@ def test_a_tarballs_members_count_toward_its_folder_by_kind(tmp_path: Path):
             "a.tar", "/R/t", [("a.tar", 1000, "A")], [("", "vp3dfile.p", 1000, LISTED)]
         ),
     )
-    html = page_html(store, index=kinds.archive_index(index))
+    with contextlib.closing(kinds.archive_index(index)) as opened:
+        html = page_html(store, index=opened)
     t = html[html.index('data-path="t"') :]
     assert '<span class="badge kind">vm 100%</span>' in t[: t.index("</summary>")]
 
@@ -811,6 +815,7 @@ def test_a_page_says_whether_it_looked_inside_the_tarballs(tmp_path: Path):
             [("", "bb.bin", 1000, LISTED)],
         ),
     )
-    looked = page_html(store, index=kinds.archive_index(index))
+    with contextlib.closing(kinds.archive_index(index)) as opened:
+        looked = page_html(store, index=opened)
     assert "shared out over the members the archive index lists" in looked
     assert "give --archive-db" not in looked

@@ -18,6 +18,7 @@ from dbaudit.crawler import Crawler
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.store import Store
 from tests.fakes import ALL_FILES, TREE, FakeLister
+from tests.stores import closing
 
 
 def limiter():
@@ -25,7 +26,7 @@ def limiter():
 
 
 def build(tmp_path: Path, lister: Lister, workers: int = 2, **kw):
-    store = Store(tmp_path / "a.db")
+    store = closing(Store(tmp_path / "a.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     return store, Crawler(store, lister, limiter(), workers=workers, **kw)
@@ -66,7 +67,7 @@ def test_resume_after_interruption_is_exact(tmp_path: Path):
     partial = store.stats()["files"]
     assert 0 < partial < 5, f"expected a partial crawl, got {partial}"
 
-    resumed = Store(tmp_path / "a.db")
+    resumed = closing(Store(tmp_path / "a.db"))
     Crawler(resumed, FakeLister(TREE, page_size=1), limiter(), workers=1).run()
     assert files_in(resumed) == ALL_FILES
     duplicates = resumed.query(
@@ -347,7 +348,7 @@ def test_a_split_interrupted_mid_listing_resumes_as_a_split(tmp_path: Path):
         "SELECT mode, cursor IS NOT NULL FROM shards WHERE path='/R'"
     ) == [("split", 1)]
     Crawler(
-        Store(tmp_path / "a.db"),
+        closing(Store(tmp_path / "a.db")),
         FakeLister(TREE, page_size=1),
         limiter(),
         workers=1,
@@ -549,7 +550,7 @@ def test_a_listing_resumed_from_a_cursor_does_not_count_as_having_no_folders(
 
     lister = FakeLister(tree, page_size=1)
     Crawler(
-        Store(tmp_path / "a.db"),
+        closing(Store(tmp_path / "a.db")),
         lister,
         limiter(),
         workers=1,
@@ -589,7 +590,7 @@ def test_a_stop_that_arrives_while_waiting_for_a_slot_lists_nothing_and_frees_th
 ):
     stop = threading.Event()
     lister = FakeLister(TREE)
-    store = Store(tmp_path / "a.db")
+    store = closing(Store(tmp_path / "a.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     crawler = Crawler(store, lister, StopsWhileWaitingForASlot(stop), workers=1)

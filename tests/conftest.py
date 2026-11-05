@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from dbaudit.archive import reader
+from tests import stores
 
 
 def pytest_addoption(parser: pytest.Parser):
@@ -41,3 +42,10 @@ def _shapes(request: pytest.FixtureRequest):
         ):
             patch.setattr(reader, "LEAD_STEP", 0)
         yield
+
+
+@pytest.fixture(autouse=True)
+def _close_stores():
+    """Close the stores the test handed to `tests.stores.closing`, when it ends."""
+    yield
+    stores.close_opened()

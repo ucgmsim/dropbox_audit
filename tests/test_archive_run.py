@@ -6,6 +6,7 @@ fake `build_lister` that answers from the same entries, and every read through a
 use. Names are made up.
 """
 
+import contextlib
 import gzip
 import logging
 import os
@@ -31,11 +32,17 @@ from dbaudit.cli import LISTING_ATTEMPTS, _run_limiter, main
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import World, build_tar, members
+from tests.stores import closing
 
 
 def rows(db: str):
-    store = ArchiveStore(db)
-    return {r["folder"]: r for r in store.connect().execute("SELECT * FROM archives")}
+    return {r["folder"]: r for r in query(db, "SELECT * FROM archives")}
+
+
+def query(db: str, sql: str):
+    """Every row of one query, read through a store that is closed again."""
+    with ArchiveStore(db) as store:
+        return store.query(sql)
 
 
 def run(db: str, audit: str, *extra):
@@ -118,12 +125,7 @@ def test_an_archive_gone_from_its_folder_is_recorded_and_the_run_goes_on(
     assert run(db, audit) == 0
     found = rows(db)
     assert "/R/a" not in found and found["/R/b"]["state"] == "complete"
-    events = (
-        ArchiveStore(db)
-        .connect()
-        .execute("SELECT archive_id, detail FROM events WHERE kind='gone'")
-        .fetchall()
-    )
+    events = query(db, "SELECT archive_id, detail FROM events WHERE kind='gone'")
     assert [(e["archive_id"], e["detail"].split(":")[0]) for e in events] == [
         (None, "/R/a/one.tar")
     ]
@@ -150,13 +152,9 @@ def test_a_registered_archive_that_has_gone_is_recorded_under_its_id(
     assert [after[f]["state"] for f in ("/R/a", "/R/c")] == [
         before[f]["state"] for f in ("/R/a", "/R/c")
     ]
-    events = (
-        ArchiveStore(db)
-        .connect()
-        .execute(
-            "SELECT archive_id, detail FROM events WHERE kind='gone' ORDER BY archive_id"
-        )
-        .fetchall()
+    events = query(
+        db,
+        "SELECT archive_id, detail FROM events WHERE kind='gone' ORDER BY archive_id",
     )
     assert [(e["archive_id"], e["detail"].split(":")[0]) for e in events] == [
         (before["/R/a"]["id"], "/R/a/one.tar"),
@@ -259,13 +257,7 @@ def test_an_archive_that_moved_since_registration_is_walked_once_where_it_is_now
     [row] = rows(db).values()
     assert (row["folder"], row["state"], row["n_members"]) == ("/R/new", "complete", 6)
     assert list(tries.values()) == [1]
-    assert (
-        ArchiveStore(db)
-        .connect()
-        .execute("SELECT COUNT(*) FROM events WHERE kind='gone'")
-        .fetchone()[0]
-        == 0
-    )
+    assert query(db, "SELECT COUNT(*) FROM events WHERE kind='gone'")[0][0] == 0
 
 
 def test_an_archive_registered_by_hand_outside_the_listing_is_walked_too(
@@ -310,12 +302,7 @@ def test_without_credentials_the_third_archive_stops_the_run(
     assert run(db, audit) == 1
     assert "repeated unexpected failures" in capsys.readouterr().err
     assert rows(db) == {}
-    details = [
-        e[0]
-        for e in ArchiveStore(db)
-        .connect()
-        .execute("SELECT detail FROM events WHERE kind='fail'")
-    ]
+    details = [e[0] for e in query(db, "SELECT detail FROM events WHERE kind='fail'")]
     assert len(details) == 3 and all(
         "AuthError: rclone has no token" in d for d in details
     )
@@ -400,10 +387,7 @@ def test_a_set_of_parts_with_a_gap_at_its_turn_is_refused_and_the_run_goes_on(
         "/R/c": "complete",
     }
     [detail] = [
-        e[0]
-        for e in ArchiveStore(db)
-        .connect()
-        .execute("SELECT detail FROM events WHERE kind='refused'")
+        e[0] for e in query(db, "SELECT detail FROM events WHERE kind='refused'")
     ]
     assert detail.startswith("/R/b/two.tar: ")
 
@@ -459,8 +443,7 @@ def test_parts_that_changed_since_registration_are_walked_as_new_content(
     world.local.pop("/R/a")
     world.add("/R/a", "one.tar", build_tar(members(6, 7)))
     assert run(db, audit) == 0
-    store = ArchiveStore(db)
-    by_id = {r["id"]: r for r in store.connect().execute("SELECT * FROM archives")}
+    by_id = {r["id"]: r for r in query(db, "SELECT * FROM archives")}
     assert by_id[old]["state"] == "stale"
     [new] = [r for r in by_id.values() if r["folder"] == "/R/a" and r["id"] != old]
     assert (new["state"], new["n_members"]) == ("complete", 6)
@@ -508,12 +491,13 @@ def test_a_db_that_is_not_an_archive_database_is_refused_untouched(
     _world, _db, audit = three(tmp_path, monkeypatch)
 
     def tables(path: str):
-        return {
-            r[0]
-            for r in sqlite3.connect(path).execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            return {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
 
     before = tables(audit)
     for extra in ((), ("--dry-run",)):
@@ -856,9 +840,7 @@ def test_a_copy_is_walked_when_the_archive_standing_for_it_has_gone_or_lost_a_pa
     assert {f: (r["state"], r["n_members"]) for f, r in rows(db).items()} == {
         "/R/b": ("complete", 30)
     }
-    events = (
-        ArchiveStore(db).connect().execute("SELECT kind, detail FROM events").fetchall()
-    )
+    events = query(db, "SELECT kind, detail FROM events")
     assert any(
         kind == ("gone" if how == "gone" else "refused") and detail.startswith("/R/a/")
         for kind, detail in events
@@ -1005,13 +987,8 @@ def test_several_archives_in_one_folder_are_each_walked(
     world.install(monkeypatch)
     db = str(tmp_path / "archives.db")
     assert run(db, world.audit_db()) == 0
-    found = (
-        ArchiveStore(db)
-        .connect()
-        .execute(
-            "SELECT name, state, n_members, n_parts > 1 FROM archives ORDER BY name"
-        )
-        .fetchall()
+    found = query(
+        db, "SELECT name, state, n_members, n_parts > 1 FROM archives ORDER BY name"
     )
     assert [tuple(r) for r in found] == [
         ("a.tar", "complete", 5, 0),
@@ -1107,12 +1084,7 @@ def test_a_folder_that_cannot_be_listed_is_left_in_error_and_the_run_goes_on(
     world.faults["/R/a"] = [TransientError("request failed: connection reset")] * 100
     assert run(db, audit) == 0
     assert set(rows(db)) == {"/R/b", "/R/c"}
-    details = [
-        e[0]
-        for e in ArchiveStore(db)
-        .connect()
-        .execute("SELECT detail FROM events WHERE kind='fail'")
-    ]
+    details = [e[0] for e in query(db, "SELECT detail FROM events WHERE kind='fail'")]
     assert (
         details
         == [
@@ -1183,7 +1155,7 @@ def test_many_archives_walked_at_once_give_exactly_the_rows_walked_one_at_a_time
         ) in (0, 1)
 
     def manifest(db: str):
-        store = ArchiveStore(db)
+        store = closing(ArchiveStore(db))
         out = {}
         for archive in store.connect().execute(
             "SELECT id, set_hash, state, detail, n_members FROM archives"

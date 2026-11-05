@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.store import Store
+from tests.stores import closing
 
 LISTED = calendar.timegm((2026, 10, 1, 0, 0, 0))
 
@@ -46,7 +47,7 @@ def folder(path: str) -> dict:
 
 def listing(tmp_path: Path, *entries: dict, finished: bool = True) -> Store:
     """An audit database of `entries` under the root /R, its crawl finished at LISTED."""
-    store = Store(tmp_path / "audit.db")
+    store = closing(Store(tmp_path / "audit.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     if finished:

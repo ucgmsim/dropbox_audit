@@ -7,6 +7,7 @@ import pytest
 
 from dbaudit.store import Store
 from dbaudit.verify import _run_rclone, verify_subtree
+from tests.stores import closing
 
 FILE = {
     ".tag": "file",
@@ -24,7 +25,7 @@ NESTED = dict(FILE, id="id:2", name="c.bin", size=7, path_display="/R/sub/c.bin"
 
 
 def seed(tmp_path: Path, entries: list[dict]):
-    store = Store(tmp_path / "a.db")
+    store = closing(Store(tmp_path / "a.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     sid = store.add_shard("/R", 0, "recursive")
