@@ -1,6 +1,8 @@
+from dataclasses import replace
+
 import pytest
 
-from dbaudit.archive.parts import ArchiveSet, ArchiveSetError
+from dbaudit.archive.parts import ArchiveSet, ArchiveSetError, Part
 
 
 def entries(*specs):
@@ -104,3 +106,39 @@ def test_a_set_missing_its_first_part_is_refused_and_the_part_named(
 def test_a_sequence_may_start_where_split_starts_it(names: tuple[str, ...]):
     s = ArchiveSet.from_entries(entries(*((n, 1) for n in names)), "a.tar")
     assert [p.name for p in s.parts] == list(names)
+
+
+def test_no_files_at_all_is_refused_naming_the_archive():
+    with pytest.raises(ArchiveSetError, match="no files given for 'a.tar'"):
+        ArchiveSet.from_entries([], "a.tar")
+
+
+def test_a_whole_file_beside_other_files_is_refused():
+    with pytest.raises(ArchiveSetError, match="exists alongside 1 other files"):
+        ArchiveSet.from_entries(entries(("a.tar", 5), ("a.tar.aa", 5)), "a.tar")
+
+
+def test_parts_whose_suffixes_differ_in_width_are_refused():
+    with pytest.raises(ArchiveSetError, match="mixed suffix widths"):
+        ArchiveSet.from_entries(entries(("a.tar.aa", 1), ("a.tar.abc", 1)), "a.tar")
+
+
+def test_parts_numbered_in_some_places_and_lettered_in_others_are_refused():
+    with pytest.raises(ArchiveSetError, match="mixed suffix styles"):
+        ArchiveSet.from_entries(entries(("a.tar.aa", 1), ("a.tar.01", 1)), "a.tar")
+
+
+@pytest.mark.parametrize("offset", [-1, 20])
+def test_an_offset_outside_the_archive_is_refused(offset: int):
+    s = ArchiveSet.from_entries(entries(("a.tar.aa", 10), ("a.tar.ab", 10)), "a.tar")
+    with pytest.raises(ArchiveSetError, match=f"offset {offset} outside archive of 20"):
+        s.locate(offset)
+
+
+def test_a_set_whose_parts_overlap_cannot_place_an_offset_past_them():
+    """Parts that do not run on from one another are not an archive; locate says so
+    rather than return a position in the wrong part."""
+    part = Part(0, "a.tar.aa", 10, 0, "/d/a.tar.aa", "id:aa", "r", "ab" * 32)
+    overlapping = ArchiveSet([part, replace(part, idx=1, name="a.tar.ab")])
+    with pytest.raises(ArchiveSetError, match="offset 15 outside archive of 20"):
+        overlapping.locate(15)

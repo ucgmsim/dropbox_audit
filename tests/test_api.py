@@ -1,6 +1,8 @@
 import pytest
+import requests
 
 from dbaudit.api import (
+    DEFAULT_RETRY_AFTER,
     ApiError,
     AuthExpiredError,
     CursorResetError,
@@ -182,3 +184,60 @@ def test_a_listing_asks_for_no_deleted_entries():
 def test_missing_has_more_defaults_to_false():
     lst = lister([FakeResp(200, {"entries": [], "cursor": "c"})])
     assert lst.list_folder("/x", recursive=True).has_more is False
+
+
+class GarbledResp(FakeResp):
+    """A reply whose body is not JSON, such as an HTML error page from a proxy."""
+
+    def __init__(self, status: int, text: str):
+        super().__init__(status)
+        self.text = text
+
+    def json(self) -> dict:
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+class DroppedSession:
+    """A session whose connection drops before any reply arrives."""
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout: float,
+        data: str | None = None,
+    ) -> FakeResp:
+        raise ConnectionResetError("peer reset the connection")
+
+
+def test_a_retry_after_that_is_not_a_number_falls_back_to_the_default():
+    lst = lister([FakeResp(429, {}, {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})])
+    with pytest.raises(RateLimitedError) as excinfo:
+        lst.list_folder("/x", recursive=True)
+    assert excinfo.value.retry_after == DEFAULT_RETRY_AFTER
+
+
+def test_an_unlisted_status_is_an_api_error_naming_the_status():
+    lst = lister([FakeResp(400, {"error": "bad request"})])
+    with pytest.raises(ApiError, match="400 from Dropbox") as excinfo:
+        lst.list_folder("/x", recursive=True)
+    assert not isinstance(excinfo.value, TransientError)
+
+
+def test_a_dropped_connection_is_a_transient_error_that_names_the_cause():
+    lst = HttpLister(FakeTokens(), session=DroppedSession())
+    with pytest.raises(TransientError, match="ConnectionResetError") as excinfo:
+        lst.list_folder("/x", recursive=True)
+    assert isinstance(excinfo.value.__cause__, ConnectionResetError)
+
+
+def test_a_garbled_error_body_still_reports_the_http_status():
+    lst = lister([GarbledResp(502, "<html>Bad Gateway</html>")])
+    with pytest.raises(TransientError, match="502 from Dropbox") as excinfo:
+        lst.list_folder("/x", recursive=True)
+    assert "Bad Gateway" in str(excinfo.value)
+
+
+def test_without_a_session_a_lister_makes_a_requests_session():
+    assert isinstance(HttpLister(FakeTokens()).session, requests.Session)

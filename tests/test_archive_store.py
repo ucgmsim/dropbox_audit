@@ -1,3 +1,5 @@
+import sqlite3
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -760,3 +762,193 @@ def test_the_events_of_one_archive_are_found_by_an_index(tmp_path: Path):
         )
     )
     assert "INDEX events_archive" in plan
+
+
+class _FailingWrites:
+    """A connection that raises on its first INSERT, UPDATE or DELETE and delegates the rest.
+
+    Parameters
+    ----------
+    real : sqlite3.Connection
+        The connection every other statement, and every attribute, is passed to.
+    """
+
+    def __init__(self, real: sqlite3.Connection):
+        self._real = real
+        self._failed = False
+
+    def _maybe_fail(self, sql: str) -> None:
+        """Raise once, on the first write statement."""
+        if not self._failed and sql.lstrip().upper().startswith(
+            ("INSERT", "UPDATE", "DELETE")
+        ):
+            self._failed = True
+            raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    def execute(self, sql: str, params: Sequence[object] = ()) -> sqlite3.Cursor:
+        """Run one statement, unless it is the write that must fail."""
+        self._maybe_fail(sql)
+        return self._real.execute(sql, params)
+
+    def executemany(self, sql: str, rows: Iterable[Sequence[object]]) -> sqlite3.Cursor:
+        """Run a statement over many rows, unless it is the write that must fail."""
+        self._maybe_fail(sql)
+        return self._real.executemany(sql, rows)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def _everything(conn: sqlite3.Connection) -> dict[str, list[tuple[object, ...]]]:
+    """Every row of every table, to compare a database before and after."""
+    tables = [
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+    return {
+        t: [
+            tuple(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY 1")
+        ]  # names read from sqlite_master
+        for t in tables
+    }
+
+
+_Action = tuple[ArchiveStore, Callable[[], object]]
+
+
+def _register(tmp_path: Path) -> _Action:
+    store = new_store(tmp_path)
+    return store, lambda: store.register("a.tar", "tar", "/d", "dropbox", parts())
+
+
+def _start_walk(tmp_path: Path) -> _Action:
+    store, archive_id, _ = registered(tmp_path)
+    return store, lambda: store.start_walk(archive_id)
+
+
+def _finish(tmp_path: Path) -> _Action:
+    store, archive_id, _ = registered(tmp_path)
+    return store, lambda: store.finish(archive_id, WalkResult("complete", 100, 1, ""))
+
+
+def _mark_unsupported(tmp_path: Path) -> _Action:
+    store, archive_id, _ = registered(tmp_path)
+    return store, lambda: store.mark_unsupported(archive_id, "pax")
+
+
+def _fail(tmp_path: Path) -> _Action:
+    store, archive_id, _ = registered(tmp_path)
+    return store, lambda: store.fail(archive_id, "boom")
+
+
+def _mark_stale(tmp_path: Path) -> _Action:
+    store, archive_id, _ = registered(tmp_path)
+    return store, lambda: store.mark_stale(archive_id, "replaced")
+
+
+def _seed_segments(tmp_path: Path) -> _Action:
+    store = new_store(tmp_path)
+    archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
+    return store, lambda: store.seed_segments(archive_id, parts())
+
+
+def _mark_joined(tmp_path: Path) -> _Action:
+    store, _, segment_id = registered(tmp_path)
+    return store, lambda: store.mark_joined(segment_id)
+
+
+def _reset_segment(tmp_path: Path) -> _Action:
+    store, _, segment_id = registered(tmp_path)
+    return store, lambda: store.reset_segment(segment_id, 50)
+
+
+def _recheck(tmp_path: Path) -> _Action:
+    store, archive_id = _ended_in_segment_2(tmp_path)
+    return store, lambda: store.recheck(archive_id)
+
+
+def _retire_segment(tmp_path: Path) -> _Action:
+    store, _, segment_id = registered(tmp_path)
+    return store, lambda: store.retire_segment(segment_id)
+
+
+def _release_segment(tmp_path: Path) -> _Action:
+    store, _, segment_id = registered(tmp_path)
+    return store, lambda: store.release_segment(segment_id, requests=1)
+
+
+def _finish_segment(tmp_path: Path) -> _Action:
+    store, _, segment_id = registered(tmp_path)
+    return store, lambda: store.finish_segment(
+        segment_id, WalkResult("complete", 100, 0, "")
+    )
+
+
+def _fail_segment(tmp_path: Path) -> _Action:
+    store, _, segment_id = registered(tmp_path)
+    return store, lambda: store.fail_segment(segment_id, "boom")
+
+
+def _forget(tmp_path: Path) -> _Action:
+    store, archive_id, _ = registered(tmp_path)
+    return store, lambda: store.forget(archive_id, "tidy")
+
+
+def _import_from(tmp_path: Path) -> _Action:
+    (tmp_path / "source").mkdir()
+    source, _, _ = registered(tmp_path / "source")
+    (tmp_path / "dest").mkdir()
+    dest = new_store(tmp_path / "dest")
+    return dest, lambda: dest.import_from(source.path)
+
+
+_WRITERS = [
+    _register,
+    _start_walk,
+    _finish,
+    _mark_unsupported,
+    _fail,
+    _mark_stale,
+    _seed_segments,
+    _mark_joined,
+    _reset_segment,
+    _recheck,
+    _retire_segment,
+    _release_segment,
+    _finish_segment,
+    _fail_segment,
+    _forget,
+    _import_from,
+]
+
+
+@pytest.mark.parametrize("build", _WRITERS, ids=lambda b: b.__name__.lstrip("_"))
+def test_write_transaction_rolls_back_on_failure(
+    build: Callable[[Path], _Action],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A write that fails must surface the error, change nothing, and leave no open
+    transaction behind to lock the next writer out."""
+    store, act = build(tmp_path)
+    real = store.connect()
+    before = _everything(real)
+    monkeypatch.setattr(store, "connect", lambda: _FailingWrites(real))
+
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        act()
+
+    assert not real.in_transaction
+    assert _everything(real) == before
+
+
+def test_read_transaction_rolls_back_when_its_body_raises(tmp_path: Path):
+    store, _, _ = registered(tmp_path)
+
+    with pytest.raises(RuntimeError, match="body failed"), store.read_transaction():
+        store.query("SELECT 1")
+        raise RuntimeError("body failed")
+
+    assert not store.connect().in_transaction

@@ -271,3 +271,30 @@ def test_every_lead_comes_once_and_near_shapes_are_never_a_byte_apart():
     }
     # leads[d] is how far apart, mod SHAPES, the leads of two shapes d apart are.
     assert min(d for d in range(1, SHAPES) if leads[d] in (1, SHAPES - 1)) == 30_599
+
+
+def test_a_concat_file_says_it_can_seek_and_be_read(tmp_path: Path):
+    archive = write_parts(tmp_path, bytes(range(100)), part_size=40)
+    handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
+    assert handle.seekable() is True
+    assert handle.readable() is True
+
+
+def test_seeking_with_an_unknown_whence_is_refused_and_leaves_the_position(
+    tmp_path: Path,
+):
+    archive = write_parts(tmp_path, bytes(range(100)), part_size=40)
+    handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
+    handle.seek(10)
+    with pytest.raises(ValueError, match="invalid whence: 7"):
+        handle.seek(0, 7)
+    assert handle.tell() == 10
+
+
+def test_seeking_before_the_start_is_refused_and_leaves_the_position(tmp_path: Path):
+    archive = write_parts(tmp_path, bytes(range(100)), part_size=40)
+    handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
+    handle.seek(10)
+    with pytest.raises(ValueError, match="negative seek position"):
+        handle.seek(-11, 1)
+    assert handle.tell() == 10

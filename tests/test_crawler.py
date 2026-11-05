@@ -1,8 +1,19 @@
+import contextlib
+import logging
 import threading
-from collections.abc import Collection
+from collections.abc import Collection, Generator
 from pathlib import Path
 
-from dbaudit.api import CursorResetError, Lister, Page, RateLimitedError
+import pytest
+
+from dbaudit.api import (
+    ApiError,
+    AuthExpiredError,
+    CursorResetError,
+    Lister,
+    Page,
+    RateLimitedError,
+)
 from dbaudit.crawler import Crawler
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.store import Store
@@ -547,3 +558,118 @@ def test_a_listing_resumed_from_a_cursor_does_not_count_as_having_no_folders(
     ).run()
     assert ("list", "/R/wide/c01", True) in lister.calls
     assert files_in(store) == files_of(tree)
+
+
+class StopsWhileWaitingForASlot(AdaptiveLimiter):
+    """A limiter whose slot is granted only after the caller's stop has been set."""
+
+    def __init__(self, stop: threading.Event):
+        super().__init__(rps=1e6, max_concurrency=4, sleep=lambda d: None)
+        self.stop = stop
+
+    @contextlib.contextmanager
+    def slot(self) -> Generator[None]:
+        self.stop.set()
+        yield
+
+
+class RaisesOnList(FakeLister):
+    """A lister whose first listing of any folder raises ``error`` every time."""
+
+    def __init__(self, error: Exception):
+        super().__init__(TREE)
+        self.error = error
+
+    def list_folder(self, path: str, recursive: bool) -> Page:
+        raise self.error
+
+
+def test_a_stop_that_arrives_while_waiting_for_a_slot_lists_nothing_and_frees_the_shard(
+    tmp_path: Path,
+):
+    stop = threading.Event()
+    lister = FakeLister(TREE)
+    store = Store(tmp_path / "a.db")
+    store.init_schema()
+    store.set_meta("root", "/R")
+    crawler = Crawler(store, lister, StopsWhileWaitingForASlot(stop), workers=1)
+    crawler.seed("/R")
+
+    crawler.run(stop_event=stop)
+
+    assert lister.calls == []
+    assert store.query("SELECT state FROM shards")[0][0] == "pending"
+
+
+def test_an_expired_token_is_retried_once_the_provider_has_refreshed(tmp_path: Path):
+    lister = FakeLister(TREE, page_size=1)
+    lister.faults["/R"] = AuthExpiredError("401")
+    store, crawler = build(tmp_path, lister, workers=1)
+    crawler.seed("/R")
+    crawler.run()
+    assert files_in(store) == ALL_FILES
+    assert (
+        store.query("SELECT COUNT(*) FROM api_events WHERE kind='auth_expired'")[0][0]
+        == 1
+    )
+
+
+def test_a_token_that_keeps_expiring_fails_the_shard_with_that_reason(tmp_path: Path):
+    store, crawler = build(
+        tmp_path,
+        RaisesOnList(AuthExpiredError("401")),
+        workers=1,
+        split_depth=0,
+        max_page_attempts=2,
+    )
+    crawler.seed("/R")
+    summary = crawler.run()
+    assert summary.errors == 1
+    assert tuple(store.query("SELECT state, error FROM shards")[0]) == (
+        "error",
+        "auth kept expiring",
+    )
+
+
+def test_an_api_error_fails_the_shard_with_its_class_and_message(tmp_path: Path):
+    store, crawler = build(
+        tmp_path,
+        RaisesOnList(ApiError("400 from Dropbox: malformed")),
+        workers=1,
+        split_depth=0,
+    )
+    crawler.seed("/R")
+    summary = crawler.run()
+    assert summary.errors == 1
+    assert store.query("SELECT error FROM shards")[0][0] == (
+        "ApiError: 400 from Dropbox: malformed"
+    )
+
+
+def test_an_unexpected_error_fails_that_shard_and_not_the_pool(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    store, crawler = build(
+        tmp_path, RaisesOnList(ValueError("boom")), workers=1, split_depth=0
+    )
+    crawler.seed("/R")
+    summary = crawler.run()
+    assert summary.errors == 1
+    assert (
+        store.query("SELECT error FROM shards")[0][0] == "unhandled: ValueError: boom"
+    )
+    assert "unhandled error on shard /R" in caplog.text
+
+
+def test_shards_left_running_by_a_dead_process_are_reclaimed_and_listed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    store, crawler = build(tmp_path, FakeLister(TREE), workers=1)
+    crawler.seed("/R")
+    assert store.claim_shard("dead-process") is not None
+    caplog.set_level(logging.INFO, logger="dbaudit.crawler")
+
+    crawler.run()
+
+    assert files_in(store) == ALL_FILES
+    assert "reclaimed 1 shard(s) from a previous run" in caplog.text

@@ -1,8 +1,12 @@
+import datetime as dt
 import json
+import subprocess
+from collections.abc import Callable, Sequence
 
 import pytest
 
-from dbaudit.auth import AuthError, TokenProvider
+from dbaudit import auth
+from dbaudit.auth import AuthError, TokenProvider, _parse_rfc3339
 
 FAKE_DUMP = json.dumps(
     {
@@ -275,3 +279,130 @@ def test_an_account_lookup_that_refuses_the_token_is_an_auth_error(
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: _Answer(401))
     with pytest.raises(AuthError):
         auth._fetch_account("tok")
+
+
+def _dump_with(token: dict[str, object] | None) -> str:
+    """An rclone config dump whose remote holds ``token`` (no token field if None)."""
+    entry: dict[str, object] = {"type": "dropbox"}
+    if token is not None:
+        entry["token"] = json.dumps(token)
+    return json.dumps({"dropbox": entry})
+
+
+def _provider(dump: str, refresh: Callable[[], None] | None = None) -> TokenProvider:
+    return TokenProvider(
+        remote="dropbox",
+        _dump_fn=lambda: dump,
+        _refresh_fn=refresh or (lambda: None),
+        _account_fn=lambda tok: {},
+    )
+
+
+def _fake_run(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A stand-in for ``subprocess.run`` that never starts a process."""
+
+    def run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+    return run
+
+
+def test_a_remote_without_a_token_is_an_auth_error():
+    with pytest.raises(AuthError, match="has no OAuth token"):
+        _provider(_dump_with(None)).access_token()
+
+
+def test_a_token_without_an_access_token_is_an_auth_error():
+    with pytest.raises(AuthError, match="has no access_token"):
+        _provider(_dump_with({"refresh_token": "r"})).access_token()
+
+
+def test_a_token_with_no_expiry_never_goes_stale():
+    refreshes: list[str] = []
+    provider = _provider(
+        _dump_with({"access_token": "legacy"}), refresh=lambda: refreshes.append("x")
+    )
+    assert provider.access_token() == "legacy"
+    assert refreshes == []
+
+
+def test_a_token_with_an_unreadable_expiry_is_refreshed():
+    refreshes: list[str] = []
+    provider = _provider(
+        _dump_with({"access_token": "t", "expiry": "not a date"}),
+        refresh=lambda: refreshes.append("x"),
+    )
+    with pytest.raises(AuthError, match="expired token"):
+        provider.access_token()
+    assert refreshes == ["x"]
+
+
+def test_a_token_rclone_will_not_refresh_is_an_auth_error_naming_the_remote():
+    expired = _dump_with({"access_token": "old", "expiry": "2000-01-01T00:00:00Z"})
+    with pytest.raises(AuthError, match="rclone about dropbox:"):
+        _provider(expired).access_token()
+
+
+def test_an_expiry_without_a_zone_is_read_as_utc():
+    parsed = _parse_rfc3339("2030-05-06T07:08:09.123456789")
+    assert parsed == dt.datetime(2030, 5, 6, 7, 8, 9, 123456, tzinfo=dt.UTC)
+
+
+def test_an_account_without_a_root_namespace_is_not_a_team_account():
+    provider = _provider(FAKE_DUMP)
+    with pytest.raises(AuthError, match="no root_namespace_id"):
+        provider.root_namespace_id()
+
+
+def test_an_account_lookup_dropbox_accepts_returns_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Ok:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict[str, str]:
+            return {"account_id": "dbid:proj00001"}
+
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: Ok())
+    assert auth._fetch_account("tok") == {"account_id": "dbid:proj00001"}
+
+
+def test_the_config_dump_is_rclones_stdout(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(subprocess, "run", _fake_run(stdout='{"dropbox": {}}'))
+    assert auth._rclone_config_dump() == '{"dropbox": {}}'
+
+
+def test_a_missing_rclone_binary_is_an_auth_error(monkeypatch: pytest.MonkeyPatch):
+    def missing(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("rclone")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    with pytest.raises(AuthError, match="rclone is not on PATH"):
+        auth._rclone_config_dump()
+
+
+def test_a_failing_config_dump_reports_rclones_complaint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        subprocess, "run", _fake_run(returncode=1, stderr="  config is encrypted \n")
+    )
+    with pytest.raises(AuthError, match="failed: config is encrypted$"):
+        auth._rclone_config_dump()
+
+
+def test_forcing_a_refresh_asks_rclone_about_the_remote(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen: list[Sequence[str]] = []
+
+    def run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    auth._rclone_force_refresh("dropbox")
+    assert seen == [["rclone", "about", "dropbox:", "--json"]]

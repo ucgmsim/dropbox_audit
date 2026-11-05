@@ -1,8 +1,12 @@
 import json
+import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import pytest
+
 from dbaudit.store import Store
-from dbaudit.verify import verify_subtree
+from dbaudit.verify import _run_rclone, verify_subtree
 
 FILE = {
     ".tag": "file",
@@ -90,3 +94,48 @@ def test_empty_rclone_output_is_handled(tmp_path: Path):
     store = seed(tmp_path, [])
     result = verify_subtree(store, "/R", rclone_fn=lambda p: "")
     assert result.ok and result.db_files == 0
+
+
+def _fake_run(
+    commands: list[list[str]], returncode: int, stdout: str = "", stderr: str = ""
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A stand-in for ``subprocess.run`` that records its command and starts nothing."""
+
+    def run(args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(list(args))
+        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+    return run
+
+
+def test_rclone_is_asked_to_list_the_subtree_and_its_output_is_returned(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    commands: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_run(commands, 0, stdout="[]"))
+    assert _run_rclone("dropbox", "/R") == "[]"
+    assert commands[0][:4] == ["rclone", "lsjson", "-R", "--files-only"]
+    assert commands[0][-1] == "dropbox:/R"
+
+
+def test_a_failing_rclone_listing_raises_with_rclones_complaint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        subprocess, "run", _fake_run([], 3, stderr=" directory not found \n")
+    )
+    with pytest.raises(
+        RuntimeError, match="rclone lsjson failed: directory not found$"
+    ):
+        _run_rclone("dropbox", "/R")
+
+
+def test_verifying_without_a_listing_function_uses_rclone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    commands: list[list[str]] = []
+    listing = json.dumps([{"Path": "a.bin", "Size": 10}])
+    monkeypatch.setattr(subprocess, "run", _fake_run(commands, 0, stdout=listing))
+    result = verify_subtree(seed(tmp_path, [FILE]), "/R", remote="dropbox")
+    assert result.ok
+    assert commands[0][-1] == "dropbox:/R"

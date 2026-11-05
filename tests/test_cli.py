@@ -1,3 +1,5 @@
+import runpy
+import sys
 from pathlib import Path
 
 import pytest
@@ -424,3 +426,14 @@ def test_arguments_fills_in_a_commands_defaults():
         args.recheck,
         args.verbose,
     ) == ("x.db", "a.tar", 4, 2000, False, False)
+
+
+def test_main_module_runs_the_cli(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """``python -m dbaudit`` hands sys.argv to the CLI and exits with its code."""
+    monkeypatch.setattr(sys, "argv", ["dbaudit", "--help"])
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_module("dbaudit", run_name="__main__")
+    assert raised.value.code == 0
+    assert "Usage:" in capsys.readouterr().out

@@ -1,6 +1,7 @@
 import json
 
 import pytest
+import requests
 
 from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import (
@@ -11,6 +12,7 @@ from dbaudit.archive.reader import (
     DropboxRangeReader,
     ReaderError,
     ReadStoppedError,
+    _retry_after,
 )
 from dbaudit.archive.tarwalk import walk
 from dbaudit.limiter import AdaptiveLimiter
@@ -385,3 +387,57 @@ def test_the_block_edge_fault_is_caught_even_without_its_guard(
     assert any(first == BLOCK - 1 for first, _ in session.ranges), (
         "the fault was not asked"
     )
+
+
+class GarbledResponse(FakeResponse):
+    """A reply whose body is not JSON."""
+
+    def json(self) -> dict:
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+def test_a_dropped_connection_is_retried_and_the_read_then_succeeds():
+    reader, session = make(ConnectionResetError("peer reset"), ok(0, 512))
+    assert len(reader.read_range(0, 0, 512)) == 512
+    assert len(session.calls) == 2
+
+
+def test_a_connection_that_keeps_dropping_ends_in_a_reader_error_naming_the_cause():
+    reader, session = make(*[ConnectionResetError("peer reset")] * 3, retries=3)
+    with pytest.raises(ReaderError, match="ConnectionResetError: peer reset"):
+        reader.read_range(0, 0, 512)
+    assert len(session.calls) == 3
+
+
+def test_an_unexpected_status_fails_at_once_with_dropbox_s_words():
+    reader, session = make(FakeResponse(404, body={"error": "path/not_found"}))
+    with pytest.raises(ReaderError, match="404 from Dropbox: .*path/not_found"):
+        reader.read_range(0, 0, 512)
+    assert len(session.calls) == 1
+
+
+def test_without_a_session_a_reader_makes_a_requests_session():
+    reader, _ = make()
+    plain = DropboxRangeReader(reader.archive, FakeTokens(), AdaptiveLimiter(rps=1.0))
+    assert isinstance(plain.session, requests.Session)
+
+
+def test_a_retry_after_in_the_body_wins_over_the_header():
+    response = FakeResponse(
+        429, headers={"Retry-After": "9"}, body={"error": {"retry_after": 4}}
+    )
+    assert _retry_after(response) == 4.0
+
+
+def test_a_retry_after_falls_back_to_the_header_when_the_body_is_garbled():
+    response = GarbledResponse(429, headers={"Retry-After": "9"})
+    assert _retry_after(response) == 9.0
+
+
+def test_a_retry_after_that_is_not_a_number_is_sixty_seconds():
+    response = FakeResponse(429, headers={"Retry-After": "soon"})
+    assert _retry_after(response) == 60.0
+
+
+def test_a_429_with_no_hint_at_all_is_sixty_seconds():
+    assert _retry_after(FakeResponse(429)) == 60.0

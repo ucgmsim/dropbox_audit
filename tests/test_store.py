@@ -1,8 +1,10 @@
+import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from dbaudit.store import Store
+from dbaudit.store import Store, _epoch
 
 FILE = {
     ".tag": "file",
@@ -308,3 +310,113 @@ def test_build_indexes_is_idempotent(tmp_path: Path):
     store = new_store(tmp_path)
     store.build_indexes()
     store.build_indexes()
+
+
+def test_an_empty_or_malformed_stamp_has_no_epoch():
+    assert _epoch(None) is None
+    assert _epoch("") is None
+    assert _epoch("2020-01") is None
+    assert _epoch("yesterday at noon") is None
+    assert _epoch("2020-01-02T03:04:05Z") == 1577934245
+
+
+def test_a_metadata_key_is_the_default_before_the_schema_exists(tmp_path: Path):
+    store = Store(tmp_path / "a.db")
+    assert store.get_meta("root") is None
+    assert store.get_meta("root", "fallback") == "fallback"
+
+
+def test_a_failed_clear_cursor_keeps_the_shards_rows_and_cursor(tmp_path: Path):
+    store = new_store(tmp_path)
+    sid = store.add_shard("/a", 1, "recursive")
+    store.claim_shard("w1")
+    store.commit_page(sid, [FILE], cursor="c", has_more=True)
+    store.connect().execute(
+        "CREATE TRIGGER refuse BEFORE UPDATE ON shards "
+        "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="refused"):
+        store.clear_cursor(sid)
+
+    assert store.stats()["files"] == 1
+    assert store.get_shard(sid).cursor == "c"
+    assert not store.connect().in_transaction
+
+
+def test_a_malformed_content_hash_loses_the_hash_and_logs_the_path(tmp_path: Path):
+    store = new_store(tmp_path)
+    sid = store.add_shard("/a", 1, "recursive")
+    store.claim_shard("w1")
+    store.commit_page(
+        sid, [dict(FILE, content_hash="not-hex")], cursor=None, has_more=False
+    )
+    assert store.query("SELECT content_hash FROM files")[0][0] is None
+    events = store.query("SELECT kind, detail FROM api_events")
+    assert [tuple(e) for e in events] == [("bad_content_hash", FILE["path_display"])]
+
+
+def test_a_file_without_timestamps_is_stored_with_none(tmp_path: Path):
+    store = new_store(tmp_path)
+    sid = store.add_shard("/a", 1, "recursive")
+    store.claim_shard("w1")
+    bare = {
+        k: v for k, v in FILE.items() if k not in ("client_modified", "server_modified")
+    }
+    store.commit_page(sid, [bare], cursor=None, has_more=False)
+    row = store.query("SELECT client_modified, server_modified FROM files")[0]
+    assert tuple(row) == (None, None)
+
+
+def test_full_caches_are_cleared_without_changing_what_is_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("dbaudit.store.DIR_CACHE_LIMIT", 1)
+    monkeypatch.setattr("dbaudit.store.TIME_CACHE_LIMIT", 1)
+    store = new_store(tmp_path)
+    sid = store.add_shard("/a", 1, "recursive")
+    store.claim_shard("w1")
+    later = {
+        "client_modified": "2021-01-02T03:04:05Z",
+        "server_modified": "2021-01-02T03:04:06Z",
+    }
+    files = [
+        FILE,
+        dict(
+            FILE,
+            id="id:2",
+            path_display="/TeamSpace/y/b.bin",
+            path_lower="/teamspace/y/b.bin",
+            **later,
+        ),
+        dict(
+            FILE,
+            id="id:3",
+            path_display="/TeamSpace/x/c.bin",
+            path_lower="/teamspace/x/c.bin",
+        ),
+    ]
+    store.commit_page(sid, files, cursor=None, has_more=False)
+    rows = store.query(
+        "SELECT d.path_display, f.client_modified FROM files f JOIN dirs d ON d.id=f.dir_id "
+        "ORDER BY f.dbx_id"
+    )
+    assert [tuple(r) for r in rows] == [
+        ("/TeamSpace/x", 1577934245),
+        ("/TeamSpace/y", 1609556645),
+        ("/TeamSpace/x", 1577934245),
+    ]
+
+
+def test_free_space_is_the_available_blocks_where_the_database_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    asked: list[str] = []
+
+    def statvfs(path: str) -> SimpleNamespace:
+        asked.append(path)
+        return SimpleNamespace(f_bavail=10, f_frsize=4096)
+
+    monkeypatch.setattr("os.statvfs", statvfs)
+    assert new_store(tmp_path).free_space_bytes() == 40960
+    assert asked == [str(tmp_path)]
