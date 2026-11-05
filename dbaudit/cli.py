@@ -239,7 +239,7 @@ def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
 def _crawl_remote(store: Store) -> str:
     """Return the rclone remote the crawl was started with.
 
-    A database that records none was made for the remote named ``dropbox``.
+    Falls back to ``dropbox`` when none was recorded.
 
     Parameters
     ----------
@@ -251,8 +251,7 @@ def _crawl_remote(store: Store) -> str:
     str
         The remote recorded when the database was initialised, or ``dropbox``.
     """
-    remote = store.get_meta("remote", "dropbox")
-    return remote
+    return store.get_meta("remote", "dropbox")
 
 
 def build_lister(
