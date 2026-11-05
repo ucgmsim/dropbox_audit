@@ -18,21 +18,26 @@ import signal
 import sqlite3
 import tarfile
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from dbaudit import cli
 from dbaudit.api import AuthExpiredError, Page, RateLimitedError, TransientError
+from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import (
+    ConcatFile,
     DropboxRangeReader,
     LocalRangeReader,
     ReaderError,
     ReadStoppedError,
 )
 from dbaudit.archive.store import ArchiveStore
-from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
+from dbaudit.archive.tarwalk import REREAD_LIMIT, WalkResult, find_chain_start
+from dbaudit.auth import TokenProvider
 from dbaudit.cli import LISTING_ATTEMPTS, main
+from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import build_tar, write_parts
 
@@ -46,7 +51,12 @@ SWALLOWED = [
 ]
 
 
-def local_archive(tmp_path: Path, data=None, part_size=4096, name="parts"):
+def local_archive(
+    tmp_path: Path,
+    data: bytes | None = None,
+    part_size: int = 4096,
+    name: str = "parts",
+):
     """Split a tar into part files and return the directory holding them."""
     source = tmp_path / name
     source.mkdir()
@@ -54,7 +64,7 @@ def local_archive(tmp_path: Path, data=None, part_size=4096, name="parts"):
     return source
 
 
-def dropbox_entries(archive_set, override=None):
+def dropbox_entries(archive_set: ArchiveSet, override: tuple[int, str] | None = None):
     """The `files/list_folder` entries a folder of these parts would return."""
     entries = [
         {
@@ -74,30 +84,35 @@ def dropbox_entries(archive_set, override=None):
     return entries
 
 
-def fake_build_lister(pages):
+def fake_build_lister(pages: Sequence[list[dict[str, object]] | Exception]):
     """A `build_lister` whose nth listing returns `pages[n]`, or raises it if it is an
     exception (the last one repeats)."""
     calls = {"n": 0}
 
     class Lister:
-        def list_folder(self, path, recursive=False):
+        def list_folder(self, path: str, recursive: bool = False) -> Page:
             entries = pages[min(calls["n"], len(pages) - 1)]
             calls["n"] += 1
             if isinstance(entries, Exception):
                 raise entries
             return Page(entries=entries, cursor=None, has_more=False)
 
-        def continue_(self, cursor):
+        def continue_(self, cursor: str) -> Page:
             raise AssertionError("these fakes never paginate")
 
-    def build(remote, tokens=None):
-        return object(), Lister()
+    class Build:
+        def __init__(self) -> None:
+            self.calls = calls
 
-    build.calls = calls
-    return build
+        def __call__(
+            self, remote: str, tokens: object | None = None
+        ) -> tuple[object, Lister]:
+            return object(), Lister()
+
+    return Build()
 
 
-def event_count(db, archive_id, kind):
+def event_count(db: str, archive_id: int, kind: str):
     return (
         ArchiveStore(db)
         .connect()
@@ -109,7 +124,7 @@ def event_count(db, archive_id, kind):
     )
 
 
-def run_starts(db, archive_id):
+def run_starts(db: str, archive_id: int):
     """How many walks this archive has begun, from the events `start_walk` writes."""
     return event_count(db, archive_id, "run_start")
 
@@ -125,7 +140,7 @@ def signal_handled():
     handled = threading.Event()
 
     class Watch(logging.Handler):
-        def emit(self, record):
+        def emit(self, record: logging.LogRecord) -> None:
             if record.getMessage().startswith("signal "):
                 handled.set()
 
@@ -137,7 +152,7 @@ def signal_handled():
         logging.getLogger("dbaudit").removeHandler(watch)
 
 
-def has_analysis_indexes(db):
+def has_analysis_indexes(db: str):
     return bool(
         ArchiveStore(db)
         .connect()
@@ -148,7 +163,12 @@ def has_analysis_indexes(db):
     )
 
 
-def register_dropbox(monkeypatch: pytest.MonkeyPatch, db, archive_set, folder="/d"):
+def register_dropbox(
+    monkeypatch: pytest.MonkeyPatch,
+    db: str,
+    archive_set: ArchiveSet,
+    folder: str = "/d",
+):
     monkeypatch.setattr(
         "dbaudit.cli.build_lister", fake_build_lister([dropbox_entries(archive_set)])
     )
@@ -311,7 +331,7 @@ def test_a_walk_reports_how_many_chains_it_is_walking(
     barrier, arrived, lock = threading.Barrier(4, timeout=30), set(), threading.Lock()
     real_claim = ArchiveStore.claim_segment
 
-    def claim_segment(self, archive_id, owner):
+    def claim_segment(self: ArchiveStore, archive_id: int, owner: str):
         with lock:
             first = owner not in arrived and len(arrived) < 4
             arrived.add(owner)
@@ -338,7 +358,7 @@ def test_a_walk_reports_how_many_chains_it_is_walking(
 
 @pytest.mark.parametrize("seed", range(10))
 def test_chains_find_every_member_wherever_the_parts_divide(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed: int
 ):
     """Against tarfile's own listing: members from a few bytes to many times a part, parts
     cut anywhere, one chain or many -- each starting where its scan found a header, or
@@ -460,7 +480,7 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
     before = signal.getsignal(signal.SIGINT)
     with signal_handled() as handled:
 
-        def commit_batch(self, *args, **kwargs):
+        def commit_batch(self: ArchiveStore, *args, **kwargs):
             result = real_commit(self, *args, **kwargs)
             if not sent.is_set():
                 sent.set()
@@ -514,7 +534,9 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
     reads = []
     real_read = LocalRangeReader.read_range
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(
+        self: LocalRangeReader, part_idx: int, offset: int, length: int
+    ) -> bytes:
         reads.append(offset)
         return real_read(self, part_idx, offset, length)
 
@@ -553,7 +575,9 @@ def test_max_batches_commits_exactly_that_many_batches(
     reads = {"n": 0, "bytes": 0}
     real_read = LocalRangeReader.read_range
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(
+        self: LocalRangeReader, part_idx: int, offset: int, length: int
+    ) -> bytes:
         block = real_read(self, part_idx, offset, length)
         reads["n"] += 1
         reads["bytes"] += len(block)
@@ -627,7 +651,7 @@ def test_a_stop_between_claim_and_scan_never_starts_the_scan(
 
     with signal_handled() as handled:
 
-        def claim_segment(self, archive_id, owner):
+        def claim_segment(self: ArchiveStore, archive_id: int, owner: str):
             segment = real_claim(self, archive_id, owner)
             # Segment 0 starts at offset 0 and needs no scan. Stop the run exactly as a
             # segment that *would* scan is handed to a worker.
@@ -693,7 +717,7 @@ def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(
     stop, scans = threading.Event(), []
 
     class Stopping(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if part_idx == 0:
                 stop.wait(10)  # the first chain crosses only after it
             elif offset < scanning:
@@ -729,7 +753,7 @@ def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(
     scans = []
 
     class Recording(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if part_idx == 1 and offset < scanning:
                 scans.append(offset)
             return super().read_range(part_idx, offset, length)
@@ -755,13 +779,15 @@ def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(
     started, crossed, scans = threading.Event(), threading.Event(), []
     real_finish = ArchiveStore.finish_segment
 
-    def finish_segment(self, segment_id, result, *rest, **kwargs):
+    def finish_segment(
+        self: ArchiveStore, segment_id: int, result: WalkResult, *rest, **kwargs
+    ):
         real_finish(self, segment_id, result, *rest, **kwargs)
         if result.state == "crossed":
             crossed.set()
 
     class Ordered(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if part_idx == 0:
                 started.wait(10)  # segment 1 is scanning before 0 crosses
             elif offset < scanning:
@@ -797,14 +823,16 @@ def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(
     )
     real_finish = ArchiveStore.finish_segment
 
-    def finish_segment(self, segment_id, result, *rest, **kwargs):
+    def finish_segment(
+        self: ArchiveStore, segment_id: int, result: WalkResult, *rest, **kwargs
+    ):
         real_finish(self, segment_id, result, *rest, **kwargs)
         if result.state == "crossed":
             stop.set()  # a signal lands as segment 0 crosses
             crossed.set()
 
     class Ordered(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if stop.is_set():
                 after.append((part_idx, offset))
             if part_idx == 0:
@@ -848,7 +876,9 @@ def test_a_chain_that_dies_is_still_charged_for_what_it_read(
     reads = {"n": 0}
     real_read = LocalRangeReader.read_range
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(
+        self: LocalRangeReader, part_idx: int, offset: int, length: int
+    ) -> bytes:
         reads["n"] += 1
         if reads["n"] == 3:
             raise RuntimeError("the part went away mid-read")
@@ -900,7 +930,7 @@ def test_a_worker_that_blows_up_does_not_look_like_a_clean_stop(
         ]
     )
 
-    def boom(self, archive_id, owner):
+    def boom(self: ArchiveStore, archive_id: int, owner: str):
         raise RuntimeError("the database went away")
 
     monkeypatch.setattr(ArchiveStore, "claim_segment", boom)
@@ -1094,16 +1124,19 @@ def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(
     )
 
     class Lister:
-        def list_folder(self, path, recursive=False):
+        def list_folder(self, path: str, recursive: bool = False):
             answer = next(answers)
             if isinstance(answer, Exception):
                 raise answer
             return answer
 
+        def continue_(self, cursor: str) -> Page:
+            raise AssertionError("this fake never paginates")
+
     class Tokens:
         dropped = 0
 
-        def invalidate(self):
+        def invalidate(self) -> None:
             self.dropped += 1
 
     tokens = Tokens()
@@ -1175,7 +1208,9 @@ def test_the_reported_cost_is_the_delta_and_not_a_running_total(
     reads = {"n": 0, "bytes": 0}
     real_read = LocalRangeReader.read_range
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(
+        self: LocalRangeReader, part_idx: int, offset: int, length: int
+    ) -> bytes:
         block = real_read(self, part_idx, offset, length)
         reads["n"] += 1
         reads["bytes"] += len(block)
@@ -1320,7 +1355,13 @@ class _SharedLies:
     covering several offsets would carry every lie in a single fetch.) `alternate` lies
     about one offset on every other fetch covering it: a server that never settles."""
 
-    def __init__(self, source, plan=None, sequence=None, alternate=None):
+    def __init__(
+        self,
+        source: Path,
+        plan: dict[int, int | None] | None = None,
+        sequence: Sequence[int] | None = None,
+        alternate: int | None = None,
+    ):
         self.source, self.plan = source, dict(plan or {})
         self.sequence = list(sequence or [])
         if alternate is not None:
@@ -1329,11 +1370,17 @@ class _SharedLies:
         self.lied = 0
         self.lock = threading.Lock()
 
-    def reader_for(self, row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        self,
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         shared = self
 
         class _Reader(LocalRangeReader):
-            def read_range(self, part_idx, offset, length):
+            def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
                 data = super().read_range(part_idx, offset, length)
                 start = self.archive.parts[part_idx].offset + offset
                 with shared.lock:
@@ -1366,7 +1413,7 @@ class _SharedLies:
         return _Reader(self.source, archive_set)
 
 
-def _terminator_of(data):
+def _terminator_of(data: bytes):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
         last = t.getmembers()[-1]
     return last.offset_data + (-(-last.size // 512)) * 512
@@ -1375,7 +1422,7 @@ def _terminator_of(data):
 @pytest.mark.parametrize("nth", [1, 2])
 @pytest.mark.unshaped
 def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nth
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nth: int
 ):
     """End to end, through the 8-worker pool, the join and the store: one bad read at the
     terminator -- on whichever fetch it lands, including the one that confirms `complete`
@@ -1465,7 +1512,9 @@ def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
 # ---- pax archives are refused, loudly --------------------------------------------------
 
 
-def _pax_archive(tmp_path: Path, members, part_size=4096):
+def _pax_archive(
+    tmp_path: Path, members: Sequence[tuple[str, bytes]], part_size: int = 4096
+):
     """A pax-format tar split into parts: an `x` header before every member, as GNU tar
     --format=posix writes one."""
     buf = io.BytesIO()
@@ -1766,12 +1815,12 @@ def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(
 # ---- a header read from the wrong place, caught after a complete walk -------------------
 
 
-def _header_offsets(data):
+def _header_offsets(data: bytes):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
         return [m.offset for m in t]
 
 
-def _names(db):
+def _names(db: str):
     store = ArchiveStore(db)
     return [
         r["name"]
@@ -1788,17 +1837,25 @@ class _CopiesAHeader:
     the wrong place, which passes every checksum. The members in MEMBERS all pad to the
     same size, so the walk rejoins its chain straight after it and ends `complete`."""
 
-    def __init__(self, directory, data, at, source, nth=1):
+    def __init__(
+        self, directory: Path, data: bytes, at: int, source: int, nth: int = 1
+    ):
         self.directory, self.at, self.nth = directory, at, nth
         self.header = data[source : source + 512]
         self.covering = self.lied = 0
         self.lock = threading.Lock()
 
-    def reader_for(self, row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        self,
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         shared = self
 
         class _Reader(LocalRangeReader):
-            def read_range(self, part_idx, offset, length):
+            def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
                 data = super().read_range(part_idx, offset, length)
                 start = self.archive.parts[part_idx].offset + offset
                 if not start <= shared.at < start + length:
@@ -1869,7 +1926,7 @@ def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
     assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "audit_repair") == 1
 
 
-def _index_with_appended(tmp_path: Path, appended, *extra):
+def _index_with_appended(tmp_path: Path, appended: str, *extra):
     """MEMBERS plus one more member named ``appended``, indexed to the end."""
     data = build_tar(MEMBERS + [(appended, b"y" * 705)])
     label = appended.replace("/", "_")
@@ -1893,7 +1950,7 @@ def _index_with_appended(tmp_path: Path, appended, *extra):
     return code, db
 
 
-def _requests(db):
+def _requests(db: str):
     store = ArchiveStore(db)
     return store.stats(store.get("a.tar")["id"])["requests"]
 
@@ -1956,7 +2013,12 @@ def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
     )
     made = []
 
-    def reader_for(row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         reader = LocalRangeReader(row["folder"], archive_set)
         made.append(reader)
         if len(made) == 2:  # the first reader walks, the second audits
@@ -1964,7 +2026,7 @@ def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
             def fail(*args, **kwargs):
                 raise ReaderError("simulated: Dropbox kept failing")
 
-            reader.read_range = fail
+            monkeypatch.setattr(reader, "read_range", fail)
         return reader
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
@@ -2006,7 +2068,9 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(
     )
     stop, audited, real_read = threading.Event(), [], cli.read_member
 
-    def read_member(concat, offset):  # only the audit reads members this way
+    def read_member(
+        concat: ConcatFile, offset: int
+    ):  # only the audit reads members this way
         audited.append(offset)
         stop.set()  # a signal, as the audit begins
         return real_read(concat, offset)
@@ -2025,7 +2089,7 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(
 
 @pytest.mark.parametrize("phase", ["walk", "audit", "compression"])
 def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
 ):
     """A read Dropbox kept answering 429 gives way to a stop. The walk, the audit and the
     compression check each take that as a stop: no verdict yet, and nothing failed."""
@@ -2054,13 +2118,20 @@ def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(
     ]  # the walk's reader comes first
 
     class GivesWay(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        nth: int
+
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if self.nth == nth:
                 stop.set()
                 raise ReadStoppedError("a.tar: stopped while Dropbox answered 429")
             return super().read_range(part_idx, offset, length)
 
-    def reader_for(row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         made.append(GivesWay(row["folder"], archive_set))
         made[-1].nth = len(made)
         return made[-1]
@@ -2102,7 +2173,7 @@ def test_a_read_that_gives_way_to_a_stop_still_commits_what_the_walk_confirmed(
     stop, reads = threading.Event(), [0]
 
     class GivesWay(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             reads[0] += 1
             if reads[0] == 60:  # a signal, as this read meets a 429
                 stop.set()
@@ -2133,28 +2204,34 @@ def test_a_read_that_gives_way_to_a_stop_still_commits_what_the_walk_confirmed(
 
 
 class _Answer:
-    def __init__(self, status, content=b"", headers=None, body=None):
+    def __init__(
+        self,
+        status: int,
+        content: bytes = b"",
+        headers: dict[str, str] | None = None,
+        body: dict[str, object] | None = None,
+    ):
         self.status_code, self.content, self.text = status, content, ""
         self.headers, self._body = headers or {}, body or {}
 
-    def json(self):
+    def json(self) -> dict[str, object]:
         return self._body
 
 
 class _Tokens:
-    def access_token(self):
+    def access_token(self) -> str:
         return "tok"
 
-    def root_namespace_id(self):
+    def root_namespace_id(self) -> str:
         return "ns"
 
-    def invalidate(self):
+    def invalidate(self) -> None:
         pass
 
 
 @pytest.mark.parametrize("phase", ["walk", "audit", "compression"])
 def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
 ):
     """Through the real reader: once the stop lands, Dropbox answers 429 to everything,
     and only the reader giving way to the stop can end the walk, the audit or the
@@ -2183,11 +2260,20 @@ def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(
         phase
     ]  # the walk's reader comes first
 
+    served = data
+
     class Dropbox:
         def __init__(self):
             self.nth, self.posts = len(made), 0
 
-        def post(self, url, headers=None, timeout=None):
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            timeout: float,
+            data: str | None = None,
+        ) -> _Answer:
             self.posts += 1
             if self.nth == nth and self.posts >= 2:
                 stop.set()  # a signal, in a storm that does not end
@@ -2195,11 +2281,16 @@ def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(
             first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
             return _Answer(
                 206,
-                data[first : last + 1],
-                {"Content-Range": f"bytes {first}-{last}/{len(data)}"},
+                served[first : last + 1],
+                {"Content-Range": f"bytes {first}-{last}/{len(served)}"},
             )
 
-    def reader_for(row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         made.append(None)
         return DropboxRangeReader(
             archive_set,
@@ -2262,10 +2353,10 @@ class _CountingTokens:
 
     dropped = 0
 
-    def __init__(self, remote="dropbox", **kwargs):
+    def __init__(self, remote: str = "dropbox", **kwargs):
         pass
 
-    def invalidate(self):
+    def invalidate(self) -> None:
         type(self).dropped += 1
 
 
@@ -2312,7 +2403,7 @@ def test_a_stopped_walk_does_not_list_its_folder_again(
     stop = threading.Event()
 
     class Stopping(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             stop.set()  # a signal, as the walk reads
             return super().read_range(part_idx, offset, length)
 
@@ -2356,20 +2447,25 @@ def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(
     )
     made = []
 
-    def reader_for(row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         reader = LocalRangeReader(row["folder"], archive_set)
         made.append(reader)
         if len(made) == 2:  # the first reader walks, the second audits
             real = reader.read_range
 
-            def once_wrong(part_idx, offset, length):
+            def once_wrong(part_idx: int, offset: int, length: int) -> bytes:
                 body = real(part_idx, offset, length)
                 if reader.requests == 1 and offset <= offsets[-1] < offset + length:
                     cut = offsets[-1] - offset
                     body = body[:cut] + b"\xff" * 512 + body[cut + 512 :]
                 return body
 
-            reader.read_range = once_wrong
+            monkeypatch.setattr(reader, "read_range", once_wrong)
         return reader
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
@@ -2408,7 +2504,7 @@ def test_the_audit_repairs_a_segment_other_than_the_first(
     state = {"done": False}
 
     class OneWellFormedLie(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             true = super().read_range(part_idx, offset, length)
             at = self.archive.parts[part_idx].offset + offset
             if not state["done"] and at <= x.offset and x.offset + 512 <= at + length:
@@ -2479,14 +2575,20 @@ class _SameJunkEveryTime:
     that repeats one wrong answer, which no number of re-reads can outvote. The walker
     cannot tell that from damage; `--recheck` is how the operator asks again later."""
 
-    def __init__(self, source, at):
+    def __init__(self, source: Path, at: int):
         self.source, self.at, self.on, self.lied = source, at, True, 0
 
-    def reader_for(self, row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        self,
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         shared = self
 
         class _Reader(LocalRangeReader):
-            def read_range(self, part_idx, offset, length):
+            def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
                 data = super().read_range(part_idx, offset, length)
                 start = self.archive.parts[part_idx].offset + offset
                 if not shared.on or not start <= shared.at < start + length:
@@ -2499,7 +2601,9 @@ class _SameJunkEveryTime:
         return _Reader(self.source, archive_set)
 
 
-def _condemned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part_size=None):
+def _condemned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part_size: int | None = None
+):
     """An archive left `corrupt` by a server that said the same wrong thing every time."""
     data = build_tar(MEMBERS)
     source = local_archive(tmp_path, data, part_size=part_size or len(data))
@@ -2690,7 +2794,7 @@ def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(
     state = {"lied": False}
 
     class OneStretch(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             true = super().read_range(part_idx, offset, length)
             start = self.archive.parts[part_idx].offset + offset
             if state["lied"] or not start <= at < start + length:
@@ -2757,7 +2861,7 @@ def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
     assert event_count(db, row["id"], "recheck") == 0
 
 
-def _header_claiming(data, header, size):
+def _header_claiming(data: bytes, header: int, size: int):
     """The header at ``header`` with its size field set to ``size``, checksum redone: a
     valid header that sends the chain wherever a test needs it."""
     block = bytearray(data[header : header + 512])
@@ -2797,7 +2901,7 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
     state = {"lie": True, "lied": 0}
 
     class OneLie(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             true = super().read_range(part_idx, offset, length)
             start = self.archive.parts[part_idx].offset + offset
             if (
@@ -2880,7 +2984,7 @@ def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
     state = {"lie": True, "lied": 0}
 
     class OneLie(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             true = super().read_range(part_idx, offset, length)
             start = self.archive.parts[part_idx].offset + offset
             if (
@@ -2972,7 +3076,7 @@ def test_recheck_scans_for_no_start_it_already_has(
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     scans = []
 
-    def scan(concat, offset, *args, **kwargs):
+    def scan(concat: ConcatFile, offset: int, *args, **kwargs):
         scans.append(offset)
         return find_chain_start(concat, offset, *args, **kwargs)
 
@@ -3103,7 +3207,7 @@ def test_the_chain_crossing_into_a_retired_segment_re_arms_it(tmp_path: Path):
 # ---- compressed files named .tar --------------------------------------------------
 
 
-def _compressed(kind, data):
+def _compressed(kind: str, data: bytes):
     if kind == "gzip":
         return gzip.compress(data)
     if kind == "bzip2":
@@ -3118,7 +3222,7 @@ RANDOM_MEMBERS = [(f"run/r{i}.bin", random.Random(i).randbytes(3000)) for i in r
 
 @pytest.mark.parametrize("kind", ["gzip", "bzip2", "xz", "zstd"])
 def test_a_compressed_file_named_tar_is_unsupported_not_corrupt(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], kind
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], kind: str
 ):
     """Its owner should look for a decompressor, not for damage."""
     data = _compressed(kind, build_tar(RANDOM_MEMBERS))
@@ -3211,7 +3315,7 @@ def test_index_says_so_when_the_read_that_checks_for_compression_fails(
     )
 
     class Failing(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if length <= 6:  # only the compression check asks so little
                 raise ReaderError("a.tar: rate limited")
             return super().read_range(part_idx, offset, length)
@@ -3249,7 +3353,7 @@ def test_a_compression_format_is_named_only_once_two_readings_agree(
     )
 
     class Misread(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             data = super().read_range(part_idx, offset, length)
             return b"\x1f\x8b" + data[2:] if (offset, length) == (0, 6) else data
 
@@ -3287,7 +3391,7 @@ def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(
     asked = []
 
     class Recording(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             asked.append(length)
             return super().read_range(part_idx, offset, length)
 

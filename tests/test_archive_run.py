@@ -23,20 +23,22 @@ import pytest
 
 from dbaudit import cli
 from dbaudit.api import AuthExpiredError, RateLimitedError, TransientError
+from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
-from dbaudit.auth import AuthError
+from dbaudit.auth import AuthError, TokenProvider
 from dbaudit.cli import LISTING_ATTEMPTS, _run_limiter, main
+from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import World, build_tar, members
 
 
-def rows(db):
+def rows(db: str):
     store = ArchiveStore(db)
     return {r["folder"]: r for r in store.connect().execute("SELECT * FROM archives")}
 
 
-def run(db, audit, *extra):
+def run(db: str, audit: str, *extra):
     return main(["archive", "run", "--db", db, "--audit-db", audit, *extra])
 
 
@@ -203,7 +205,7 @@ def test_a_failed_compression_check_leaves_its_archive_in_error_and_the_run_goes
     world.install(monkeypatch)
 
     class Failing(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if length <= 6:  # only the compression check asks so little
                 raise ReaderError("rate limited")
             return super().read_range(part_idx, offset, length)
@@ -246,7 +248,9 @@ def test_an_archive_that_moved_since_registration_is_walked_once_where_it_is_now
     world.local["/R/new"] = world.local.pop("/R/old")
     tries, real = Counter(), cli._walk_archive
 
-    def counted(args, store, row, *rest, **kw):
+    def counted(
+        args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row, *rest, **kw
+    ):
         tries[row["id"]] += 1
         return real(args, store, row, *rest, **kw)
 
@@ -365,7 +369,12 @@ def test_parts_that_change_during_the_walk_leave_it_stale_and_the_run_goes_on(
     world, db, audit = three(tmp_path, monkeypatch)
     changed = []
 
-    def reader(row, archive_set, tokens=None, limiter=None):
+    def reader(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         if row["folder"] == "/R/b" and not changed:
             changed.append(True)  # someone re-uploads a part mid-walk
             world.folders["/R/b"][0]["content_hash"] = "ff" * 32
@@ -498,7 +507,7 @@ def test_a_db_that_is_not_an_archive_database_is_refused_untouched(
     """The audit database given as --db by mistake gains no tables."""
     _world, _db, audit = three(tmp_path, monkeypatch)
 
-    def tables(path):
+    def tables(path: str):
         return {
             r[0]
             for r in sqlite3.connect(path).execute(
@@ -512,13 +521,13 @@ def test_a_db_that_is_not_an_archive_database_is_refused_untouched(
     assert tables(audit) == before
 
 
-def logged(monkeypatch: pytest.MonkeyPatch, text):
+def logged(monkeypatch: pytest.MonkeyPatch, text: str):
     """An Event set once a `dbaudit` log message holds ``text``: the signal handler logs
     after it sets the stop, so its line means every walk is already winding down."""
     seen = threading.Event()
 
     class Watch(logging.Handler):
-        def emit(self, record):
+        def emit(self, record: logging.LogRecord) -> None:
             if text in record.getMessage():
                 seen.set()
 
@@ -527,14 +536,14 @@ def logged(monkeypatch: pytest.MonkeyPatch, text):
     return seen
 
 
-def signalling(world, monkeypatch: pytest.MonkeyPatch, signum):
+def signalling(world: World, monkeypatch: pytest.MonkeyPatch, signum: int):
     """Readers that send ``signum`` on the run's third read, once, and hold that read until
     the main thread has acted on it, so its archive is stopped mid-walk."""
     reads, sent, lock = [0], threading.Event(), threading.Lock()
     handled = logged(monkeypatch, "committing every batch")
 
     class Signalling(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             with lock:
                 reads[0] += 1
                 third = reads[0] == 3
@@ -555,7 +564,7 @@ def signalling(world, monkeypatch: pytest.MonkeyPatch, signum):
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_a_signal_stops_every_walk_and_a_second_run_finishes_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signum
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signum: int
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     sent = signalling(world, monkeypatch, signum)
@@ -584,7 +593,7 @@ def test_a_second_signal_exits_at_once_with_status_1(
     handled = logged(monkeypatch, "committing every batch")
 
     class Twice(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             with lock:
                 reads[0] += 1
                 third = reads[0] == 3
@@ -618,7 +627,9 @@ def test_three_unexpected_failures_stop_the_run_with_status_1(
     world.install(monkeypatch)
     real = cli._walk_archive
 
-    def failing(args, store, row, *rest, **kw):
+    def failing(
+        args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row, *rest, **kw
+    ):
         if row["name"].startswith("bad"):
             raise RuntimeError(f"injected into {row['name']}")
         return real(args, store, row, *rest, **kw)
@@ -640,7 +651,7 @@ def test_an_archive_in_error_is_tried_once_more_then_left_while_the_rest_finish(
     world, db, audit = three(tmp_path, monkeypatch)
 
     class Unreadable(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             raise OSError("the disk went away")
 
     monkeypatch.setattr(
@@ -651,7 +662,9 @@ def test_an_archive_in_error_is_tried_once_more_then_left_while_the_rest_finish(
     )
     tries, real = Counter(), cli._walk_archive
 
-    def counted(args, store, row, *rest, **kw):
+    def counted(
+        args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row, *rest, **kw
+    ):
         tries[row["folder"]] += 1
         return real(args, store, row, *rest, **kw)
 
@@ -674,7 +687,7 @@ def test_a_split_archive_reads_with_no_more_chains_than_workers(
     lock, flying, most = threading.Lock(), [0], [0]
 
     class Counting(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             with lock:
                 flying[0] += 1
                 most[0] = max(most[0], flying[0])
@@ -709,7 +722,12 @@ def test_a_split_archive_capped_at_its_workers_leaves_streams_for_others(
     world.install(monkeypatch)
     tiny_read, waited, lock = threading.Event(), [], threading.Lock()
 
-    def reader(row, archive_set, tokens=None, limiter=None):
+    def reader(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         if row["folder"] == "/R/t":
             tiny_read.set()
         else:
@@ -761,7 +779,9 @@ def test_content_walked_before_under_another_name_is_not_walked_again(
     world.add("/R/a", "a.tar", data)
     walked, real = [], cli._walk_archive
 
-    def counted(args, store, row, *rest, **kw):
+    def counted(
+        args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row, *rest, **kw
+    ):
         walked.append(row["folder"])
         return real(args, store, row, *rest, **kw)
 
@@ -785,7 +805,9 @@ def test_two_places_that_come_to_hold_the_same_content_walk_it_once(
     world.add("/R/b", "b.tar", data, part_size=60_000)  # b.tar now holds a.tar's bytes
     flying, most, lock, real = Counter(), Counter(), threading.Lock(), cli._walk_archive
 
-    def counted(args, store, row, *rest, **kw):
+    def counted(
+        args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row, *rest, **kw
+    ):
         with lock:
             flying[row["id"]] += 1
             most[row["id"]] = max(most[row["id"]], flying[row["id"]])
@@ -796,7 +818,7 @@ def test_two_places_that_come_to_hold_the_same_content_walk_it_once(
                 flying[row["id"]] -= 1
 
     class Slow(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             time.sleep(0.02)  # so that the two walks would overlap
             return super().read_range(part_idx, offset, length)
 
@@ -815,7 +837,7 @@ def test_two_places_that_come_to_hold_the_same_content_walk_it_once(
 
 @pytest.mark.parametrize("how", ["gone", "gap"])
 def test_a_copy_is_walked_when_the_archive_standing_for_it_has_gone_or_lost_a_part(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
 ):
     """One place stands for each content, and its copies wait. If that place has gone by its
     turn, or lost a part, the content is walked where a copy of it is."""
@@ -856,7 +878,9 @@ def test_the_next_archive_starts_while_another_finishes_its_last_chain(
     order, b_started, held = [], threading.Event(), []
     real = cli._walk_archive
 
-    def walking(args, store, row, *rest, **kwargs):
+    def walking(
+        args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row, *rest, **kwargs
+    ):
         order.append(("start", row["name"]))
         if row["name"] == "b.tar":
             b_started.set()
@@ -866,7 +890,7 @@ def test_the_next_archive_starts_while_another_finishes_its_last_chain(
             order.append(("end", row["name"]))
 
     class LastPartWaits(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             if (
                 part_idx == 5 and not held
             ):  # a.tar's last chain waits for b.tar, a while
@@ -945,7 +969,7 @@ def test_a_run_goes_on_with_a_walk_from_its_cursors_not_from_the_start(
     asked = []
 
     class Recording(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
             asked.append(offset)
             return super().read_range(part_idx, offset, length)
 
@@ -1004,11 +1028,16 @@ def test_every_walk_and_listing_takes_its_turn_at_one_limiter(
     world, db, audit = three(tmp_path, monkeypatch)
     made, seen, fast = [], [], cli._run_limiter  # the World's, quick for tests
 
-    def limiter_for(args):
+    def limiter_for(args: SimpleNamespace):
         made.append(fast(args))
         return made[-1]
 
-    def reader(row, archive_set, tokens=None, limiter=None):
+    def reader(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         seen.append(limiter)
         return world.reader(row, archive_set)
 
@@ -1054,10 +1083,10 @@ def test_the_run_drops_its_token_after_a_401_on_an_archives_listing(
     dropped = []
 
     class Tokens:
-        def __init__(self, remote="dropbox", **kwargs):
+        def __init__(self, remote: str = "dropbox", **kwargs):
             pass
 
-        def invalidate(self):
+        def invalidate(self) -> None:
             dropped.append(True)
 
     world, db, audit = three(tmp_path, monkeypatch)
@@ -1097,7 +1126,7 @@ def test_a_folder_that_cannot_be_listed_is_left_in_error_and_the_run_goes_on(
     assert len(world.faults["/R/a"]) == 100 - 2 * LISTING_ATTEMPTS
 
 
-def mixed(rng, i, round_):
+def mixed(rng: random.Random, i: int, round_: int):
     """One archive of the equivalence check's mix: mostly plain tars, some split into
     parts, some pax, some gzip files named .tar."""
     data = build_tar(members(rng.randint(1, 12), seed=round_ * 1000 + i))
@@ -1118,7 +1147,7 @@ def mixed(rng, i, round_):
 
 @pytest.mark.parametrize("round_", range(3))
 def test_many_archives_walked_at_once_give_exactly_the_rows_walked_one_at_a_time(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, round_
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, round_: int
 ):
     """The equivalence check: threads, a shared limiter and one database change nothing
     about what any archive's walk records. Each round has its own mix, and DBAUDIT_SEED
@@ -1153,7 +1182,7 @@ def test_many_archives_walked_at_once_give_exactly_the_rows_walked_one_at_a_time
             ["archive", "index", "--db", single, "--archive", name, "--rps", "1000"]
         ) in (0, 1)
 
-    def manifest(db):
+    def manifest(db: str):
         store = ArchiveStore(db)
         out = {}
         for archive in store.connect().execute(
