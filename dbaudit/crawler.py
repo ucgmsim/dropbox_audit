@@ -29,6 +29,7 @@ import itertools
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .api import (
@@ -37,8 +38,11 @@ from .api import (
     CursorResetError,
     PathNotFoundError,
     RateLimitedError,
+    Lister,
     TransientError,
 )
+from .limiter import AdaptiveLimiter
+from .store import Shard, Store
 
 log = logging.getLogger("dbaudit.crawler")
 
@@ -57,9 +61,9 @@ class RunSummary:
 class Crawler:
     def __init__(
         self,
-        store,
-        lister,
-        limiter,
+        store: Store,
+        lister: Lister,
+        limiter: AdaptiveLimiter,
         workers: int = 8,
         split_depth: int = 6,
         queue_target: int | None = None,
@@ -109,7 +113,7 @@ class Crawler:
 
     # ---- the decision that keeps workers busy ---------------------------
 
-    def _should_split(self, shard) -> bool:
+    def _should_split(self, shard: Shard) -> bool:
         # The persisted mode is checked first and wins unconditionally. A cursor
         # belongs to the kind of listing that created it, so a resumed split shard
         # must stay split: continuing a non-recursive cursor in recursive mode would
@@ -153,7 +157,7 @@ class Crawler:
 
     # ---- learning from siblings -----------------------------------------
 
-    def _one_level_by_siblings(self, path) -> bool:
+    def _one_level_by_siblings(self, path: str) -> bool:
         """Whether to list this folder one level at a time, judging by its siblings.
 
         For a folder with no subfolders, a one-level listing returns everything a
@@ -171,10 +175,10 @@ class Crawler:
             listed, with_folders = self._siblings.get(parent, (0, 0))
         return self._leafy(listed, with_folders)
 
-    def _leafy(self, listed, with_folders) -> bool:
+    def _leafy(self, listed: int, with_folders: int) -> bool:
         return listed >= self.one_level_after and with_folders * 10 <= listed
 
-    def _record_listed(self, path, had_folders) -> None:
+    def _record_listed(self, path: str, had_folders: bool) -> None:
         parent = path.rstrip("/").rsplit("/", 1)[0]
         with self._siblings_lock:
             listed, with_folders = self._siblings.get(parent, (0, 0))
@@ -197,7 +201,12 @@ class Crawler:
 
     # ---- per-shard work -------------------------------------------------
 
-    def _process(self, shard, stop: threading.Event, after_page) -> None:
+    def _process(
+        self,
+        shard: Shard,
+        stop: threading.Event,
+        after_page: Callable[[int], None] | None,
+    ) -> None:
         mode = "split" if self._should_split(shard) else "recursive"
         if mode != shard.mode:
             self.store.set_shard_mode(shard.id, mode)
@@ -319,7 +328,7 @@ class Crawler:
         # Interrupted: hand the shard back with its cursor intact.
         self.store.release_shard(shard.id)
 
-    def _fail(self, shard, message: str) -> None:
+    def _fail(self, shard: Shard, message: str) -> None:
         log.error("shard %s failed: %s", shard.path, message)
         self.store.log_event("shard_error", f"{shard.path}: {message}")
         self.store.fail_shard(shard.id, message)
@@ -328,7 +337,12 @@ class Crawler:
 
     # ---- worker pool ----------------------------------------------------
 
-    def _worker(self, name: str, stop: threading.Event, after_page) -> None:
+    def _worker(
+        self,
+        name: str,
+        stop: threading.Event,
+        after_page: Callable[[int], None] | None,
+    ) -> None:
         store = self.store
         try:
             while not stop.is_set():
@@ -346,7 +360,11 @@ class Crawler:
         finally:
             store.close()  # one connection per worker, closed once at the end
 
-    def run(self, stop_event=None, _after_page=None) -> RunSummary:
+    def run(
+        self,
+        stop_event: threading.Event | None = None,
+        _after_page: Callable[[int], None] | None = None,
+    ) -> RunSummary:
         stop = stop_event or threading.Event()
 
         # Any shard still marked running belongs to a process that died; the

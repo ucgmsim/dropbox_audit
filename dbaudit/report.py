@@ -12,6 +12,8 @@ import os
 from array import array
 from dataclasses import dataclass
 
+from .store import Store
+
 
 @dataclass
 class DirRow:
@@ -51,7 +53,7 @@ class HotspotRow:
     mean_size: float
 
 
-def reconcile(store, reported_used_bytes: int) -> tuple[int, int, int]:
+def reconcile(store: Store, reported_used_bytes: int) -> tuple[int, int, int]:
     """Live bytes we measured vs what Dropbox reports as used.
 
     The residual is version history plus deleted-but-retained data: it cannot be
@@ -63,7 +65,7 @@ def reconcile(store, reported_used_bytes: int) -> tuple[int, int, int]:
     return live, reported_used_bytes, reported_used_bytes - live
 
 
-def duplicate_report(store, limit: int = 50) -> list[DuplicateRow]:
+def duplicate_report(store: Store, limit: int = 50) -> list[DuplicateRow]:
     rows = store.query(
         "SELECT content_hash, COUNT(*), MAX(size), SUM(size) - MAX(size) AS reclaimable "
         "FROM files WHERE content_hash IS NOT NULL "
@@ -92,7 +94,7 @@ def duplicate_report(store, limit: int = 50) -> list[DuplicateRow]:
     return out
 
 
-def total_reclaimable_duplicates(store) -> int:
+def total_reclaimable_duplicates(store: Store) -> int:
     return store.query(
         "SELECT COALESCE(SUM(reclaimable), 0) FROM ("
         "  SELECT SUM(size) - MAX(size) AS reclaimable FROM files "
@@ -116,7 +118,7 @@ def _subtree(under: str) -> tuple[str, list]:
     )
 
 
-def cold_bytes(store, under: str | None = None) -> list[YearRow]:
+def cold_bytes(store: Store, under: str | None = None) -> list[YearRow]:
     """Bytes by the year each file was last modified, going by the file's own date.
 
     That is `client_modified`, sent by whatever uploaded the file. Dropbox's own
@@ -137,7 +139,9 @@ def cold_bytes(store, under: str | None = None) -> list[YearRow]:
     return [YearRow(*row) for row in rows]
 
 
-def bytes_older_than(store, years: float, now: float | None = None) -> tuple[int, int]:
+def bytes_older_than(
+    store: Store, years: float, now: float | None = None
+) -> tuple[int, int]:
     """Files last modified more than `years` before `now`, by their own date."""
     import time
 
@@ -149,7 +153,7 @@ def bytes_older_than(store, years: float, now: float | None = None) -> tuple[int
     return row[0], row[1]
 
 
-def top_dirs(store, limit: int = 50) -> list[DirRow]:
+def top_dirs(store: Store, limit: int = 50) -> list[DirRow]:
     """Recursive per-directory rollup, computed bottom-up in one linear pass.
 
     The obvious SQL -- joining every directory to every descendant path -- is
@@ -188,7 +192,7 @@ def top_dirs(store, limit: int = 50) -> list[DirRow]:
 
 
 def small_file_hotspots(
-    store, min_files: int = 100_000, max_mean_size: int = 65536, limit: int = 50
+    store: Store, min_files: int = 100_000, max_mean_size: int = 65536, limit: int = 50
 ) -> list[HotspotRow]:
     """Directories holding many tiny files.
 
@@ -205,7 +209,9 @@ def small_file_hotspots(
     return [HotspotRow(*row) for row in rows]
 
 
-def extension_profile(store, limit: int = 40, under: str | None = None) -> list[ExtRow]:
+def extension_profile(
+    store: Store, limit: int = 40, under: str | None = None
+) -> list[ExtRow]:
     where, values = "", []
     if under is not None:
         condition, values = _subtree(under)
@@ -218,7 +224,7 @@ def extension_profile(store, limit: int = 40, under: str | None = None) -> list[
     return [ExtRow(*row) for row in rows]
 
 
-def top_level_summary(store) -> list[DirRow]:
+def top_level_summary(store: Store) -> list[DirRow]:
     """One row per immediate child of the crawl root -- usually per person or project."""
     root = (store.get_meta("root") or "").rstrip("/")
     depth = root.count("/") + 1
@@ -235,7 +241,7 @@ def top_level_summary(store) -> list[DirRow]:
     return out
 
 
-def export_csv(store, outdir: str) -> list[str]:
+def export_csv(store: Store, outdir: str) -> list[str]:
     os.makedirs(outdir, exist_ok=True)
     written = []
     tables = {

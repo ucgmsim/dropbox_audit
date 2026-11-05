@@ -14,6 +14,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -96,7 +97,7 @@ def _extension(name: str) -> str:
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path: str | os.PathLike[str]):
         self.path = str(path)
         self._local = threading.local()
         self._meta_lock = threading.Lock()
@@ -125,7 +126,9 @@ class Store:
             conn.close()
             self._local.conn = None
 
-    def _caches(self):
+    def _caches(
+        self,
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, int | None]]:
         self.connect()
         return (
             self._local.dir_cache,
@@ -144,7 +147,7 @@ class Store:
         conn = self.connect()
         conn.executescript(SCHEMA_PATH.read_text())
 
-    def set_meta(self, key: str, value) -> None:
+    def set_meta(self, key: str, value: object) -> None:
         with self._meta_lock:
             self.connect().execute(
                 "INSERT INTO meta(key, value) VALUES(?, ?) "
@@ -165,7 +168,7 @@ class Store:
         )
         return row is not None
 
-    def get_meta(self, key: str, default=None):
+    def get_meta(self, key: str, default: str | None = None) -> str | None:
         try:
             row = (
                 self.connect()
@@ -176,7 +179,7 @@ class Store:
             return default  # schema not created yet
         return default if row is None else row[0]
 
-    def query(self, sql: str, params=()) -> list[tuple]:
+    def query(self, sql: str, params: Sequence[object] = ()) -> list[tuple]:
         return self.connect().execute(sql, params).fetchall()
 
     def log_event(self, kind: str, detail: str = "") -> None:
@@ -329,7 +332,9 @@ class Store:
 
     # ---- the hot path ---------------------------------------------------
 
-    def _principal_id(self, conn, cache, account_id):
+    def _principal_id(
+        self, conn: sqlite3.Connection, cache: dict[str, int], account_id: str | None
+    ) -> int | None:
         if not account_id:
             return None
         cached = cache.get(account_id)
@@ -345,7 +350,12 @@ class Store:
         return pid
 
     def ensure_dir(
-        self, conn, path_display: str, cache, shard_id=None, created=None
+        self,
+        conn: sqlite3.Connection,
+        path_display: str,
+        cache: dict[str, int],
+        shard_id: int | None = None,
+        created: list[int] | None = None,
     ) -> int:
         """Return the id of ``path_display``, creating it and any missing ancestors.
 
@@ -392,7 +402,7 @@ class Store:
         entries: list[dict],
         cursor: str | None,
         has_more: bool,
-        child_shards=(),
+        child_shards: Iterable[tuple[str, int, str]] = (),
         shard_path: str = "",
     ) -> PageStats:
         """Write one page and its cursor in a single transaction.
@@ -539,7 +549,9 @@ class Store:
         return stats
 
     @staticmethod
-    def _hash_bytes(conn, content_hash, path_display):
+    def _hash_bytes(
+        conn: sqlite3.Connection, content_hash: str | None, path_display: str
+    ) -> bytes | None:
         """Never let one malformed hash cost us a whole shard.
 
         Dropbox always returns 64 hex chars, but a file recorded without its hash is
@@ -556,7 +568,9 @@ class Store:
             )
             return None
 
-    def _cached_epoch(self, stamp, cache):
+    def _cached_epoch(
+        self, stamp: str | None, cache: dict[str, int | None]
+    ) -> int | None:
         if not stamp:
             return None
         hit = cache.get(stamp)

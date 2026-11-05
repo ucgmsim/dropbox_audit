@@ -25,12 +25,13 @@ import sqlite3
 import time
 import tomllib
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from . import report
 from .archive.tarwalk import REGULAR_MEMBER_TYPES
+from .store import Store
 
 GROUPS = (
     "simulated waveforms",
@@ -125,9 +126,11 @@ class Rules:
     keep: tuple[str, ...] = ()  # path prefixes whose velocity models are kept
     _im_dirs: tuple[str, ...] = field(init=False, repr=False, compare=False)
     _vm_dir: re.Pattern = field(init=False, repr=False, compare=False)
-    _folder: object = field(init=False, repr=False, compare=False)
+    _folder: Callable[[str], tuple[bool, bool, bool, bool, bool]] = field(
+        init=False, repr=False, compare=False
+    )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         for name in RULE_KEYS:
             object.__setattr__(
                 self, name, tuple(w.lower() for w in getattr(self, name))
@@ -265,6 +268,10 @@ OLDEST = (
     "SELECT content_hash, MIN(client_modified) AS oldest FROM files "
     "WHERE content_hash IS NOT NULL GROUP BY content_hash HAVING COUNT(*) > 1"
 )
+# One byte count from the walk: (dir_id, kind, size, how, date).
+WalkRow = tuple[int, str, float, str, float | None]
+# Each archive as (trusted, name, folder, listed bytes), by archive id.
+Archives = dict[int, tuple[bool, str, str, int]]
 _TYPES = sorted(REGULAR_MEMBER_TYPES)
 _REGULAR = f"size > 0 AND type IN ({', '.join('?' * len(_TYPES))})"
 
@@ -287,11 +294,11 @@ def archive_index(path: str) -> sqlite3.Connection:
 
 
 def walk(
-    store,
+    store: Store,
     rules: Rules,
     index: sqlite3.Connection | None = None,
     under: str | None = None,
-) -> Iterator[tuple[int, str, float, str, float | None]]:
+) -> Iterator[WalkRow]:
     """Every byte of the listing, or of the folder `under`, as (dir_id, kind, size, how,
     date) rows, `how` being LOOSE, MEMBERS or BY_NAME. Bytes inside a tarball count toward
     the folder that holds it. Reads both databases, each in one read transaction, and
@@ -302,16 +309,17 @@ def walk(
         archives, owner = _archives(index) if index is not None else ({}, {})
         aside: dict[int, list[tuple[int, int]]] = defaultdict(list)
         yield from _files(store, rules, archives, owner, aside, under)
-        for archive_id in sorted(aside):
-            yield from _members(
-                index, rules, archive_id, archives[archive_id], aside[archive_id]
-            )
+        if index is not None:  # nothing is set aside without an index
+            for archive_id in sorted(aside):
+                yield from _members(
+                    index, rules, archive_id, archives[archive_id], aside[archive_id]
+                )
     finally:
         if index is not None and index.in_transaction:
             index.execute("COMMIT")
 
 
-def _archives(index):
+def _archives(index: sqlite3.Connection) -> tuple[Archives, dict[bytes, int]]:
     """Each archive as (trusted, name, folder, listed bytes), and the archive each part's
     content hash belongs to.
 
@@ -328,7 +336,8 @@ def _archives(index):
             _TYPES,
         )
     )
-    archives, rank = {}, {}
+    archives: Archives = {}
+    rank: dict[int, tuple[bool, bool, int]] = {}
     for archive_id, state, total, name, folder in index.execute(
         "SELECT id, state, total_size, name, folder FROM archives"
     ):
@@ -336,7 +345,7 @@ def _archives(index):
         trusted = held > 0 and (state in FINISHED or held >= total / 2)
         archives[archive_id] = (trusted, name, folder or "", held)
         rank[archive_id] = (trusted, state in FINISHED, archive_id)
-    owner = {}
+    owner: dict[bytes, int] = {}
     for archive_id, digest in index.execute(
         "SELECT archive_id, content_hash FROM parts WHERE content_hash IS NOT NULL "
         "AND content_hash != ''"
@@ -351,7 +360,14 @@ def _archives(index):
     return archives, owner
 
 
-def _files(store, rules, archives, owner, aside, under):
+def _files(
+    store: Store,
+    rules: Rules,
+    archives: Archives,
+    owner: dict[bytes, int],
+    aside: dict[int, list[tuple[int, int]]],
+    under: str | None,
+) -> Iterator[WalkRow]:
     """The listing's files, each yielded with its kind, or set aside under the trusted
     archive whose part it is."""
     conn = store.connect()
@@ -364,7 +380,7 @@ def _files(store, rules, archives, owner, aside, under):
             "d.path_lower, o.oldest FROM files f JOIN dirs d ON d.id = f.dir_id "
             f"LEFT JOIN ({OLDEST}) o ON o.content_hash = f.content_hash"
         )
-        values = []
+        values: list[str] = []
         if under is not None:
             condition, values = report._subtree(under)
             sql += f" WHERE {condition}"
@@ -395,7 +411,13 @@ def _files(store, rules, archives, owner, aside, under):
             conn.execute("COMMIT")
 
 
-def _members(index, rules, archive_id, archive, files):
+def _members(
+    index: sqlite3.Connection,
+    rules: Rules,
+    archive_id: int,
+    archive: tuple[bool, str, str, int],
+    files: list[tuple[int, int]],
+) -> Iterator[WalkRow]:
     """A trusted archive's bytes, in each of its copies and parts (`files`), shared out over
     its listed members by size and dated by each member's own time."""
     _, name, folder, listed = archive
@@ -420,9 +442,15 @@ class Tally:
     """Bytes by kind, each split [loose, in tarballs], as the walk gave them."""
 
     listed: float  # when the listing was taken
-    kinds: dict = field(default_factory=dict)  # kind -> [loose, tarred]
-    months: dict = field(default_factory=dict)  # (kind, "YYYY-MM") -> [loose, tarred]
-    older: dict = field(default_factory=dict)  # (kind, years) -> [loose, tarred]
+    kinds: dict[str, list[float]] = field(
+        default_factory=dict
+    )  # kind -> [loose, tarred]
+    months: dict[tuple[str, str], list[float]] = field(
+        default_factory=dict
+    )  # (kind, "YYYY-MM") -> [loose, tarred]
+    older: dict[tuple[str, float], list[float]] = field(
+        default_factory=dict
+    )  # (kind, years) -> [loose, tarred]
     members: float = 0.0  # tarred bytes shared over listed members
     by_name: float = 0.0  # tarred bytes judged by their names
     undated: float = 0.0
@@ -430,7 +458,9 @@ class Tally:
     def total(self) -> float:
         return sum(loose + tarred for loose, tarred in self.kinds.values())
 
-    def _by_group(self, figures) -> dict[str, list[float]]:
+    def _by_group(
+        self, figures: Iterable[tuple[str, Sequence[float]]]
+    ) -> dict[str, list[float]]:
         out: dict[str, list[float]] = {}
         for kind, (loose, tarred) in figures:
             group = out.setdefault(KINDS[kind][1], [0, 0])
@@ -445,7 +475,7 @@ class Tally:
             group: out[group] for group in GROUPS if group in out and sum(out[group])
         }
 
-    def group_older(self, years) -> dict[str, list[float]]:
+    def group_older(self, years: float) -> dict[str, list[float]]:
         """Group -> [loose, tarred] older than `years`, for each group that holds bytes."""
         out = self._by_group((kind, self.older[kind, years]) for kind in self.kinds)
         return {group: out[group] for group in self.groups()}
@@ -460,7 +490,9 @@ class Tally:
         return out
 
 
-def tarball_note(counted: Tally, looked_inside: bool, size) -> str:
+def tarball_note(
+    counted: Tally, looked_inside: bool, size: Callable[[float], str]
+) -> str:
     """One sentence on how the tarballs' bytes were placed; `size` formats a byte count."""
     if looked_inside:
         return (
@@ -473,7 +505,7 @@ def tarball_note(counted: Tally, looked_inside: bool, size) -> str:
     )
 
 
-def tally(rows, listed: float) -> Tally:
+def tally(rows: Iterable[WalkRow], listed: float) -> Tally:
     """Add up the walk's rows. Ages count back from `listed`, months are UTC, and a date
     after the listing (a wrong clock) is in its own month but older than nothing."""
     out = Tally(listed)
@@ -482,7 +514,7 @@ def tally(rows, listed: float) -> Tally:
         if not size:  # an empty file: nothing to count, and no month to show
             continue
         side = 0 if how == LOOSE else 1
-        figures = out.kinds.get(kind)
+        figures: list[float] | None = out.kinds.get(kind)
         if figures is None:
             figures = out.kinds[kind] = [0, 0]
             for years in AGES:
@@ -493,7 +525,7 @@ def tally(rows, listed: float) -> Tally:
         elif how == BY_NAME:
             out.by_name += size
         month = None if date is None else month_of(date)
-        if month is None:
+        if date is None or month is None:
             out.undated += size
             continue
         figures = out.months.get((kind, month))
@@ -508,7 +540,7 @@ def tally(rows, listed: float) -> Tally:
     return out
 
 
-def _months():
+def _months() -> Callable[[float], str | None]:
     """A function giving a Unix time's UTC month as "YYYY-MM", remembered day by day, or
     None for a time no calendar holds."""
 

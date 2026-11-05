@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import heapq
 import html
+import sqlite3
 import time
 from array import array
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from typing import TextIO
 
 from . import kinds, report
+from .kinds import Tally
+from .store import Store
 
 YEAR = 365.25 * 86400
 COLD_YEARS = 2
@@ -57,7 +62,7 @@ class Figures:
     reclaimable: int = 0  # page bytes deletable while one copy of everything stays
 
 
-def find_dir(store, path: str):
+def find_dir(store: Store, path: str) -> tuple[int, str] | None:
     """The (id, path_display) of the folder at `path`, matched without case, or None."""
     rows = store.query(
         "SELECT id, path_display FROM dirs WHERE path_lower = ?",
@@ -66,7 +71,7 @@ def find_dir(store, path: str):
     return rows[0] if rows else None
 
 
-def crawl_time(store) -> tuple[float, bool]:
+def crawl_time(store: Store) -> tuple[float, bool]:
     """When the listing was taken, and whether a pass over it finished."""
     finished = store.get_meta("last_pass_completed_at")
     if finished:
@@ -85,7 +90,9 @@ DUPLICATES = (
 )
 
 
-def duplicate_groups(conn, top: int):
+def duplicate_groups(
+    conn: sqlite3.Connection, top: int
+) -> Iterator[list[tuple[int, int, int]]]:
     """Yield each duplicated content's copies as (dir_id, size, rowid), one content at a
     time, so memory stays flat however many duplicates there are."""
     group, last = [], None
@@ -100,7 +107,7 @@ def duplicate_groups(conn, top: int):
         yield group
 
 
-def common_folder(dirs: list[int], parent, depth) -> int:
+def common_folder(dirs: list[int], parent: array[int], depth: array[int]) -> int:
     """The deepest folder holding every one of `dirs`: their lowest common ancestor."""
     meet = dirs[0]
     for other in dirs[1:]:
@@ -113,7 +120,7 @@ def common_folder(dirs: list[int], parent, depth) -> int:
     return meet
 
 
-def measure(store, listed: float, min_size: int, page_root: int) -> Figures:
+def measure(store: Store, listed: float, min_size: int, page_root: int) -> Figures:
     """Figures for every folder, as of `listed`, the time the listing was taken."""
     conn = store.connect()
     # Bound the snapshot before reading it: folders created while a crawl runs get
@@ -244,7 +251,9 @@ def below(path: str, crawl_root: str) -> str:
     return path.lstrip("/")
 
 
-def chunked(conn, query: str, ids):
+def chunked(
+    conn: sqlite3.Connection, query: str, ids: Iterable[int]
+) -> Iterator[tuple]:
     """The rows `query` finds for `ids`, a chunk at a time; it ends in `IN ({})`."""
     ids = list(ids)
     for i in range(0, len(ids), 500):
@@ -252,7 +261,9 @@ def chunked(conn, query: str, ids):
         yield from conn.execute(query.format(",".join("?" * len(chunk))), chunk)
 
 
-def dir_names(conn, ids) -> dict[int, tuple[str, str]]:
+def dir_names(
+    conn: sqlite3.Connection, ids: Iterable[int]
+) -> dict[int, tuple[str, str]]:
     """{dir id: (name, path_display)}."""
     return {
         d: (name, path)
@@ -285,7 +296,7 @@ def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
     )
 
 
-def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
+def layout(store: Store, figures: Figures, threshold: int, max_rows: int) -> Page:
     f, root = figures, figures.page_root
     conn = store.connect()
     top = len(f.size)
@@ -317,7 +328,7 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
     if len(files) > max_rows:
         threshold = past(threshold, files[-1][2])
 
-    def rows_at(t):
+    def rows_at(t: int) -> int:
         shown = [d for d in folders if f.size[d] >= t]
         subfolders = Counter(f.parent[d] for d in shown)
         own = Counter(row[1] for row in files if row[2] >= t)
@@ -365,7 +376,7 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
                 )
             )
 
-    def assemble(row):
+    def assemble(row: Row) -> None:
         children = sorted(inside.get(row.dir_id, ()), key=lambda r: (-r.size, r.name))
         for child in children:
             if child.kind == "dir":
@@ -397,7 +408,9 @@ def layout(store, figures: Figures, threshold: int, max_rows: int) -> Page:
     return Page(page_row, threshold, rows, shown | {root})
 
 
-def measure_kinds(figures: Figures, page: Page, rows, listed: float) -> kinds.Tally:
+def measure_kinds(
+    figures: Figures, page: Page, rows: Iterable[kinds.WalkRow], listed: float
+) -> Tally:
     """Give each folder row on the page its largest kind of data, and return the tally of
     `rows`, a kinds.walk read once.
 
@@ -444,7 +457,7 @@ def measure_kinds(figures: Figures, page: Page, rows, listed: float) -> kinds.Ta
 # ---- tables: the folders worth a closer look --------------------------------
 
 
-def ancestors(d: int, parent):
+def ancestors(d: int, parent: array[int]) -> Iterator[int]:
     d = parent[d]
     while d:
         yield d
@@ -465,7 +478,9 @@ class Entry:
     place_share: float = 0.0
 
 
-def choose(ranked, parent, limit: int = TABLE_ROWS) -> list[int]:
+def choose(
+    ranked: Iterable[int], parent: array[int], limit: int = TABLE_ROWS
+) -> list[int]:
     """Take folders in ranking order, skipping any inside or above one already taken."""
     taken, above, out = set(), set(), []
     for d in ranked:
@@ -480,7 +495,7 @@ def choose(ranked, parent, limit: int = TABLE_ROWS) -> list[int]:
     return out
 
 
-def place(d: int, near: set, parent, depth, floor: int) -> int:
+def place(d: int, near: set, parent: array[int], depth: array[int], floor: int) -> int:
     """Where a copy in folder `d` lies, seen from a folder whose ancestry is `near`.
 
     The copy's ancestor one level below where the two paths part, never shallower than
@@ -496,7 +511,9 @@ def place(d: int, near: set, parent, depth, floor: int) -> int:
     return d
 
 
-def counterparts(conn, figures: Figures, folders: list[int], floor: int) -> dict:
+def counterparts(
+    conn: sqlite3.Connection, figures: Figures, folders: list[int], floor: int
+) -> dict:
     """{folder: (place, bytes)}: the place holding copies of the most of each folder's
     held-elsewhere bytes. A second pass over the duplicates, for these folders only."""
     if not folders:
@@ -524,7 +541,7 @@ def counterparts(conn, figures: Figures, folders: list[int], floor: int) -> dict
     return out
 
 
-def tables(store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
+def tables(store: Store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
     f, root = figures, figures.page_root
     below_root = [d for d in range(1, len(f.size)) if f.on_page[d] and d != root]
     big = [d for d in below_root if f.size[d] >= page.threshold]
@@ -554,7 +571,7 @@ def tables(store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
     spots = counterparts(conn, f, dup, crawl_root.rstrip("/").count("/") + 2)
     names = dir_names(conn, {*dup, *cold, *tiny, *(spot for spot, _ in spots.values())})
 
-    def entry(d):
+    def entry(d: int) -> Entry:
         target = d
         while target not in page.shown:
             target = f.parent[target]
@@ -598,20 +615,20 @@ class Summary:
     running: int
     failed: int
     min_size: int
-    types: list  # report.ExtRow
-    years: list  # report.YearRow
-    kinds: kinds.Tally | None = None
+    types: list[report.ExtRow]
+    years: list[report.YearRow]
+    kinds: Tally | None = None
     looked_inside: bool = False  # an archive index was given, to look inside tarballs
 
 
 def build(
-    store,
+    store: Store,
     page_path: str,
     min_size: int,
     max_rows: int,
     db_name: str,
     rules: kinds.Rules | None = None,
-    index=None,
+    index: sqlite3.Connection | None = None,
 ):
     """(page, summary, tables) for the folder at `page_path`. `rules` and `index` (an
     archive index, see kinds.archive_index) say what kinds of data the files are."""
@@ -731,7 +748,7 @@ def _badges(row: Row) -> str:
     return out
 
 
-def _folder(out, row: Row, total: int, lines: str, twig: str) -> None:
+def _folder(out: TextIO, row: Row, total: int, lines: str, twig: str) -> None:
     """Write a folder's row and, inside it, everything below it."""
     top = twig == ""
     meta = _counts(row) + (f" &middot; newest {day(row.date)}" if row.date else "")
@@ -768,7 +785,7 @@ def _folder(out, row: Row, total: int, lines: str, twig: str) -> None:
     out.write("</details>\n")
 
 
-def _header(out, page: Page, summary: Summary) -> None:
+def _header(out: TextIO, page: Page, summary: Summary) -> None:
     root = page.root
     made = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(summary.generated))
     when = "listed" if summary.finished else "listing begun"
@@ -808,12 +825,17 @@ def _header(out, page: Page, summary: Summary) -> None:
     )
 
 
-def _table(out, headings: list[str], rows: list[list[str]], left=(0,)) -> None:
+def _table(
+    out: TextIO,
+    headings: list[str],
+    rows: list[list[str]],
+    left: tuple[int, ...] = (0,),
+) -> None:
     if not rows:
         out.write('<p class="note">None.</p>\n')
         return
 
-    def cell(tag, i, text):
+    def cell(tag: str, i: int, text: str) -> str:
         return (
             f'<{tag} class="left">{text}</{tag}>'
             if i in left
@@ -837,10 +859,10 @@ def _link(e: Entry) -> str:
     return f'<a href="#d{e.target}">{esc(e.path or "/")}</a>{folded}'
 
 
-def _tables(out, page: Page, summary: Summary, chosen: dict) -> None:
+def _tables(out: TextIO, page: Page, summary: Summary, chosen: dict) -> None:
     total = page.root.size
 
-    def share(n):
+    def share(n: float) -> str:
         return f"{n / total:.1%}" if total else "0.0%"
 
     out.write(
@@ -959,7 +981,7 @@ def _tables(out, page: Page, summary: Summary, chosen: dict) -> None:
     )
 
 
-def _reading(out, page: Page) -> None:
+def _reading(out: TextIO, page: Page) -> None:
     out.write(f"""<h2>Reading this</h2>
 <p class="note">Folder sizes are rolled up from the files listed below them: Dropbox reports
 no folder sizes. Percentages and bars are shares of this page's {compact(page.root.size)}.
@@ -986,7 +1008,7 @@ inside or above one already listed is skipped, so no two listed folders overlap.
 """)
 
 
-def render(out, page: Page, summary: Summary, chosen: dict) -> None:
+def render(out: TextIO, page: Page, summary: Summary, chosen: dict) -> None:
     """Write the whole page to the text file `out`."""
     out.write(HEAD.replace("{title}", esc(summary.title)))
     _header(out, page, summary)
