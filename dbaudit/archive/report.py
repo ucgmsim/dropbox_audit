@@ -131,8 +131,8 @@ def _utc(ts: int) -> datetime:
 def _iso(ts: int) -> str:
     """Format a full timestamp, for a per-member record (`manifest.csv`).
 
-    For where the hour can matter -- e.g. telling apart files written moments apart
-    during one run.
+    This is for where the hour can matter -- e.g. telling apart files written moments
+    apart during one run.
 
     Parameters
     ----------
@@ -215,8 +215,8 @@ def _by_bytes_desc[K: (str, tuple[str, str])](
     """Return `(key, {count, bytes})` pairs, sorted by descending bytes.
 
     A plain dict would not survive `dict(...)` in the caller and then back out again
-    with a defined order, and the brief's own test
-    relies on descending-by-bytes being the order a caller sees without re-sorting.
+    with a defined order, and the brief's own test relies on descending-by-bytes being
+    the order a caller sees without re-sorting.
 
     Parameters
     ----------

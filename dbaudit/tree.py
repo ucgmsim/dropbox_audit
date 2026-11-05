@@ -777,7 +777,7 @@ def measure_kinds(
 
 
 def ancestors(d: int, parent: array[int]) -> Iterator[int]:
-    """Return the folders above a folder, nearest first.
+    """Yield the folders above a folder, nearest first.
 
     Parameters
     ----------

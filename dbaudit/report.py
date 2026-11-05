@@ -1,4 +1,4 @@
-"""Reports aimed at one question: where could this storage be reduced.
+"""Reports aimed at one question: where storage could be reduced.
 
 Each report answers a different reduction strategy -- delete duplicates, archive cold
 data, clean up a directory full of junk, or purge version history -- so they are

@@ -171,9 +171,9 @@ class Rules:
         )
 
     def _folder_tests(self, folder: str) -> tuple[bool, bool, bool, bool, bool]:
-        """Hold what classify asks of a folder.
+        """Return the tests classify asks of a folder.
 
-        That is: recorded, LF converted, velocity models, sources and IM results.
+        They are: recorded, LF converted, velocity models, sources and IM results.
 
         Parameters
         ----------

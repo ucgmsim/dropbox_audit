@@ -329,7 +329,7 @@ class Runner:
         elapsed: float,
         rate: float,
     ) -> None:
-        """Return what is left, in flight or queued, at the last hour's pace.
+        """Log what is left, in flight or queued, at the last hour's pace.
 
         Estimated by count and by size. The largest archives go first, so the truth lies
         between the two.

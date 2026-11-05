@@ -162,9 +162,8 @@ class ArchiveStore:
 
         It is the seam Task 9's report module is built on, rather than reaching past this
         store into SQL the way Task 7's review flagged `cmd_archive_status` for doing.
-        Rows come back as
-        `sqlite3.Row` (this connection's own `row_factory`), so callers can index a
-        result by column name as well as by position.
+        Rows come back as `sqlite3.Row` (this connection's own `row_factory`), so callers
+        can index a result by column name as well as by position.
 
         For a result set worth holding in a Python list -- one row, or a handful --
         not for a scan over every member of a multi-TiB archive; see `stream` for that.
@@ -218,9 +217,9 @@ class ArchiveStore:
 
         They provably see one snapshot instead of however many happen to line up from
         separate autocommit statements landing between a concurrent walker's commits.
-        This connection is WAL (`connect()`), so a reader here never
-        blocks -- or is blocked by -- `commit_batch` writing; it costs nothing beyond
-        an ordinary read when nothing else happens to be running at the same moment.
+        This connection is WAL (`connect()`), so a reader here never blocks -- or is
+        blocked by -- `commit_batch` writing; it costs nothing beyond an ordinary read
+        when nothing else happens to be running at the same moment.
 
         Keep this even where a single query would look sufficient on its own: that
         sufficiency is what makes it tempting to delete as redundant, and deleting it
@@ -582,9 +581,9 @@ class ArchiveStore:
             raise
 
     def mark_unsupported(self, archive_id: int, detail: str) -> None:
-        """Mark the archive as in a format the walker does not index (pax), for good.
+        """Mark the archive unsupported: its format (pax) is one the walker does not index.
 
-        Terminal, unlike `error`, which the next `index` retries: re-walking cannot
+        This is for good. Terminal, unlike `error`, which the next `index` retries: re-walking cannot
         change an archive's format, so `index` and `cat` refuse this state outright. A
         `stale` archive keeps its flag and its reason, as `finish` keeps them -- the
         parts changed, which says more, and re-registering walks it again anyway. The
