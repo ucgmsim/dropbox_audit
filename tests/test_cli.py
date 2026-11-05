@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from dbaudit import cli
@@ -37,6 +39,16 @@ def test_status_lists_failed_shards(tmp_path, capsys):
 
 def test_status_on_uninitialised_db_is_an_error(tmp_path, capsys):
     assert main(["status", "--db", str(tmp_path / "missing.db")]) == 2
+    assert "not initialised" in capsys.readouterr().err
+
+
+def test_verify_on_a_database_with_no_root_is_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An `init` stopped after the schema and before the root leaves such a database."""
+    store = Store(tmp_path / "a.db")
+    store.init_schema()
+    assert main(["verify", "--db", str(tmp_path / "a.db")]) == 2
     assert "not initialised" in capsys.readouterr().err
 
 

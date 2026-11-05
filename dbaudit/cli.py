@@ -452,6 +452,9 @@ def cmd_verify(args) -> int:
         print(f"error: {args.db} is not initialised", file=sys.stderr)
         return 2
     target = args.path or store.get_meta("root")
+    if not target:  # `init` stopped after the schema, before it recorded the root
+        print(f"error: {args.db} is not initialised", file=sys.stderr)
+        return 2
     print(f"verifying {target} against an independent rclone walk ...")
     try:
         result = verify_subtree(store, target)
