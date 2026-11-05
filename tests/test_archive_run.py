@@ -1058,8 +1058,10 @@ def test_a_folder_that_cannot_be_listed_is_left_in_error_and_the_run_goes_on(
     assert (
         details
         == [
-            "/R/a/one.tar: could not list its folder: TransientError: request "
-            "failed: connection reset"
+            (
+                "/R/a/one.tar: could not list its folder: TransientError: request "
+                "failed: connection reset"
+            )
         ]
         * 2
     )

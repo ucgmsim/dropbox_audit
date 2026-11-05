@@ -1,3 +1,4 @@
+import itertools
 import random
 from types import SimpleNamespace
 
@@ -150,7 +151,7 @@ def test_a_re_read_after_a_drop_starts_somewhere_else(tmp_path):
         starts.append(reader.asked[-1][1])
         handle.drop_cache()
     assert starts[0] == 200_000  # shape 0 has no lead
-    assert {abs(b - a) for a, b in zip(starts, starts[1:])} == {25_033, 40_503}
+    assert {abs(b - a) for a, b in itertools.pairwise(starts)} == {25_033, 40_503}
 
 
 def test_a_re_read_at_a_parts_first_byte_asks_for_a_different_length(tmp_path):

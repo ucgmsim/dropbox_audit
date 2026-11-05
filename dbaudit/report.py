@@ -108,8 +108,10 @@ def _subtree(under: str) -> tuple[str, list]:
     """
     low = under.rstrip("/").lower()
     return (
-        "dir_id IN (SELECT id FROM dirs WHERE path_lower = ? "
-        "OR (path_lower >= ? AND path_lower < ?))",
+        (
+            "dir_id IN (SELECT id FROM dirs WHERE path_lower = ? "
+            "OR (path_lower >= ? AND path_lower < ?))"
+        ),
         [low, low + "/", low + "0"],
     )
 

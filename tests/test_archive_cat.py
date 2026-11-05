@@ -4,6 +4,7 @@ tests/test_live_archive.py for the one live check, gated behind DBAUDIT_LIVE=1.
 """
 
 import io
+import itertools
 import random
 import sys
 import tarfile
@@ -464,7 +465,7 @@ def test_cat_a_member_running_past_the_end_of_the_parts_exits_1(tmp_path):
     member = store.find_members(row["id"], "run/big.bin")[0]
     assert member["size"] == len(payload)
 
-    part_path = sorted(source.iterdir())[0]
+    part_path = min(source.iterdir())
     truncated = part_path.read_bytes()[: member["data_offset"] + member["size"] - 50]
     part_path.write_bytes(truncated)
 
@@ -803,7 +804,7 @@ def test_cat_notices_a_part_that_changed_under_the_index(tmp_path):
     db, source = _single_part_archive(tmp_path, AROUND)
     store = ArchiveStore(db)
     member = store.find_members(store.get("a.tar")["id"], "run/data.bin")[0]
-    part = sorted(source.iterdir())[0]
+    part = min(source.iterdir())
     raw = bytearray(part.read_bytes())
     shift = 512
     raw[member["hdr_offset"] :] = raw[member["hdr_offset"] + shift :] + b"\0" * shift
@@ -2041,7 +2042,7 @@ def test_cat_does_not_let_a_few_zero_bytes_of_a_header_vouch_for_a_request(
     source = tmp_path / "parts"
     source.mkdir()
     cuts = [0, start - 48, start + 6_000, len(data)]
-    for k, (a, b) in enumerate(zip(cuts, cuts[1:])):
+    for k, (a, b) in enumerate(itertools.pairwise(cuts)):
         (source / f"a.tar.a{'abc'[k]}").write_bytes(data[a:b])
     db = str(tmp_path / "archives.db")
     main(
@@ -2127,7 +2128,7 @@ def _split_at(tmp_path, data, cuts):
     source = tmp_path / "parts"
     source.mkdir()
     edges = [0, *cuts, len(data)]
-    for k, (a, b) in enumerate(zip(edges, edges[1:])):
+    for k, (a, b) in enumerate(itertools.pairwise(edges)):
         (source / f"a.tar.a{'abcdefghij'[k]}").write_bytes(data[a:b])
     db = str(tmp_path / "archives.db")
     main(
@@ -2304,7 +2305,7 @@ def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(tmp_path, capsys):
     source = tmp_path / "parts"
     source.mkdir()
     edges = [0, start - 100, len(data) - 5_000, len(data)]
-    for k, (a, b) in enumerate(zip(edges, edges[1:])):
+    for k, (a, b) in enumerate(itertools.pairwise(edges)):
         (source / f"a.tar.a{'abc'[k]}").write_bytes(data[a:b])
     db = str(tmp_path / "archives.db")
     main(
@@ -2408,7 +2409,7 @@ def test_cat_expects_the_terminator_after_the_last_member(tmp_path, monkeypatch)
     m1, m2 = _row(db, "run/r01/m.bin"), _row(db, "run/r02/m.bin")
     stop = m2["data_offset"] + -(-m2["size"] // 512) * 512 + 512
     log = _clean_log(monkeypatch, db, "run/r02/m.bin")
-    last_read = [i for i, (at, n) in enumerate(log) if at + n == stop][0] + 1
+    last_read = next(i for i, (at, n) in enumerate(log) if at + n == stop) + 1
     shift = m1["hdr_offset"] - m2["hdr_offset"]
 
     def splice(reader, at, length, true):
@@ -2548,7 +2549,7 @@ def test_cat_checks_a_settled_last_read_against_the_read_before_it(
     m = _row(db, "run/last.bin")
     stop = m["data_offset"] + -(-m["size"] // 512) * 512 + 512
     log = _clean_log(monkeypatch, db, "run/last.bin")
-    first_last = [i for i, (at, n) in enumerate(log) if at + n == stop][0] + 1
+    first_last = next(i for i, (at, n) in enumerate(log) if at + n == stop) + 1
     wrong = {}
 
     def served_thrice(reader, at, length, true):
@@ -2584,7 +2585,7 @@ def test_cat_rereads_a_header_where_the_terminator_belongs_even_served_thrice(
     m1, m2 = _row(db, "run/r01/m.bin"), _row(db, "run/r02/m.bin")
     stop = m2["data_offset"] + -(-m2["size"] // 512) * 512 + 512
     log = _clean_log(monkeypatch, db, "run/r02/m.bin")
-    first = [i for i, (at, n) in enumerate(log) if at + n == stop][0] + 1
+    first = next(i for i, (at, n) in enumerate(log) if at + n == stop) + 1
     shift = m1["hdr_offset"] - m2["hdr_offset"]
 
     def splice(reader, at, length, true):

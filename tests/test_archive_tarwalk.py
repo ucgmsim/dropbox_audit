@@ -1308,7 +1308,7 @@ def test_a_pax_header_deep_in_the_archive_stops_the_walk_where_it_is(tmp_path):
         ]
     )
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as reference:
-        pax_member = [m for m in reference if m.pax_headers][0]
+        pax_member = next(m for m in reference if m.pax_headers)
     archive = write_parts(tmp_path, data, part_size=len(data))
     calls = []
     with pytest.raises(UnsupportedArchive, match=str(pax_member.offset)):
@@ -2001,7 +2001,6 @@ def test_a_wrong_header_read_by_the_second_reading_of_a_sound_archive_is_outvote
     data = build_tar(MEMBERS)
     offsets = _header_offsets(data)
     at = offsets[45]
-    t = _terminator(data)
     archive = write_parts(tmp_path, data, part_size=len(data))
     reader = _LiesOnceArmed(tmp_path, archive, at, _header_with_size(data, at, 5000))
     rows = _Rows()
@@ -2028,7 +2027,6 @@ def test_a_global_header_only_the_second_readings_bad_read_saw_stops_applying(tm
     data = build_tar(MEMBERS)
     offsets = _header_offsets(data)
     at = offsets[48]
-    t = _terminator(data)
     glob = _pax_tar([("a.bin", b"a", None)], pax_global={"comment": "elsewhere"})
     assert glob[156:157] == b"g"
     archive = write_parts(tmp_path, data, part_size=len(data))
@@ -2121,7 +2119,6 @@ def test_a_second_reading_that_moves_a_sparse_member_is_outvoted(tmp_path):
     agrees on every recorded field but stores a different amount would move the chain; it
     is compared too, outvoted by a third read, and costs no extra pass."""
     data = _gnu_sparse_archive()
-    t = 1536
     wrong = _with_field(data, 0, 124, 12, b"%011o" % 1024)[0:512]
     archive = write_parts(tmp_path, data, part_size=len(data))
     reader = _LiesOnceArmed(tmp_path, archive, 0, wrong)

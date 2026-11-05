@@ -65,7 +65,7 @@ def manifest(db):
                 if table != "events" or r["kind"] != "import"
             ]
         out[archive["set_hash"]] = (
-            {k: archive[k] for k in archive.keys() if k != "id"},
+            {k: archive[k] for k in archive.keys() if k != "id"},  # noqa: SIM118  # sqlite3.Row iterates values, not keys
             rows,
         )
     return out
@@ -469,7 +469,7 @@ def test_import_keeps_the_live_content_of_a_folder_that_went_back(tmp_path):
     folder.mkdir()
     data = build_tar(members(40, 7))
     write_parts(folder, data, len(data) // 4 + 1)
-    last = sorted(folder.iterdir())[-1]
+    last = max(folder.iterdir())
     aside = tmp_path / last.name
     db, fresh = str(tmp_path / "a.db"), str(tmp_path / "fresh.db")
     for move in (

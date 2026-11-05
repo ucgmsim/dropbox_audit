@@ -1692,8 +1692,10 @@ def _walk_archive(
                 "error",
                 1,
                 [
-                    f"error: {detail}\n       re-register the archive "
-                    f"with its new --folder"
+                    (
+                        f"error: {detail}\n       re-register the archive "
+                        f"with its new --folder"
+                    )
                 ],
                 started=False,
             )
@@ -1707,9 +1709,11 @@ def _walk_archive(
                 "stale",
                 1,
                 [
-                    f"error: {detail}\n       the stored offsets "
-                    f"describe bytes that are no longer there; "
-                    f"re-register to walk it again"
+                    (
+                        f"error: {detail}\n       the stored offsets "
+                        f"describe bytes that are no longer there; "
+                        f"re-register to walk it again"
+                    )
                 ],
                 started=False,
             )
@@ -1875,8 +1879,10 @@ def _walk_archive(
             state,
             1,
             [
-                f"error: {stale}; the members found are kept, but "
-                f"re-register before trusting them"
+                (
+                    f"error: {stale}; the members found are kept, but "
+                    f"re-register before trusting them"
+                )
             ],
         )
     if run.unsupported:
@@ -1884,8 +1890,10 @@ def _walk_archive(
             state,
             1,
             [
-                f"error: {row['name']} is a pax-format archive, which "
-                f"dbaudit does not index. {run.unsupported}"
+                (
+                    f"error: {row['name']} is a pax-format archive, which "
+                    f"dbaudit does not index. {run.unsupported}"
+                )
             ],
         )
     if compressed:
@@ -1893,8 +1901,10 @@ def _walk_archive(
             state,
             1,
             [
-                f"error: {row['name']} is {compressed}-compressed, not "
-                f"a tar: it cannot be walked header by header"
+                (
+                    f"error: {row['name']} is {compressed}-compressed, not "
+                    f"a tar: it cannot be walked header by header"
+                )
             ],
         )
     if audit_failed is not None:
@@ -1902,8 +1912,10 @@ def _walk_archive(
             state,
             1,
             [
-                f"error: the walk finished, but the audit {audit_failed}; "
-                f"run `index` again to retry it"
+                (
+                    f"error: the walk finished, but the audit {audit_failed}; "
+                    f"run `index` again to retry it"
+                )
             ],
         )
     if unchecked:
@@ -1911,8 +1923,10 @@ def _walk_archive(
             state,
             1,
             [
-                f"error: the walk finished, but it {unchecked}; run "
-                f"`index` again to retry it"
+                (
+                    f"error: the walk finished, but it {unchecked}; run "
+                    f"`index` again to retry it"
+                )
             ],
         )
     if run.failed:
@@ -1920,8 +1934,10 @@ def _walk_archive(
             state,
             1,
             [
-                "error: a chain stopped on an unexpected failure; see "
-                "the log and `archive status`"
+                (
+                    "error: a chain stopped on an unexpected failure; see "
+                    "the log and `archive status`"
+                )
             ],
             bug=True,
         )
