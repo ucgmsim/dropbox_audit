@@ -104,7 +104,7 @@ def test_a_failed_batch_leaves_neither_rows_nor_cursor(tmp_path: Path):
     bad = Member(
         1024,
         1536,
-        "not-an-int",  # ty: ignore[invalid-argument-type]  # a size SQLite rejects, to fail the batch
+        "not-an-int",  # ty: ignore[invalid-argument-type]  # a size _as_int rejects mid-transaction, to fail the batch
         "0",
         0,
         0,

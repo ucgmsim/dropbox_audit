@@ -279,9 +279,9 @@ How the figures are made:
 uv run pytest                                        # offline; live tests are skipped
 DBAUDIT_LIVE=1 uv run pytest tests/test_live.py      # crawls DBAUDIT_LIVE_ROOT for real
 DBAUDIT_FUZZ=300 uv run pytest tests/test_confirming_reads_fuzz.py   # 300 random tars
-uvx lefthook install                              # once per clone: CI's checks run before every push
-uvx lefthook run pre-push --all-files --no-tty    # CI's checks now, without pushing
-uv run pytest --cov=dbaudit                       # coverage; CI requires 95%
+uvx lefthook install                                 # once per clone: CI's checks run before every push
+uvx lefthook run pre-push --all-files --no-tty       # CI's checks now, without pushing
+uv run pytest --cov=dbaudit                          # coverage; CI requires 95%
 ```
 
 CI runs the team's shared checks (ucgmsim/meta-ci-action) on every push to main.

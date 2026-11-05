@@ -15,5 +15,7 @@ exports/
 
 # Claude Code design notes (specs, plans) are not kept on this branch
 docs/superpowers/
+
+# test coverage output
 .coverage
 htmlcov/

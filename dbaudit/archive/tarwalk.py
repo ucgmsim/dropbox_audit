@@ -631,7 +631,7 @@ def _walk_chain(
     stamp, own, reach = 0, concat.fills, 0
     concat.seek(start_offset)
     try:
-        archive: tarfile.TarFile = tarfile.open(fileobj=concat, mode="r:")  # noqa: SIM115  # never closed: it holds no handle of its own, only the caller's ConcatFile, which stays open  # ty: ignore[no-matching-overload]  # ConcatFile is read-only; typeshed's _Fileobj also asks for write and close
+        archive: tarfile.TarFile = tarfile.open(fileobj=concat, mode="r:")  # noqa: SIM115  # never closed: the TarFile owns no handle; it reads the caller's ConcatFile, which has no close  # ty: ignore[no-matching-overload]  # ConcatFile is read-only; typeshed's _Fileobj also asks for write and close
     except tarfile.ReadError as exc:
         detail = str(exc)
         return finish(
