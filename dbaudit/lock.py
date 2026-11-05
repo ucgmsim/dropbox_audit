@@ -11,7 +11,7 @@ import os
 import socket
 
 
-class LockHeld(RuntimeError):
+class LockHeldError(RuntimeError):
     """Another process is already crawling this database."""
 
 
@@ -29,7 +29,7 @@ class InstanceLock:
             holder = self._fh.read().strip() or "unknown process"
             self._fh.close()
             self._fh = None
-            raise LockHeld(f"{self.path} is held by {holder}") from None
+            raise LockHeldError(f"{self.path} is held by {holder}") from None
         self._fh.seek(0)
         self._fh.truncate()
         self._fh.write(f"{os.getpid()}@{socket.gethostname()}\n")

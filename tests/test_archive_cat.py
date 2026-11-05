@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from dbaudit.archive.reader import LocalRangeReader, ShortRead
+from dbaudit.archive.reader import LocalRangeReader, ShortReadError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import Member, WalkResult
 from dbaudit.cli import main
@@ -437,7 +437,7 @@ def test_cat_fetches_the_member_and_its_anchors_not_the_window(tmp_path, monkeyp
 
 def test_cat_a_member_running_past_the_end_of_the_parts_exits_1(tmp_path):
     """Truncate a part *after* indexing, without re-registering: the DB still believes
-    the part is its original size, so LocalRangeReader raises ShortRead reading past
+    the part is its original size, so LocalRangeReader raises ShortReadError reading past
     what is actually there -- a real exception, not a clean empty chunk.
     """
     source = tmp_path / "parts"
@@ -522,7 +522,7 @@ def test_cat_out_in_a_missing_directory_exits_2(tmp_path, capsys):
 
 def _setup_for_a_mid_stream_failure(tmp_path, monkeypatch):
     """A member big enough, with CAT_CHUNK shrunk, that a --out cat needs several
-    chunks -- and a reader that raises ShortRead on the *second* read_range call, so
+    chunks -- and a reader that raises ShortReadError on the *second* read_range call, so
     at least one chunk has already reached `sink.write()` before the failure. Task
     11's real use (a large multi-part database) needs many CAT_CHUNK-sized reads at
     the real 16 MiB size, so this is the ordinary failure shape, not an edge case.
@@ -554,7 +554,7 @@ def _setup_for_a_mid_stream_failure(tmp_path, monkeypatch):
     def read_range(self, part_idx, offset, length):
         calls["n"] += 1
         if calls["n"] == 2:
-            raise ShortRead("simulated mid-stream corruption")
+            raise ShortReadError("simulated mid-stream corruption")
         return real_read(self, part_idx, offset, length)
 
     monkeypatch.setattr(LocalRangeReader, "read_range", read_range)

@@ -7,7 +7,7 @@ import random
 import tarfile
 from pathlib import Path
 
-from dbaudit.api import Page, PathNotFound
+from dbaudit.api import Page, PathNotFoundError
 from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import LocalRangeReader
 from dbaudit.limiter import AdaptiveLimiter
@@ -116,7 +116,7 @@ class World:
                 if world.faults.get(path):
                     raise world.faults[path].pop(0)
                 if path in world.gone:
-                    raise PathNotFound(f"path/not_found: {path}")
+                    raise PathNotFoundError(f"path/not_found: {path}")
                 return self.continue_(f"{path}|0")
 
             def continue_(self, cursor):

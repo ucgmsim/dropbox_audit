@@ -13,7 +13,7 @@ stored tarballs, one part or several -- and walks it through one of three faulty
   the block from its start, met by a first pass asked from the byte before a header that
   starts a block.
 
-Every walk must end `complete` with every member true, or raise UnsettledRead: a server
+Every walk must end `complete` with every member true, or raise UnsettledReadError: a server
 that keeps contradicting itself is a reason to stop, never to record something false.
 The faults stay within what the walk alone is built to catch: no copied header that lands
 on another real one (the audit's to find, or no one's), no request pinned at both ends of
@@ -29,7 +29,7 @@ import pytest
 
 from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import ConcatFile
-from dbaudit.archive.tarwalk import Member, UnsettledRead, walk
+from dbaudit.archive.tarwalk import Member, UnsettledReadError, walk
 from tests.archive_fakes import build_tar, suffix
 
 TRIALS = int(os.environ.get("DBAUDIT_FUZZ", "0"))
@@ -212,7 +212,7 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
             0,
             lambda batch, _next: rows.update((m.hdr_offset, m) for m in batch),
         )
-    except UnsettledRead:
+    except UnsettledReadError:
         result = None  # stopped: never a false verdict
     if kind == "request":
         assert state.get("landed"), "the bad answer never reached bytes the walk kept"

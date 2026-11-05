@@ -7,9 +7,9 @@ from dbaudit.archive.reader import ConcatFile, LocalRangeReader, ReaderError
 from dbaudit.archive.tarwalk import (
     CONFIRM_FILLS,
     REREAD_LIMIT,
-    ScanStopped,
-    UnsettledRead,
-    UnsupportedArchive,
+    ScanStoppedError,
+    UnsettledReadError,
+    UnsupportedArchiveError,
     find_chain_start,
     walk,
 )
@@ -75,7 +75,7 @@ def test_gnu_long_names_survive_but_pax_is_refused(tmp_path):
 
     pax = tmp_path / "pax"
     pax.mkdir()
-    with pytest.raises(UnsupportedArchive, match="pax"):
+    with pytest.raises(UnsupportedArchiveError, match="pax"):
         collect(pax, build_tar([(long_name, b"x" * 10)], format=tarfile.PAX_FORMAT))
 
 
@@ -436,7 +436,7 @@ def test_find_chain_start_gives_way_between_reads_when_asked(tmp_path):
             return super().read_range(part_idx, offset, length)
 
     handle = ConcatFile(archive, Counting(tmp_path, archive))
-    with pytest.raises(ScanStopped):
+    with pytest.raises(ScanStoppedError):
         find_chain_start(handle, 0, scan_read=4096, should_stop=lambda: bool(reads))
     assert len(reads) == 1
 
@@ -736,13 +736,13 @@ def test_a_writer_that_does_not_copy_the_name_costs_one_read_not_a_refusal(tmp_p
 def test_a_long_name_that_reads_differently_every_time_gives_up(tmp_path):
     """A server that never tells the same story twice is not an archive fact. The walk
     gives up, with the cursor where the members it has read only once begin -- here the
-    first -- so the retry that `UnsettledRead` invites reads them again."""
+    first -- so the retry that `UnsettledReadError` invites reads them again."""
     data, _ = _long_name_archive()
     archive = write_parts(tmp_path, bytes(data), part_size=len(data))
     reader = _AlwaysLies(tmp_path, archive, 1536, span=512)
     calls = []
 
-    with pytest.raises(UnsettledRead, match="1024"):
+    with pytest.raises(UnsettledReadError, match="1024"):
         walk(
             ConcatFile(archive, reader),
             0,
@@ -1029,7 +1029,7 @@ def test_a_verdict_that_keeps_changing_gives_up_loudly(tmp_path):
     archive = write_parts(tmp_path, data, part_size=len(data))
     reader = _LiesOnEach(tmp_path, archive, _terminator(data), nths=range(1, 100, 2))
 
-    with pytest.raises(UnsettledRead):
+    with pytest.raises(UnsettledReadError):
         walk(ConcatFile(archive, reader), 0, lambda members, offset: None)
     # One reading of the terminator per pass: the first, and one contradicting the one
     # before it for each of REREAD_LIMIT + 1 more.
@@ -1067,12 +1067,12 @@ def test_a_header_that_never_reads_the_same_way_twice_gives_up_loudly(tmp_path):
     )
     rows = _Rows()
 
-    with pytest.raises(UnsettledRead, match=str(offsets[30])):
+    with pytest.raises(UnsettledReadError, match=str(offsets[30])):
         walk(ConcatFile(archive, reader), 0, rows.commit)
     assert rows.consistent()
     assert all(key < offsets[30] for key in rows.rows)
 
-    # The retry UnsettledRead invites starts where the members read only once begin.
+    # The retry UnsettledReadError invites starts where the members read only once begin.
     result = walk(
         ConcatFile(archive, LocalRangeReader(tmp_path, archive)),
         rows.cursor,
@@ -1290,7 +1290,7 @@ def test_an_archive_with_pax_headers_on_every_member_is_refused_at_once(tmp_path
     data = _pax_tar(
         [(f"f{i}.bin", b"x" * 100, {"mtime": "1700000000.5"}) for i in range(5)]
     )
-    with pytest.raises(UnsupportedArchive, match="pax"):
+    with pytest.raises(UnsupportedArchiveError, match="pax"):
         _walk_all(tmp_path, data)
 
 
@@ -1311,7 +1311,7 @@ def test_a_pax_header_deep_in_the_archive_stops_the_walk_where_it_is(tmp_path):
         pax_member = next(m for m in reference if m.pax_headers)
     archive = write_parts(tmp_path, data, part_size=len(data))
     calls = []
-    with pytest.raises(UnsupportedArchive, match=str(pax_member.offset)):
+    with pytest.raises(UnsupportedArchiveError, match=str(pax_member.offset)):
         walk(
             ConcatFile(archive, LocalRangeReader(tmp_path, archive)),
             0,
@@ -1332,7 +1332,7 @@ def test_a_global_pax_header_is_refused_with_the_cursor_before_it(tmp_path):
     )
     archive = write_parts(tmp_path, data, part_size=len(data))
     calls = []
-    with pytest.raises(UnsupportedArchive, match="is a pax-format archive"):
+    with pytest.raises(UnsupportedArchiveError, match="is a pax-format archive"):
         walk(
             ConcatFile(archive, LocalRangeReader(tmp_path, archive)),
             0,
@@ -1416,7 +1416,7 @@ def test_gnu_and_ustar_archives_are_not_mistaken_for_pax(tmp_path, fmt):
 
 def test_giving_up_on_a_member_after_a_g_header_keeps_the_cursor_before_the_g(tmp_path):
     """Review 5's K8. The member after a `g` header is suspect (pax); if its re-reads never
-    agree, the walk raises UnsettledRead -- leaving the cursor where the member's header
+    agree, the walk raises UnsettledReadError -- leaving the cursor where the member's header
     sequence begins, at the `g`, or a resume walks on with no global header in force.
     Here every read after the first has a valid header there, named differently each
     time: no two reads agree on what the member is."""
@@ -1437,7 +1437,7 @@ def test_giving_up_on_a_member_after_a_g_header_keeps_the_cursor_before_the_g(tm
 
     reader = EveryRereadDiffers(tmp_path, archive)
     calls = []
-    with pytest.raises(UnsettledRead):
+    with pytest.raises(UnsettledReadError):
         walk(
             ConcatFile(archive, reader, window_min=4_096, window_max=4_096),
             0,
@@ -1746,13 +1746,13 @@ class _LiesAfter(_AlwaysLies):
 def test_giving_up_during_a_second_reading_leaves_it_to_be_read_again(tmp_path):
     """The second reading gives up on a long name that never reads the same way twice.
     Nothing either reading saw was committed, and the cursor is where they begin: the
-    retry that `UnsettledRead` invites reads them again, and an honest one finishes."""
+    retry that `UnsettledReadError` invites reads them again, and an honest one finishes."""
     data, _ = _long_name_archive()
     archive = write_parts(tmp_path, bytes(data), part_size=len(data))
     reader = _LiesAfter(tmp_path, archive, 1536, first=1, span=512)
     rows = _Rows()
 
-    with pytest.raises(UnsettledRead, match="1024"):
+    with pytest.raises(UnsettledReadError, match="1024"):
         walk(ConcatFile(archive, reader), 0, rows.commit)
 
     assert reader.lied >= 2, "the test did not reach the second reading"
@@ -1923,7 +1923,7 @@ def test_rescues_on_the_way_do_not_use_up_the_verdicts_own_re_reads(tmp_path):
     """A long walk meets independent transients far apart -- here a garbled long name for
     each of REREAD_LIMIT + 1 members. Each is settled where it is met. None of them is
     the verdict's, and the verdict's own re-reads are counted from where it is reached:
-    a six-hour walk must not end in UnsettledRead for having survived four bad reads."""
+    a six-hour walk must not end in UnsettledReadError for having survived four bad reads."""
     long_named = [
         (f"run/{'d' * 120}/f{i}.bin", bytes([i]) * 700) for i in range(REREAD_LIMIT + 1)
     ]
@@ -2340,7 +2340,7 @@ def test_rescues_after_the_walk_moves_on_do_not_use_up_the_verdicts_re_reads(tmp
     """Review 6's #9. A derailment early on, rightly undone by the second reading -- which
     then walks on through the rest of the archive and meets REREAD_LIMIT garbled long names
     on the way. Those are transients met on the way, not the verdict disagreeing with
-    itself: the walk ends `complete`, not in UnsettledRead."""
+    itself: the walk ends `complete`, not in UnsettledReadError."""
     long_named = [
         (f"run/{'d' * 120}/f{i}.bin", bytes([i]) * 700) for i in range(REREAD_LIMIT)
     ]
@@ -2476,7 +2476,7 @@ def test_a_header_that_flips_from_pass_to_pass_gives_up_rather_than_loop(
             return bytes(got)
 
     rows = _Rows()
-    with pytest.raises(UnsettledRead, match="kept contradicting") as raised:
+    with pytest.raises(UnsettledReadError, match="kept contradicting") as raised:
         walk(
             Flipping(
                 archive, Reader(tmp_path, archive), window_min=8192, window_max=8192
@@ -2776,7 +2776,7 @@ def test_a_server_that_lies_about_most_headers_is_given_up_on(tmp_path, monkeypa
     reader = LiesUnlessAskedThere(tmp_path, archive)
     rows = _Rows()
 
-    with pytest.raises(UnsettledRead, match="was cut short"):
+    with pytest.raises(UnsettledReadError, match="was cut short"):
         walk(
             ConcatFile(archive, reader, window_min=65536, window_max=65536),
             0,

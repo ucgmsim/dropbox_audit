@@ -1,6 +1,6 @@
 import threading
 
-from dbaudit.api import CursorReset, RateLimited
+from dbaudit.api import CursorResetError, RateLimitedError
 from dbaudit.crawler import Crawler
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.store import Store
@@ -116,7 +116,9 @@ def test_max_shards_caps_splitting(tmp_path):
 
 
 def test_cursor_reset_reseeds_shard(tmp_path):
-    lister = FakeLister(TREE, page_size=1, continue_faults={1: CursorReset("reset")})
+    lister = FakeLister(
+        TREE, page_size=1, continue_faults={1: CursorResetError("reset")}
+    )
     store, crawler = build(tmp_path, lister, workers=1)
     crawler.seed("/R")
     crawler.run()
@@ -129,7 +131,7 @@ def test_cursor_reset_reseeds_shard(tmp_path):
 
 def test_rate_limit_is_retried_not_fatal(tmp_path):
     lister = FakeLister(TREE, page_size=1)
-    lister.faults["/R"] = RateLimited("429", retry_after=0.05)
+    lister.faults["/R"] = RateLimitedError("429", retry_after=0.05)
     store, crawler = build(tmp_path, lister, workers=1)
     crawler.seed("/R")
     crawler.run()

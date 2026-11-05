@@ -41,7 +41,7 @@ class ApiError(RuntimeError):
     """An API failure the crawler cannot do anything clever about."""
 
 
-class RateLimited(ApiError):
+class RateLimitedError(ApiError):
     """429. Honour ``retry_after`` exactly; observed values reach 300 seconds."""
 
     def __init__(self, message: str, retry_after: float = DEFAULT_RETRY_AFTER):
@@ -49,11 +49,11 @@ class RateLimited(ApiError):
         self.retry_after = float(retry_after)
 
 
-class CursorReset(ApiError):
+class CursorResetError(ApiError):
     """The cursor is no longer usable; the subtree must be re-listed from scratch."""
 
 
-class PathNotFound(ApiError):
+class PathNotFoundError(ApiError):
     """The path vanished between seeding and listing. Not an error worth failing on."""
 
 
@@ -61,7 +61,7 @@ class TransientError(ApiError):
     """5xx or a network fault. Retry with backoff."""
 
 
-class AuthExpired(ApiError):
+class AuthExpiredError(ApiError):
     """The access token expired mid-crawl; refresh and retry."""
 
 
@@ -85,20 +85,22 @@ def _classify(status: int, body: dict, headers: dict) -> ApiError:
             retry_after = float(retry_after)
         except (TypeError, ValueError):
             retry_after = DEFAULT_RETRY_AFTER
-        return RateLimited(f"rate limited, retry after {retry_after}s", retry_after)
+        return RateLimitedError(
+            f"rate limited, retry after {retry_after}s", retry_after
+        )
 
     if status == 401:
-        return AuthExpired(f"401 from Dropbox: {str(body)[:200]}")
+        return AuthExpiredError(f"401 from Dropbox: {str(body)[:200]}")
 
     if status == 409:
         error = body.get("error") if isinstance(body, dict) else {}
         tag = error.get(".tag") if isinstance(error, dict) else None
         if tag == "reset":
-            return CursorReset("cursor invalidated by Dropbox; re-listing subtree")
+            return CursorResetError("cursor invalidated by Dropbox; re-listing subtree")
         if tag == "path":
             path_tag = (error.get("path") or {}).get(".tag")
             if path_tag in ("not_found", "not_folder", "restricted_content"):
-                return PathNotFound(f"path unusable: {path_tag}")
+                return PathNotFoundError(f"path unusable: {path_tag}")
         return ApiError(f"409 from Dropbox: {str(body)[:300]}")
 
     if status >= 500:

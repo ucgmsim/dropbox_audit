@@ -8,7 +8,7 @@ only headers.
 
 GNU and ustar archives only. A pax archive can keep a member's name and size outside
 the checksummed header, where a misread moves every header after it; the walk raises
-UnsupportedArchive rather than index one without the guarantees it relies on.
+UnsupportedArchiveError rather than index one without the guarantees it relies on.
 
 One ``tarfile`` behaviour has to be corrected for: mid-archive it treats an *invalid*
 header exactly like the end of the archive, stopping silently. So the end is verified
@@ -21,7 +21,7 @@ import tarfile
 from collections import Counter, deque
 from dataclasses import dataclass, replace
 
-from .reader import ReadStopped
+from .reader import ReadStoppedError
 
 BLOCK = 512
 TERMINATOR = BLOCK * 2
@@ -60,7 +60,7 @@ _RAN_OUT = frozenset({"unexpected end of data", "empty header", "truncated heade
 CONFIRM_FILLS = 3
 
 #: How many times a walk will accept a second reading of its verdict that disagrees with the
-#: first before it gives up and raises UnsettledRead -- and how many passes in a row it lets
+#: first before it gives up and raises UnsettledReadError -- and how many passes in a row it lets
 #: be cut short with nothing more committed. A bad read is rare, and one that comes from
 #: how a read was asked does not survive being asked differently, as every re-read is
 #: (ConcatFile.drop_cache); a bad archive reads the same however it is asked. So a verdict
@@ -71,7 +71,7 @@ REREAD_LIMIT = 3
 _NOT_READ = object()
 
 
-class UnsettledRead(Exception):
+class UnsettledReadError(Exception):
     """Reads of the same bytes kept disagreeing, past REREAD_LIMIT.
 
     That is a fact about the server, not the archive, so it is raised rather than
@@ -80,11 +80,11 @@ class UnsettledRead(Exception):
     """
 
 
-class ScanStopped(Exception):
+class ScanStoppedError(Exception):
     """`find_chain_start` gave way, between reads, to a caller that asked it to stop."""
 
 
-class UnsupportedArchive(Exception):
+class UnsupportedArchiveError(Exception):
     """The archive is in a tar format this walker does not index: pax.
 
     Everything here rests on a member's name, size and type sitting in its 512-byte
@@ -133,7 +133,7 @@ class Member:
 @dataclass(frozen=True)
 class WalkResult:
     state: str  # complete | truncated | corrupt | crossed | stopped
-    # (and, inside walk(), pax -- raised as UnsupportedArchive --
+    # (and, inside walk(), pax -- raised as UnsupportedArchiveError --
     # and rescued, which is not an outcome)
     end_offset: int
     members: int
@@ -161,12 +161,12 @@ def walk(
     stands, and the held-back members are committed, once two readings in a row reach it
     at the same place. A genuinely damaged archive reads the same way twice and reaches
     the verdict it always did, CONFIRM_FILLS fetches later. One that keeps changing, more
-    than REREAD_LIMIT times, raises UnsettledRead -- a pass that goes against the one
+    than REREAD_LIMIT times, raises UnsettledReadError -- a pass that goes against the one
     before it is a change, whether it reaches another verdict or a tie-break takes it off
-    that one's path; a confirmed pax header raises UnsupportedArchive. A first reading
+    that one's path; a confirmed pax header raises UnsupportedArchiveError. A first reading
     that `_settled` catches wrong mid-walk proves its fetch bad, and the headers that
     fetch served before it are read again, as a verdict's are; more than REREAD_LIMIT
-    passes in a row cut short like that, with nothing more committed, raise UnsettledRead
+    passes in a row cut short like that, with nothing more committed, raise UnsettledReadError
     too.
 
     ``commit`` is expected to write the members and the cursor in one transaction, so
@@ -260,7 +260,7 @@ def walk(
                     else f"said {result.state} at {result.end_offset} and was never "
                     f"confirmed"
                 )
-                raise UnsettledRead(
+                raise UnsettledReadError(
                     f"reads kept contradicting each other at {where}; the last pass {last}"
                 )
         seen -= len(this.window)  # read again, and counted, by the next pass
@@ -277,7 +277,7 @@ def walk(
             result, detail=f"{result.detail}; {note}" if result.detail else note
         )
     if result.state == "pax":
-        raise UnsupportedArchive(result.detail)
+        raise UnsupportedArchiveError(result.detail)
     return result
 
 
@@ -410,7 +410,7 @@ def _walk_chain(
             info = archive.next()
         except tarfile.ReadError as exc:
             return finish(before, None, found_nothing(before, str(exc)))
-        except ReadStopped:
+        except ReadStoppedError:
             # A stop that met a 429: what has left the window is confirmed, so it is
             # kept, as a stop between reads keeps it.
             _commit_in_batches(commit, batch, held_from(before), batch_size)
@@ -433,7 +433,7 @@ def _walk_chain(
         fetched, settled = concat.fills, len(rescued)
         try:
             info = _settled(concat, archive, info, before, rescued)
-        except (UnsettledRead, ReadStopped):
+        except (UnsettledReadError, ReadStoppedError):
             # A resume reads the held-back ones again.
             _commit_in_batches(commit, batch, held_from(before), batch_size)
             raise
@@ -446,7 +446,7 @@ def _walk_chain(
             fetched = concat.fills
             try:
                 fresh = _tie_break(concat, archive, before, key, theirs, rescued)
-            except (UnsettledRead, ReadStopped):
+            except (UnsettledReadError, ReadStoppedError):
                 _commit_in_batches(commit, batch, held_from(before), batch_size)
                 raise
             rereads += concat.fills - fetched
@@ -552,7 +552,7 @@ def _settled(concat, archive, info, before, rescued):
             archive.offset = after
             return member
         previous = _identity(member)
-    raise UnsettledRead(
+    raise UnsettledReadError(
         f"the member at {before} read differently every time, and never without a long "
         f"name, link target or pax header that no second read confirmed"
     )
@@ -638,7 +638,7 @@ def _tie_break(concat, archive, before, mine, theirs, rescued):
         votes[version] += 1
         if votes[version] >= 2:
             return found
-    raise UnsettledRead(
+    raise UnsettledReadError(
         f"the header at {before} read differently every time, and no two reads of it "
         f"agreed"
     )
@@ -717,7 +717,7 @@ def find_chain_start(
     good ones. The joining rule in the CLI is what settles it.
 
     ``should_stop``, a zero-argument predicate, is asked before every read; once it
-    holds, the scan raises `ScanStopped`.
+    holds, the scan raises `ScanStoppedError`.
     """
     total = concat.archive.total_size
     offset = (
@@ -726,7 +726,7 @@ def find_chain_start(
     scanned = 0
     while offset < total and (limit is None or scanned < limit):
         if should_stop is not None and should_stop():
-            raise ScanStopped(f"stopped scanning at {offset}")
+            raise ScanStoppedError(f"stopped scanning at {offset}")
         length = min(scan_read, total - offset)
         if length < BLOCK:
             return None

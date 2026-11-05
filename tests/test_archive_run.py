@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from dbaudit import cli
-from dbaudit.api import AuthExpired, RateLimited, TransientError
+from dbaudit.api import AuthExpiredError, RateLimitedError, TransientError
 from dbaudit.archive.reader import LocalRangeReader, ReaderError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.auth import AuthError
@@ -1008,7 +1008,7 @@ def test_a_rate_limited_listing_pauses_every_walk_and_is_asked_again(
     tmp_path, monkeypatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
-    world.faults["/R/a"] = [RateLimited("too_many_requests", retry_after=0.01)]
+    world.faults["/R/a"] = [RateLimitedError("too_many_requests", retry_after=0.01)]
     made, fast = [], cli._run_limiter
     monkeypatch.setattr(
         "dbaudit.cli._run_limiter", lambda args: made.append(fast(args)) or made[-1]
@@ -1032,7 +1032,7 @@ def test_the_run_drops_its_token_after_a_401_on_an_archives_listing(
             dropped.append(True)
 
     world, db, audit = three(tmp_path, monkeypatch)
-    world.faults["/R/a"] = [AuthExpired("401 from Dropbox")]
+    world.faults["/R/a"] = [AuthExpiredError("401 from Dropbox")]
     monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
     monkeypatch.setattr("dbaudit.cli.TokenProvider", Tokens)
     assert run(db, audit) == 0

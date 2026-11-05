@@ -68,12 +68,12 @@ class ReaderError(RuntimeError):
     """A range read could not be satisfied as asked."""
 
 
-class ReadStopped(Exception):
+class ReadStoppedError(Exception):
     """A read gave way to its caller's stop while Dropbox kept pushing back. Not a
     ReaderError: nothing failed, and the walk hands its work back as a stopped one."""
 
 
-class ShortRead(ReaderError):
+class ShortReadError(ReaderError):
     """Fewer bytes came back than were requested."""
 
 
@@ -101,7 +101,9 @@ class LocalRangeReader:
             handle.seek(offset)
             data = handle.read(length)
         if len(data) != length:
-            raise ShortRead(f"{part.name}: asked {length} at {offset}, got {len(data)}")
+            raise ShortReadError(
+                f"{part.name}: asked {length} at {offset}, got {len(data)}"
+            )
         self.requests += 1
         self.bytes_fetched += len(data)
         return data
@@ -312,7 +314,7 @@ class DropboxRangeReader:
                 self.limiter.on_rate_limited(_retry_after(response))
                 last = ReaderError(f"{part.name}: rate limited")
                 if self.should_stop is not None and self.should_stop():
-                    raise ReadStopped(
+                    raise ReadStoppedError(
                         f"{part.name}: stopped while Dropbox answered 429"
                     )
                 continue
@@ -347,7 +349,7 @@ class DropboxRangeReader:
             )
         data = response.content
         if len(data) != length:
-            raise ShortRead(
+            raise ShortReadError(
                 f"{part.name}: asked {length} bytes at {offset}, got {len(data)}"
             )
         # The limiter takes a worker off on every 429 and puts one back only here.

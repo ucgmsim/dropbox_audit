@@ -33,10 +33,10 @@ from dataclasses import dataclass
 
 from .api import (
     ApiError,
-    AuthExpired,
-    CursorReset,
-    PathNotFound,
-    RateLimited,
+    AuthExpiredError,
+    CursorResetError,
+    PathNotFoundError,
+    RateLimitedError,
     TransientError,
 )
 
@@ -221,20 +221,20 @@ class Crawler:
                             shard.path, recursive=(mode == "recursive")
                         )
                     )
-            except RateLimited as exc:
+            except RateLimitedError as exc:
                 self.limiter.on_rate_limited(exc.retry_after)
                 self.store.log_event("rate_limited", f"retry_after={exc.retry_after}")
                 continue
-            except CursorReset:
+            except CursorResetError:
                 self.store.log_event("cursor_reset", shard.path)
                 self.store.clear_cursor(shard.id)
                 cursor = None
                 continue
-            except PathNotFound as exc:
+            except PathNotFoundError as exc:
                 self.store.log_event("path_gone", f"{shard.path}: {exc}")
                 self.store.finish_shard(shard.id, note="path vanished during crawl")
                 return
-            except AuthExpired:
+            except AuthExpiredError:
                 # The token provider refreshes on the next headers() call; one retry.
                 self.store.log_event("auth_expired", shard.path)
                 attempts += 1

@@ -46,10 +46,10 @@ from . import kinds, tree
 from . import report as reports
 from .api import (
     ApiError,
-    AuthExpired,
+    AuthExpiredError,
     HttpLister,
-    PathNotFound,
-    RateLimited,
+    PathNotFoundError,
+    RateLimitedError,
     TransientError,
 )
 from .archive import report as archive_report
@@ -62,7 +62,7 @@ from .archive.reader import (
     DropboxRangeReader,
     LocalRangeReader,
     ReaderError,
-    ReadStopped,
+    ReadStoppedError,
 )
 from .archive.runner import Done, Job, Runner
 from .archive.store import ArchiveStore
@@ -71,8 +71,8 @@ from .archive.tarwalk import (
     REGULAR_MEMBER_TYPES,
     REREAD_LIMIT,
     Member,
-    ScanStopped,
-    UnsupportedArchive,
+    ScanStoppedError,
+    UnsupportedArchiveError,
     WalkResult,
     find_chain_start,
     read_member,
@@ -81,7 +81,7 @@ from .archive.tarwalk import (
 from .auth import AuthError, TokenProvider
 from .crawler import Crawler
 from .limiter import AdaptiveLimiter
-from .lock import InstanceLock, LockHeld
+from .lock import InstanceLock, LockHeldError
 from .store import Store
 from .units import human_bytes, human_duration
 from .verify import verify_subtree
@@ -299,7 +299,7 @@ def cmd_run(args) -> int:
     try:
         lock = InstanceLock(lockfile)
         lock.__enter__()
-    except LockHeld as exc:
+    except LockHeldError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
 
@@ -942,13 +942,13 @@ def _listed(lister, limiter, folder, name, stop=None, tokens=None):
         try:
             with limiter.slot():
                 entries = _folder_entries(lister, folder, name)
-        except RateLimited as exc:
+        except RateLimitedError as exc:
             limiter.on_rate_limited(exc.retry_after)
             continue
-        except (AuthExpired, TransientError) as exc:
+        except (AuthExpiredError, TransientError) as exc:
             if isinstance(exc.__cause__, AuthError):
                 raise exc.__cause__ from None  # no credentials: asking again cannot help
-            if isinstance(exc, AuthExpired) and tokens is not None:
+            if isinstance(exc, AuthExpiredError) and tokens is not None:
                 tokens.invalidate()
             tries += 1
             if tries >= LISTING_ATTEMPTS:
@@ -1094,7 +1094,7 @@ def cmd_archive_register(args) -> int:
     return 0
 
 
-class _Stopped(Exception):
+class _StoppedError(Exception):
     """The run is over. Raised out of a commit callback so the batch is NOT written."""
 
 
@@ -1172,7 +1172,7 @@ class _Run:
         with self.lock:
             limit = self.args.max_batches
             if members and limit and self.batches >= limit:
-                raise _Stopped(f"--max-batches {limit} reached")
+                raise _StoppedError(f"--max-batches {limit} reached")
             self.store.commit_batch(
                 self.archive_id,
                 segment_id,
@@ -1191,7 +1191,7 @@ def _chain_start(run, segment, concat):
     """Where a chain with no start yet begins: where the chain before it crossed into this
     part, which is exactly where the join would start it, or else the first header a scan
     finds -- None if there is none. The scan gives way, before every read, to that crossing
-    and to a stop, which raises `_Stopped`."""
+    and to a stop, which raises `_StoppedError`."""
 
     def crossed():
         if segment["idx"] == 0:
@@ -1205,9 +1205,9 @@ def _chain_start(run, segment, concat):
             segment["scan_from"],
             should_stop=lambda: run.stopping() or crossed() is not None,
         )
-    except ScanStopped:
+    except ScanStoppedError:
         if run.stopping():  # even if the crossing came too: a stop reads no more
-            raise _Stopped(
+            raise _StoppedError(
                 "stopped while scanning for the chain's first header"
             ) from None
         return crossed()
@@ -1269,12 +1269,12 @@ def _walk_segment(run, segment) -> None:
             stop_at=segment["stop_at"],
             should_stop=run.stopping,
         )
-    except (_Stopped, ReadStopped):
+    except (_StoppedError, ReadStoppedError):
         # The refused batch was read before it was refused.
         requests, fetched = delta()
         run.store.release_segment(segment["id"], requests, fetched)
         return
-    except UnsupportedArchive as exc:
+    except UnsupportedArchiveError as exc:
         requests, fetched = delta()
         if segment["joined"]:
             # A chain whose start is confirmed walks the archive's own headers, so
@@ -1346,7 +1346,7 @@ def _worker(run) -> None:
 
 
 _OUTCOME, _REPAIRED, _BLOCKED = "outcome", "repaired", "blocked"
-#: How a segment's error records a pax sighting, so the join can tell it from a failure.
+# Stored in segment errors by archive runs, so existing DBs hold it: a marker, not the class's name.
 _PAX_SIGHTING = "UnsupportedArchive: "
 
 _ROW_FIELDS = (
@@ -1391,7 +1391,7 @@ def _audit_repeated_paths(run) -> list[int]:
     of a tarball stored inside the archive, or a long-named member's header read
     without its long-name block.
 
-    A stop reaches it before every read, and raises `_Stopped`: the walk then ends with no
+    A stop reaches it before every read, and raises `_StoppedError`: the walk then ends with no
     verdict, and the next run audits again.
     """
     store, archive_id = run.store, run.archive_id
@@ -1416,7 +1416,7 @@ def _audit_repeated_paths(run) -> list[int]:
 
     def disagrees(row):
         if run.stopping():
-            raise _Stopped("stopped during the audit")
+            raise _StoppedError("stopped during the audit")
         return _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)
 
     def confirmed(row):
@@ -1577,7 +1577,7 @@ def cmd_archive_index(args) -> int:
     try:
         lock = InstanceLock(args.lock or f"{args.db}.lock")
         lock.__enter__()
-    except LockHeld as exc:
+    except LockHeldError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
     try:
@@ -1776,7 +1776,7 @@ def _walk_archive(
         if kind == _OUTCOME and payload.state == "complete":
             try:
                 redo = _audit_repeated_paths(run)
-            except (_Stopped, ReadStopped):
+            except (_StoppedError, ReadStoppedError):
                 break  # no verdict yet, and no failure: audited next run
             except Exception as exc:
                 audit_failed = (
@@ -1839,7 +1839,7 @@ def _walk_archive(
         # No header at the very start: perhaps no tar at all.
         try:
             compressed = _compression(row, archive_set, tokens, limiter, run.stopping)
-        except ReadStopped:
+        except ReadStoppedError:
             outcome = None  # stopped before the label was settled: no verdict yet
         except Exception as exc:
             unchecked = (
@@ -2215,7 +2215,7 @@ def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
             label = f"{folder}/{name}"
             try:
                 entries = _listed(lister, limiter, folder, name, stop, tokens)
-            except PathNotFound as exc:
+            except PathNotFoundError as exc:
                 store.log_event(job.archive_id, "gone", f"{label}: {exc}")
                 missed = missed or "gone"
                 continue
@@ -2374,7 +2374,7 @@ def cmd_archive_run(args) -> int:
     try:
         lock = InstanceLock(args.lock or f"{args.db}.lock")
         lock.__enter__()
-    except LockHeld as exc:
+    except LockHeldError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
     try:
@@ -2472,7 +2472,7 @@ def cmd_archive_import(args) -> int:
         ):
             store.init_schema()
             moved = store.import_from(args.source)
-    except LockHeld as exc:
+    except LockHeldError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
     except ValueError as exc:
@@ -2512,7 +2512,7 @@ def cmd_archive_forget(args) -> int:
                 )
                 store.forget(row["id"], what)
                 print(f"forgot {what}")
-    except LockHeld as exc:
+    except LockHeldError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
     return 0

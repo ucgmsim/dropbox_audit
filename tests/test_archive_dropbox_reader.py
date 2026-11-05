@@ -10,7 +10,7 @@ from dbaudit.archive.reader import (
     ConcatFile,
     DropboxRangeReader,
     ReaderError,
-    ReadStopped,
+    ReadStoppedError,
 )
 from dbaudit.archive.tarwalk import walk
 from dbaudit.limiter import AdaptiveLimiter
@@ -211,7 +211,7 @@ def test_a_read_gives_way_to_its_callers_stop_while_dropbox_pushes_back():
 
     reader.session = Storm(*[limited] * 3, ok(0, 512))
     reader.should_stop = lambda: bool(stop)
-    with pytest.raises(ReadStopped):
+    with pytest.raises(ReadStoppedError):
         reader.read_range(0, 0, 512)
     assert len(reader.session.calls) == 3
 

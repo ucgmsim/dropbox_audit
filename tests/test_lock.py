@@ -1,10 +1,10 @@
 import pytest
 
-from dbaudit.lock import InstanceLock, LockHeld
+from dbaudit.lock import InstanceLock, LockHeldError
 
 
 def test_second_instance_is_refused(tmp_path):
-    with InstanceLock(tmp_path / "l"), pytest.raises(LockHeld):
+    with InstanceLock(tmp_path / "l"), pytest.raises(LockHeldError):
         with InstanceLock(tmp_path / "l"):
             pass
 
@@ -20,7 +20,7 @@ def test_lock_names_the_holder(tmp_path):
     import os
 
     with InstanceLock(tmp_path / "l"):
-        with pytest.raises(LockHeld, match=str(os.getpid())):
+        with pytest.raises(LockHeldError, match=str(os.getpid())):
             with InstanceLock(tmp_path / "l"):
                 pass
 

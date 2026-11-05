@@ -42,7 +42,7 @@ from dbaudit.archive.reader import (
     DropboxRangeReader,
     LocalRangeReader,
 )
-from dbaudit.archive.tarwalk import BLOCK, UnsettledRead, walk
+from dbaudit.archive.tarwalk import BLOCK, UnsettledReadError, walk
 from dbaudit.auth import TokenProvider
 from dbaudit.limiter import AdaptiveLimiter
 
@@ -438,7 +438,7 @@ def main() -> int:
                     res = walk(
                         fresh, at, lambda ms, nxt: members.extend(ms), stop_at=alive
                     )
-                except UnsettledRead as exc:
+                except UnsettledReadError as exc:
                     # The walker re-reads for itself now, and gives up only when reads
                     # will not agree -- a finding about the server, worth reporting.
                     print(f"    reads would not settle: {exc}", flush=True)

@@ -2,11 +2,11 @@ import pytest
 
 from dbaudit.api import (
     ApiError,
-    AuthExpired,
-    CursorReset,
+    AuthExpiredError,
+    CursorResetError,
     HttpLister,
-    PathNotFound,
-    RateLimited,
+    PathNotFoundError,
+    RateLimitedError,
     TransientError,
 )
 
@@ -92,28 +92,28 @@ def test_429_body_retry_after_is_used():
             )
         ]
     )
-    with pytest.raises(RateLimited) as excinfo:
+    with pytest.raises(RateLimitedError) as excinfo:
         lst.list_folder("/x", recursive=True)
     assert excinfo.value.retry_after == 300
 
 
 def test_429_header_retry_after_fallback():
     lst = lister([FakeResp(429, {}, {"Retry-After": "12"})])
-    with pytest.raises(RateLimited) as excinfo:
+    with pytest.raises(RateLimitedError) as excinfo:
         lst.list_folder("/x", recursive=True)
     assert excinfo.value.retry_after == 12
 
 
 def test_429_without_any_hint_uses_a_safe_default():
     lst = lister([FakeResp(429, {})])
-    with pytest.raises(RateLimited) as excinfo:
+    with pytest.raises(RateLimitedError) as excinfo:
         lst.list_folder("/x", recursive=True)
     assert excinfo.value.retry_after >= 30
 
 
 def test_cursor_reset_classified():
     lst = lister([FakeResp(409, {"error": {".tag": "reset"}})])
-    with pytest.raises(CursorReset):
+    with pytest.raises(CursorResetError):
         lst.continue_("stale-cursor")
 
 
@@ -121,7 +121,7 @@ def test_path_not_found_classified():
     lst = lister(
         [FakeResp(409, {"error": {".tag": "path", "path": {".tag": "not_found"}}})]
     )
-    with pytest.raises(PathNotFound):
+    with pytest.raises(PathNotFoundError):
         lst.list_folder("/gone", recursive=True)
 
 
@@ -133,7 +133,7 @@ def test_other_409_is_api_error():
 
 def test_401_is_auth_expired():
     lst = lister([FakeResp(401, {"error_summary": "expired_access_token/"})])
-    with pytest.raises(AuthExpired):
+    with pytest.raises(AuthExpiredError):
         lst.list_folder("/x", recursive=True)
 
 

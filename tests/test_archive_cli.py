@@ -12,20 +12,22 @@ import io
 import logging
 import lzma
 import os
+import pathlib
 import random
 import signal
+import sqlite3
 import tarfile
 import threading
 
 import pytest
 
 from dbaudit import cli
-from dbaudit.api import AuthExpired, Page, RateLimited, TransientError
+from dbaudit.api import AuthExpiredError, Page, RateLimitedError, TransientError
 from dbaudit.archive.reader import (
     DropboxRangeReader,
     LocalRangeReader,
     ReaderError,
-    ReadStopped,
+    ReadStoppedError,
 )
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, find_chain_start
@@ -1030,7 +1032,7 @@ def test_index_waits_out_a_rate_limited_listing_and_asks_again(
         "dbaudit.cli.build_lister",
         fake_build_lister(
             [
-                RateLimited("too_many_requests", retry_after=0.01),
+                RateLimitedError("too_many_requests", retry_after=0.01),
                 dropbox_entries(archive_set),
             ]
         ),
@@ -1069,7 +1071,7 @@ def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(monkeypatch
     monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
     answers = iter(
         [
-            AuthExpired("401 from Dropbox"),
+            AuthExpiredError("401 from Dropbox"),
             Page(
                 entries=[{".tag": "file", "name": "a.tar"}], cursor=None, has_more=False
             ),
@@ -1425,7 +1427,7 @@ def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
     assert row["state"] not in ("corrupt", "complete", "truncated")
     [segment] = store.segments(row["id"])
     assert segment["state"] == "error"
-    assert "UnsettledRead" in (segment["error"] or "")
+    assert "UnsettledReadError" in (segment["error"] or "")
 
     monkeypatch.setattr(
         "dbaudit.cli._reader_for",
@@ -1504,6 +1506,44 @@ def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(tmp_p
     stop = threading.Event()
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.state == "unsupported" and not stop.is_set()
+
+
+def test_pax_sighting_stored_before_the_rename_is_still_a_sighting(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Archive databases written before the exception classes were renamed hold the old
+    class name in a segment's error. That text is a marker, not a class: it must still
+    read as a pax sighting, so the archive ends `unsupported` and not `failed`."""
+    source = local_archive(tmp_path)
+    db = str(tmp_path / "archives.db")
+    main(
+        [
+            "archive",
+            "register",
+            "--db",
+            db,
+            "--local-dir",
+            str(source),
+            "--name",
+            "a.tar",
+        ]
+    )
+    reason = "a pax extended header applies to the member at 0 ('x')"
+
+    def walk_as_the_old_code_did(run: cli._Run, segment: sqlite3.Row) -> None:
+        """Leave segment 0's error as a run before the rename wrote it, the rest unwalked."""
+        if segment["idx"] == 0:
+            run.store.fail_segment(segment["id"], f"UnsupportedArchive: {reason}")
+
+    monkeypatch.setattr("dbaudit.cli._walk_segment", walk_as_the_old_code_did)
+    store = ArchiveStore(db)
+
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+
+    row = store.get("a.tar")
+    assert row["state"] == "unsupported"
+    assert reason in (row["detail"] or "")
+    assert cli._PAX_SIGHTING == "UnsupportedArchive: "
 
 
 def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):
@@ -1978,7 +2018,7 @@ def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(
         def read_range(self, part_idx, offset, length):
             if self.nth == nth:
                 stop.set()
-                raise ReadStopped("a.tar: stopped while Dropbox answered 429")
+                raise ReadStoppedError("a.tar: stopped while Dropbox answered 429")
             return super().read_range(part_idx, offset, length)
 
     def reader_for(row, archive_set, tokens=None, limiter=None):
@@ -2027,7 +2067,7 @@ def test_a_read_that_gives_way_to_a_stop_still_commits_what_the_walk_confirmed(
             reads[0] += 1
             if reads[0] == 60:  # a signal, as this read meets a 429
                 stop.set()
-                raise ReadStopped("a.tar: stopped while Dropbox answered 429")
+                raise ReadStoppedError("a.tar: stopped while Dropbox answered 429")
             return super().read_range(part_idx, offset, length)
 
     monkeypatch.setattr(
@@ -2198,7 +2238,7 @@ def test_index_drops_its_token_after_a_401_on_its_first_listing(tmp_path, monkey
     monkeypatch.setattr(
         "dbaudit.cli.build_lister",
         fake_build_lister(
-            [AuthExpired("401 from Dropbox"), dropbox_entries(archive_set)]
+            [AuthExpiredError("401 from Dropbox"), dropbox_entries(archive_set)]
         ),
     )
     monkeypatch.setattr(

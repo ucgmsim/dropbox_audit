@@ -8,7 +8,7 @@ cursor issued by an earlier one -- exactly as a restarted process resumes a curs
 issued to the process that died.
 """
 
-from dbaudit.api import Page, PathNotFound
+from dbaudit.api import Page, PathNotFoundError
 
 
 class FakeLister:
@@ -85,7 +85,7 @@ class FakeLister:
         if path in self.faults:
             raise self.faults.pop(path)
         if path not in self.tree:
-            raise PathNotFound(f"no such folder: {path}")
+            raise PathNotFoundError(f"no such folder: {path}")
         return self._page(path, recursive, 0)
 
     def continue_(self, cursor):
