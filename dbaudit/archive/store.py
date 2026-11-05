@@ -125,9 +125,11 @@ class ArchiveStore:
     # ---- connections and schema -----------------------------------------
 
     def connect(self) -> sqlite3.Connection:
-        """One connection per thread. Task 7 shares one ArchiveStore across a thread
-        pool -- one chain per part -- so each worker gets its own autocommit
-        connection while the main thread reads `segments`/`stats` between rounds.
+        """One connection per thread.
+
+        Task 7 shares one ArchiveStore across a thread pool -- one chain per part -- so
+        each worker gets its own autocommit connection while the main thread reads
+        `segments`/`stats` between rounds.
 
         Returns
         -------
@@ -156,9 +158,11 @@ class ArchiveStore:
         self.connect().executescript(SCHEMA_PATH.read_text())
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
-        """Mirrors `Store.query` (dbaudit/store.py:166) -- the seam Task 9's report
-        module is built on, rather than reaching past this store into SQL the way
-        Task 7's review flagged `cmd_archive_status` for doing. Rows come back as
+        """Mirror `Store.query` (dbaudit/store.py:166).
+
+        It is the seam Task 9's report module is built on, rather than reaching past this
+        store into SQL the way Task 7's review flagged `cmd_archive_status` for doing.
+        Rows come back as
         `sqlite3.Row` (this connection's own `row_factory`), so callers can index a
         result by column name as well as by position.
 
@@ -210,10 +214,11 @@ class ArchiveStore:
 
     @contextlib.contextmanager
     def read_transaction(self) -> Generator[None]:
-        """A read-only `BEGIN`/`COMMIT` around a caller's sequence of `query`/`stream`
-        calls, so they provably see one snapshot instead of however many happen to
-        line up from separate autocommit statements landing between a concurrent
-        walker's commits. This connection is WAL (`connect()`), so a reader here never
+        """Wrap a caller's `query`/`stream` calls in a read-only `BEGIN`/`COMMIT`.
+
+        They provably see one snapshot instead of however many happen to line up from
+        separate autocommit statements landing between a concurrent walker's commits.
+        This connection is WAL (`connect()`), so a reader here never
         blocks -- or is blocked by -- `commit_batch` writing; it costs nothing beyond
         an ordinary read when nothing else happens to be running at the same moment.
 
@@ -238,8 +243,10 @@ class ArchiveStore:
             raise
 
     def log_event(self, archive_id: int | None, kind: str, detail: str = "") -> None:
-        """One row per notable happening -- retries, outcomes, run starts -- so a
-        post-mortem on a stalled walk has something to read besides state columns.
+        """Record one row per notable happening.
+
+        That is retries, outcomes, run starts -- so a post-mortem on a stalled walk has
+        something to read besides state columns.
 
         Parameters
         ----------
@@ -265,9 +272,10 @@ class ArchiveStore:
         source: str,
         parts: Iterable[Part],
     ) -> int:
-        """Insert or update an archive keyed by the content of its parts, not by
-        name or folder -- folders get rearranged (v01p0_incomplete moved), but the
-        part contents are what actually identify an archive.
+        """Insert or update an archive keyed by the content of its parts.
+
+        Not keyed by name or folder -- folders get rearranged (v01p0_incomplete moved),
+        but the part contents are what actually identify an archive.
 
         The identity hash is `ArchiveSet.set_hash()` (Task 2), never re-derived
         here: two copies of an identity rule is exactly the duplication that
@@ -380,7 +388,7 @@ class ArchiveStore:
         return archive_id
 
     def get(self, name: str):
-        """The archive to use for `name`.
+        """Return the archive to use for `name`.
 
         Multiple rows can share a name: parts move between folders (updated in
         place, same row), and a replaced part creates a new row while flagging the
@@ -414,7 +422,7 @@ class ArchiveStore:
         return row
 
     def parts_of(self, archive_id: int) -> list[Part]:
-        """The parts of an archive, in order.
+        """Return the parts of an archive, in order.
 
         Parameters
         ----------
@@ -450,8 +458,9 @@ class ArchiveStore:
         ]
 
     def start_walk(self, archive_id: int) -> int:
-        """Resume a walk: reclaim what a dead run left behind, and return the
-        confirmed frontier to resume from.
+        """Resume a walk, returning the confirmed frontier to resume from.
+
+        Reclaims what a dead run left behind.
 
         Called from Task 7's main thread while holding the instance lock, which is
         what makes "a `walking` segment belongs to a process that is no longer
@@ -573,7 +582,7 @@ class ArchiveStore:
             raise
 
     def mark_unsupported(self, archive_id: int, detail: str) -> None:
-        """The archive is in a format the walker does not index (pax), for good.
+        """Mark the archive as in a format the walker does not index (pax), for good.
 
         Terminal, unlike `error`, which the next `index` retries: re-walking cannot
         change an archive's format, so `index` and `cat` refuse this state outright. A
@@ -667,7 +676,7 @@ class ArchiveStore:
             raise
 
     def stats(self, archive_id: int) -> ArchiveStats:
-        """A snapshot for `status`.
+        """Return a snapshot for `status`.
 
         `n_members`/`member_bytes` are recomputed from `members`, never carried as
         counters, so a replayed batch cannot inflate them. `covered` and
@@ -769,8 +778,10 @@ class ArchiveStore:
         return covered
 
     def build_indexes(self, archive_id: int) -> None:
-        """Composite indexes leading with archive_id, for the per-archive queries
-        Task 8+ runs (`find_members`, browsing by directory or by size).
+        """Build composite indexes leading with archive_id.
+
+        They serve the per-archive queries Task 8+ runs (`find_members`, browsing by
+        directory or by size).
 
         Built once a walk is done, not while it runs: the indexes cover the whole
         table rather than just this archive, but there is no benefit to paying
@@ -800,9 +811,11 @@ class ArchiveStore:
         requests: int = 0,
         bytes_fetched: int = 0,
     ) -> None:
-        """Members and the resume cursor in one transaction: the whole resumability
-        story. The cursor belongs to the segment, because each chain resumes
-        independently; the archive row carries only the totals `stats` reports.
+        """Commit members and the resume cursor in one transaction.
+
+        This is the whole resumability story. The cursor belongs to the segment, because
+        each chain resumes independently; the archive row carries only the totals
+        `stats` reports.
 
         The segment's cursor is updated *before* the members are inserted, and the
         members are converted to row tuples by a generator that `executemany`
@@ -909,8 +922,9 @@ class ArchiveStore:
             raise
 
     def member_at(self, archive_id: int, hdr_offset: int):
-        """The member whose header sits at ``hdr_offset``, or None -- how `cat` knows
-        what must follow the member it extracts.
+        """Return the member whose header sits at ``hdr_offset``, or None.
+
+        This is how `cat` knows what must follow the member it extracts.
 
         Parameters
         ----------
@@ -934,8 +948,9 @@ class ArchiveStore:
         )
 
     def repeated_paths(self, archive_id: int, limit: int) -> list[sqlite3.Row]:
-        """Every row whose path is recorded more than once, in header order, at most
-        ``limit`` of them.
+        """Return every row whose path is recorded more than once, in header order.
+
+        At most ``limit`` of them.
 
         A tar can hold a path twice (`tar -r` appends a newer copy), but a bad read that
         is valid tar from elsewhere in the archive usually makes one: it records that
@@ -1044,9 +1059,11 @@ class ArchiveStore:
     def drop_members_between(
         self, archive_id: int, start: int, end: int | None
     ) -> None:
-        """Throw away rows in ``[start, end)``: they were never on the confirmed
-        chain, whether because a segment is being reset or retired. ``end=None``
-        means no upper bound, for a segment with no `stop_at` (the last part).
+        """Throw away rows in ``[start, end)``.
+
+        They were never on the confirmed chain, whether because a segment is being reset
+        or retired. ``end=None`` means no upper bound, for a segment with no `stop_at`
+        (the last part).
 
         Parameters
         ----------
@@ -1072,8 +1089,10 @@ class ArchiveStore:
     # ---- segments -----------------------------------------------------------
 
     def seed_segments(self, archive_id: int, parts: Iterable[Part]) -> None:
-        """One segment per part. Segment 0 is authoritative: a tar begins at
-        offset 0, so it needs no scan and no confirmation from a predecessor.
+        """Create one segment per part.
+
+        Segment 0 is authoritative: a tar begins at offset 0, so it needs no scan and no
+        confirmation from a predecessor.
 
         `INSERT OR IGNORE` on the (archive_id, idx) unique pair, wrapped in its
         own transaction (each row would otherwise be its own autocommit
@@ -1116,7 +1135,7 @@ class ArchiveStore:
             raise
 
     def segments(self, archive_id: int) -> list[sqlite3.Row]:
-        """The segments of an archive, in order.
+        """Return the segments of an archive, in order.
 
         Parameters
         ----------
@@ -1193,8 +1212,9 @@ class ArchiveStore:
         )
 
     def set_segment_start(self, segment_id: int, offset: int) -> None:
-        """Record where a scan found this segment's first header, before any batch
-        is committed.
+        """Record where a scan found this segment's first header.
+
+        This is before any batch is committed.
 
         Deliberately not `joined`: that is earned only once the segment before
         this one's chain walks into exactly this offset (`mark_joined`). Until
@@ -1285,10 +1305,11 @@ class ArchiveStore:
             raise
 
     def recheck(self, archive_id: int):
-        """Walk the chain again, from a confirmed start before the segment where the walk
-        ended, and from there on. Returns (the segment walked again from, the segment
-        where the walk had ended), or None for a `stale` archive, which only `register`
-        may lift.
+        """Walk the chain again, from a confirmed start before where the walk ended.
+
+        The start is before the segment where the walk ended, and the walk runs from
+        there on. Returns (the segment walked again from, the segment where the walk had
+        ended), or None for a `stale` archive, which only `register` may lift.
 
         The way back from a verdict reached wrongly. The walker reads a verdict again
         from the last fetches that led to it, but a bad read can send a chain onto real
@@ -1421,7 +1442,7 @@ class ArchiveStore:
         )
 
     def retire_segment(self, segment_id: int) -> None:
-        """A segment lying entirely past where the archive's chain ended.
+        """Retire a segment lying entirely past where the archive's chain ended.
 
         This is the normal case, not an exotic one: a tar's terminator is usually
         not in the last part, so the segment covering it typically has nothing of
@@ -1589,8 +1610,10 @@ class ArchiveStore:
     # ---- moving archives between databases ----------------------------------
 
     def forget(self, archive_id: int, why: str) -> None:
-        """Drop an archive and everything recorded about it, so that the next run walks
-        it from scratch. The event that says so has no archive to belong to.
+        """Drop an archive and everything recorded about it.
+
+        The next run walks it from scratch. The event that says so has no archive to
+        belong to.
 
         Parameters
         ----------
@@ -1610,11 +1633,12 @@ class ArchiveStore:
             raise
 
     def import_from(self, source: str | Path) -> list[tuple[int, int, int | None]]:
-        """Copy every archive in the database at ``source`` into this one, finished or
-        mid-walk, under new ids: its row, parts, segments (with no owner, so that the
-        next walk reclaims them), members, events and recheck note. An archive here with
-        the same content is replaced, and everything recorded about it goes. One
-        transaction, so a failure imports nothing.
+        """Copy every archive in the database at ``source`` into this one.
+
+        Finished or mid-walk, under new ids: its row, parts, segments (with no owner, so
+        that the next walk reclaims them), members, events and recheck note. An archive
+        here with the same content is replaced, and everything recorded about it goes.
+        One transaction, so a failure imports nothing.
 
         Raises ValueError when the two databases differ in tables or columns: a copy
         column for column would then mean something else. Returns (id there, id here,
@@ -1660,7 +1684,7 @@ class ArchiveStore:
         return moved
 
     def _tables(self, schema: str) -> set[str]:
-        """The names of the tables in one attached database.
+        """Return the names of the tables in one attached database.
 
         Parameters
         ----------
@@ -1680,7 +1704,7 @@ class ArchiveStore:
         }
 
     def _columns(self, schema: str, table: str) -> list[tuple[str, str]]:
-        """The columns of one table, in order.
+        """Return the columns of one table, in order.
 
         Parameters
         ----------

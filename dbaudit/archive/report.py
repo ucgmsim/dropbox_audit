@@ -1,5 +1,6 @@
-"""Rollups over one archive's manifest: what is actually inside a tar, without
-reading the whole thing by hand.
+"""Rollups over one archive's manifest: what is actually inside a tar.
+
+They save reading the whole thing by hand.
 
 Nothing here can corrupt the index it summarises: it is read-only, and it never
 reaches Dropbox (T9-10). What it *can* do is mislead -- these numbers are what a
@@ -107,10 +108,12 @@ class ArchiveSummary(TypedDict):
 
 
 def _utc(ts: int) -> datetime:
-    """The one correct conversion (T9-3): `fromtimestamp(ts, tz=timezone.utc)`, never
-    `utcfromtimestamp` (deprecated since 3.12; `pytest.ini` turns that into a hard
-    failure) and never `fromtimestamp(ts)` without a zone (silently the *process's*
-    local zone -- correct on a UTC machine, silently wrong on any other).
+    """Convert a Unix time to a datetime, the one correct way (T9-3).
+
+    That is `fromtimestamp(ts, tz=timezone.utc)`, never `utcfromtimestamp` (deprecated
+    since 3.12; `pytest.ini` turns that into a hard failure) and never
+    `fromtimestamp(ts)` without a zone (silently the *process's* local zone -- correct
+    on a UTC machine, silently wrong on any other).
 
     Parameters
     ----------
@@ -126,8 +129,10 @@ def _utc(ts: int) -> datetime:
 
 
 def _iso(ts: int) -> str:
-    """Full timestamp, for a per-member record (`manifest.csv`) where the hour can
-    matter -- e.g. telling apart files written moments apart during one run.
+    """Format a full timestamp, for a per-member record (`manifest.csv`).
+
+    For where the hour can matter -- e.g. telling apart files written moments apart
+    during one run.
 
     Parameters
     ----------
@@ -143,8 +148,9 @@ def _iso(ts: int) -> str:
 
 
 def _iso_date(ts: int) -> str:
-    """Date only, for a whole-archive span where a date is enough (T9-3) -- the
-    question `mtime_span` answers is "roughly when is this data from", not which
+    """Format a date only, for a whole-archive span where a date is enough (T9-3).
+
+    The question `mtime_span` answers is "roughly when is this data from", not which
     second a particular file was written.
 
     Parameters
@@ -161,7 +167,7 @@ def _iso_date(ts: int) -> str:
 
 
 def _dir_prefix(dir_: str, depth: int) -> str:
-    """The first `depth` components of `dir`, or `ROOT_LABEL` for a root member.
+    """Return the first `depth` components of `dir`, or `ROOT_LABEL` for a root member.
 
     A `dir` shorter than `depth` (e.g. `"run"` at depth 2) returns as many
     components as it has, rather than padding or falling back to the root label --
@@ -206,8 +212,10 @@ def _bump[K](table: dict[K, dict[str, int]], key: K, size: int) -> None:
 def _by_bytes_desc[K: (str, tuple[str, str])](
     table: dict[K, dict[str, int]],
 ) -> list[tuple[K, dict[str, int]]]:
-    """`(key, {count, bytes})` pairs -- a plain dict would not survive `dict(...)` in
-    the caller and then back out again with a defined order, and the brief's own test
+    """Return `(key, {count, bytes})` pairs, sorted by descending bytes.
+
+    A plain dict would not survive `dict(...)` in the caller and then back out again
+    with a defined order, and the brief's own test
     relies on descending-by-bytes being the order a caller sees without re-sorting.
 
     Parameters

@@ -64,8 +64,10 @@ class LimiterView(Protocol):
 
 @dataclass
 class Job:
-    """One archive to walk. ``chains`` is how many it wants at once: an estimate until its
-    walk begins, then the number its walk reports as chains finish.
+    """One archive to walk.
+
+    ``chains`` is how many it wants at once: an estimate until its walk begins, then the
+    number its walk reports as chains finish.
 
     Parameters
     ----------
@@ -103,9 +105,11 @@ class Job:
 
 @dataclass
 class Done:
-    """What one walk came to. ``state`` is the archive's state afterwards, or `stopped`
-    (resumable), `gone` (no longer where the listing said) or `done` (walked before, or
-    being walked by another job).
+    """What one walk came to.
+
+    ``state`` is the archive's state afterwards, or `stopped` (resumable), `gone` (no
+    longer where the listing said) or `done` (walked before, or being walked by another
+    job).
 
     Parameters
     ----------
@@ -325,8 +329,10 @@ class Runner:
         elapsed: float,
         rate: float,
     ) -> None:
-        """What is left, in flight or queued, at the last hour's pace: by count and by
-        size. The largest archives go first, so the truth lies between the two.
+        """Return what is left, in flight or queued, at the last hour's pace.
+
+        Estimated by count and by size. The largest archives go first, so the truth lies
+        between the two.
 
         Parameters
         ----------

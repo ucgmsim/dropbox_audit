@@ -99,7 +99,7 @@ class Figures:
 
 
 def find_dir(store: Store, path: str) -> tuple[int, str] | None:
-    """The (id, path_display) of the folder at `path`, matched without case, or None.
+    """Return the (id, path_display) of the folder at `path`, matched without case, or None.
 
     Parameters
     ----------
@@ -154,8 +154,9 @@ DUPLICATES = (
 def duplicate_groups(
     conn: sqlite3.Connection, top: int
 ) -> Iterator[list[tuple[int, int, int]]]:
-    """Yield each duplicated content's copies as (dir_id, size, rowid), one content at a
-    time, so memory stays flat however many duplicates there are.
+    """Yield each duplicated content's copies as (dir_id, size, rowid).
+
+    One content at a time, so memory stays flat however many duplicates there are.
 
     Parameters
     ----------
@@ -183,7 +184,7 @@ def duplicate_groups(
 
 
 def common_folder(dirs: list[int], parent: array[int], depth: array[int]) -> int:
-    """The deepest folder holding every one of `dirs`: their lowest common ancestor.
+    """Return the deepest folder holding every one of `dirs`: their lowest common ancestor.
 
     Parameters
     ----------
@@ -236,7 +237,7 @@ def measure(store: Store, listed: float, min_size: int, page_root: int) -> Figur
     rowids = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] + 1
 
     def zeros():
-        """An array of zeros with a slot for every dir id.
+        """Return an array of zeros with a slot for every dir id.
 
         Returns
         -------
@@ -448,7 +449,7 @@ def below(path: str, crawl_root: str) -> str:
 def chunked(
     conn: sqlite3.Connection, query: str, ids: Iterable[int]
 ) -> Iterator[tuple]:
-    """The rows `query` finds for `ids`, a chunk at a time; it ends in `IN ({})`.
+    """Yield the rows `query` finds for `ids`, a chunk at a time; it ends in `IN ({})`.
 
     Parameters
     ----------
@@ -496,7 +497,7 @@ def dir_names(
 
 
 def past(threshold: int, size: int) -> int:
-    """The first threshold, doubling from `threshold`, that is above `size`.
+    """Return the first threshold, doubling from `threshold`, that is above `size`.
 
     Parameters
     ----------
@@ -516,7 +517,7 @@ def past(threshold: int, size: int) -> int:
 
 
 def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
-    """The row for a folder.
+    """Build the row for a folder.
 
     Parameters
     ----------
@@ -705,8 +706,9 @@ def layout(store: Store, figures: Figures, threshold: int, max_rows: int) -> Pag
 def measure_kinds(
     figures: Figures, page: Page, rows: Iterable[kinds.WalkRow], listed: float
 ) -> Tally:
-    """Give each folder row on the page its largest kind of data, and return the tally of
-    `rows`, a kinds.walk read once.
+    """Give each folder row on the page its largest kind of data, and return the tally.
+
+    The tally is of `rows`, a kinds.walk read once.
 
     Only the folders with a row keep totals, so memory follows --max-rows: each byte counts
     toward the nearest of them at or above its folder, and the totals roll up from there.
@@ -775,7 +777,7 @@ def measure_kinds(
 
 
 def ancestors(d: int, parent: array[int]) -> Iterator[int]:
-    """The folders above a folder, nearest first.
+    """Return the folders above a folder, nearest first.
 
     Parameters
     ----------
@@ -904,8 +906,10 @@ def place(d: int, near: set, parent: array[int], depth: array[int], floor: int) 
 def counterparts(
     conn: sqlite3.Connection, figures: Figures, folders: list[int], floor: int
 ) -> dict:
-    """{folder: (place, bytes)}: the place holding copies of the most of each folder's
-    held-elsewhere bytes. A second pass over the duplicates, for these folders only.
+    """Return {folder: (place, bytes)} for each folder's held-elsewhere bytes.
+
+    The place is the one holding copies of the most of each folder's held-elsewhere
+    bytes. A second pass over the duplicates, for these folders only.
 
     Parameters
     ----------
@@ -995,7 +999,7 @@ def tables(store: Store, figures: Figures, page: Page) -> dict[str, list[Entry]]
     names = dir_names(conn, {*dup, *cold, *tiny, *(spot for spot, _ in spots.values())})
 
     def entry(d: int) -> Entry:
-        """The table entry for a folder.
+        """Build the table entry for a folder.
 
         Parameters
         ----------
@@ -1099,8 +1103,10 @@ def build(
     rules: kinds.Rules | None = None,
     index: sqlite3.Connection | None = None,
 ):
-    """(page, summary, tables) for the folder at `page_path`. `rules` and `index` (an
-    archive index, see kinds.archive_index) say what kinds of data the files are.
+    """Return (page, summary, tables) for the folder at `page_path`.
+
+    `rules` and `index` (an archive index, see kinds.archive_index) say what kinds of
+    data the files are.
 
     Parameters
     ----------
@@ -1198,7 +1204,7 @@ def esc(text: str) -> str:
 
 
 def compact(n: float) -> str:
-    """A size in at most four characters, the way the reference page shows them.
+    """Format a size in at most four characters, the way the reference page shows them.
 
     Parameters
     ----------
@@ -1220,7 +1226,7 @@ def compact(n: float) -> str:
 
 
 def bar(share: float) -> str:
-    """A text bar for a share.
+    """Build a text bar for a share.
 
     Parameters
     ----------
@@ -1254,7 +1260,7 @@ def day(t: float) -> str:
 
 
 def plural(n: int, word: str) -> str:
-    """A count with its noun.
+    """Format a count with its noun.
 
     Parameters
     ----------
@@ -1272,7 +1278,7 @@ def plural(n: int, word: str) -> str:
 
 
 def _counts(row: Row) -> str:
-    """The files and folders of a row, as text.
+    """Return the files and folders of a row, as text.
 
     Parameters
     ----------
@@ -1289,7 +1295,7 @@ def _counts(row: Row) -> str:
 
 
 def _cells(size: int, total: int, tree: str) -> str:
-    """The size, share, bar and tree cells of a row.
+    """Return the size, share, bar and tree cells of a row.
 
     Parameters
     ----------
@@ -1314,7 +1320,7 @@ def _cells(size: int, total: int, tree: str) -> str:
 
 
 def _badges(row: Row) -> str:
-    """The badges of a folder row: kind, duplicate, cold and tiny.
+    """Return the badges of a folder row: kind, duplicate, cold and tiny.
 
     Parameters
     ----------
@@ -1502,7 +1508,7 @@ def _table(
 
 
 def _link(e: Entry) -> str:
-    """A link to a folder's row.
+    """Build a link to a folder's row.
 
     Parameters
     ----------
@@ -1535,7 +1541,7 @@ def _tables(out: TextIO, page: Page, summary: Summary, chosen: dict) -> None:
     total = page.root.size
 
     def share(n: float) -> str:
-        """A share of the page, as text.
+        """Format a share of the page, as text.
 
         Parameters
         ----------

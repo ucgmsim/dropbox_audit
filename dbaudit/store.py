@@ -125,7 +125,7 @@ def _epoch(stamp: str | None) -> int | None:
 
 
 def _depth_of(path: str) -> int:
-    """The number of folders above a path.
+    """Return the number of folders above a path.
 
     Parameters
     ----------
@@ -216,7 +216,7 @@ class Store:
     def _caches(
         self,
     ) -> tuple[dict[str, int], dict[str, int], dict[str, int | None]]:
-        """This thread's lookup caches, opening the connection if needed.
+        """Return the calling thread's lookup caches, opening the connection if needed.
 
         Returns
         -------
@@ -233,7 +233,7 @@ class Store:
         )
 
     def _drop_caches(self) -> None:
-        """Called after a rollback: cached ids may reference rows that no longer exist."""
+        """Clear the caches after a rollback: cached ids may reference vanished rows."""
         self._local.dir_cache = {}
         self._local.principal_cache = {}
 
@@ -262,7 +262,7 @@ class Store:
             )
 
     def is_initialised(self) -> bool:
-        """True once `init` has created the schema. Probing must not raise.
+        """Return whether `init` has created the schema; probing must not raise.
 
         Returns
         -------
@@ -599,7 +599,7 @@ class Store:
     def _principal_id(
         self, conn: sqlite3.Connection, cache: dict[str, int], account_id: str | None
     ) -> int | None:
-        """The id of the principal for a Dropbox account, creating the row if needed.
+        """Return the id of the principal for a Dropbox account, creating the row if needed.
 
         Parameters
         ----------

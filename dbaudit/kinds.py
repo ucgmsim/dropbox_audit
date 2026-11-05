@@ -171,8 +171,9 @@ class Rules:
         )
 
     def _folder_tests(self, folder: str) -> tuple[bool, bool, bool, bool, bool]:
-        """What classify asks of a folder: recorded, LF converted, velocity models, sources
-        and IM results.
+        """Hold what classify asks of a folder.
+
+        That is: recorded, LF converted, velocity models, sources and IM results.
 
         Parameters
         ----------
@@ -195,8 +196,9 @@ class Rules:
         )
 
     def classify(self, folder: str, name: str) -> str:
-        """The kind of a file, both arguments lowercased. `folder` is a folder path, or an
-        archive's path, "::" and a member's folder.
+        """Return the kind of a file, both arguments lowercased.
+
+        `folder` is a folder path, or an archive's path, "::" and a member's folder.
 
         Parameters
         ----------
@@ -256,7 +258,7 @@ class Rules:
         return "other"
 
     def kept(self, folder: str) -> bool:
-        """Is this folder (lowercased) under a `keep` prefix?
+        """Return whether this folder (lowercased) is under a `keep` prefix.
 
         Parameters
         ----------
@@ -275,7 +277,7 @@ RULE_KEYS = tuple(f.name for f in fields(Rules) if f.init)
 
 
 def load_rules(path: str | None) -> Rules:
-    """The rules in a TOML file of site words, or the built-in rules alone without one.
+    """Return the rules in a TOML file of site words, or the built-in rules alone without one.
 
     Parameters
     ----------
@@ -313,7 +315,7 @@ def load_rules(path: str | None) -> Rules:
 
 
 def by_archive_name(folder: str, name: str) -> str:
-    """The kind of a tarball nobody could list (pax, gzip), from its name and folder.
+    """Return the kind of a tarball nobody could list (pax, gzip), from its name and folder.
 
     Parameters
     ----------
@@ -344,7 +346,7 @@ def by_archive_name(folder: str, name: str) -> str:
 
 
 def shares(kind: str) -> dict[str, float]:
-    """A kind as {kind: fraction}: an unlisted LF tarball is shared out by LF_SPLIT.
+    """Return a kind as {kind: fraction}: an unlisted LF tarball is shared out by LF_SPLIT.
 
     Parameters
     ----------
@@ -376,8 +378,10 @@ _REGULAR = f"size > 0 AND type IN ({', '.join('?' * len(_TYPES))})"
 
 
 def archive_index(path: str) -> sqlite3.Connection:
-    """The archive index at `path`, read-only. One still being written is read through its
-    write-ahead log, so it is never opened as immutable.
+    """Open the archive index at `path`, read-only.
+
+    One still being written is read through its write-ahead log, so it is never opened as
+    immutable.
 
     Parameters
     ----------
@@ -414,10 +418,11 @@ def walk(
     index: sqlite3.Connection | None = None,
     under: str | None = None,
 ) -> Iterator[WalkRow]:
-    """Every byte of the listing, or of the folder `under`, as (dir_id, kind, size, how,
-    date) rows, `how` being LOOSE, MEMBERS or BY_NAME. Bytes inside a tarball count toward
-    the folder that holds it. Reads both databases, each in one read transaction, and
-    writes neither.
+    """Yield every byte of the listing, or of the folder `under`, as rows.
+
+    The rows are (dir_id, kind, size, how, date), `how` being LOOSE, MEMBERS or BY_NAME.
+    Bytes inside a tarball count toward the folder that holds it. Reads both databases,
+    each in one read transaction, and writes neither.
 
     Parameters
     ----------
@@ -454,8 +459,9 @@ def walk(
 
 
 def _archives(index: sqlite3.Connection) -> tuple[Archives, dict[bytes, int]]:
-    """Each archive as (trusted, name, folder, listed bytes), and the archive each part's
-    content hash belongs to.
+    """Return the archives and the archive each part's content hash belongs to.
+
+    Each archive is (trusted, name, folder, listed bytes).
 
     A listing is trusted to show what its archive holds when the walk reached the end, or
     when it holds at least half the archive's bytes. Below half it might hold only an
@@ -513,8 +519,9 @@ def _files(
     aside: dict[int, list[tuple[int, int]]],
     under: str | None,
 ) -> Iterator[WalkRow]:
-    """The listing's files, each yielded with its kind, or set aside under the trusted
-    archive whose part it is.
+    """Yield the listing's files, each with its kind.
+
+    A file that is part of a trusted archive is set aside under that archive instead.
 
     Parameters
     ----------
@@ -586,8 +593,10 @@ def _members(
     archive: tuple[bool, str, str, int],
     files: list[tuple[int, int]],
 ) -> Iterator[WalkRow]:
-    """A trusted archive's bytes, in each of its copies and parts (`files`), shared out over
-    its listed members by size and dated by each member's own time.
+    """Yield a trusted archive's bytes, in each of its copies and parts (`files`).
+
+    They are shared out over its listed members by size and dated by each member's own
+    time.
 
     Parameters
     ----------
@@ -769,8 +778,10 @@ def tarball_note(
 
 
 def tally(rows: Iterable[WalkRow], listed: float) -> Tally:
-    """Add up the walk's rows. Ages count back from `listed`, months are UTC, and a date
-    after the listing (a wrong clock) is in its own month but older than nothing.
+    """Add up the walk's rows.
+
+    Ages count back from `listed`, months are UTC, and a date after the listing (a wrong
+    clock) is in its own month but older than nothing.
 
     Parameters
     ----------
@@ -817,8 +828,10 @@ def tally(rows: Iterable[WalkRow], listed: float) -> Tally:
 
 
 def _months() -> Callable[[float], str | None]:
-    """A function giving a Unix time's UTC month as "YYYY-MM", remembered day by day, or
-    None for a time no calendar holds.
+    """Return a function giving a Unix time's UTC month as "YYYY-MM".
+
+    The months are remembered day by day, and the function gives None for a time no
+    calendar holds.
 
     Returns
     -------
@@ -829,7 +842,7 @@ def _months() -> Callable[[float], str | None]:
 
     @functools.cache
     def of_day(day: int) -> str | None:
-        """The UTC month of a day, remembered.
+        """Return the UTC month of a day, remembered.
 
         Parameters
         ----------
@@ -850,8 +863,10 @@ def _months() -> Callable[[float], str | None]:
 
 
 def write_csv(counted: Tally, outdir: str, about: dict[str, str]) -> list[str]:
-    """Write the tally into `outdir` as four CSV files, in whole bytes, one row per kind
-    that holds bytes; `about` says what listing it came from. Returns the paths.
+    """Write the tally into `outdir` as four CSV files, and return the paths.
+
+    The files are in whole bytes, one row per kind that holds bytes; `about` says what
+    listing it came from.
 
     Parameters
     ----------

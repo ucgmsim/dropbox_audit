@@ -1,4 +1,4 @@
-"""Reports aimed at one question: where could this storage be reduced?
+"""Reports aimed at one question: where could this storage be reduced.
 
 Each report answers a different reduction strategy -- delete duplicates, archive cold
 data, clean up a directory full of junk, or purge version history -- so they are
@@ -145,7 +145,7 @@ def reconcile(store: Store, reported_used_bytes: int) -> tuple[int, int, int]:
 
 
 def duplicate_report(store: Store, limit: int = 50) -> list[DuplicateRow]:
-    """The contents stored most redundantly.
+    """Return the contents stored most redundantly.
 
     Parameters
     ----------
@@ -188,7 +188,7 @@ def duplicate_report(store: Store, limit: int = 50) -> list[DuplicateRow]:
 
 
 def total_reclaimable_duplicates(store: Store) -> int:
-    """The bytes freed by keeping one copy of every duplicated content.
+    """Return the bytes freed by keeping one copy of every duplicated content.
 
     Parameters
     ----------
@@ -208,7 +208,7 @@ def total_reclaimable_duplicates(store: Store) -> int:
 
 
 def _subtree(under: str) -> tuple[str, list]:
-    """A condition keeping only the files at or below the folder `under`, and its values.
+    """Build a condition keeping only the files at or below the folder `under`, and its values.
 
     Every path below `p` sorts between `p + "/"` and `p + "0"`, because "0" is the
     character after "/", so this is one range scan of the path index.

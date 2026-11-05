@@ -427,9 +427,11 @@ class _Pass:
 
 
 def _key(info: tarfile.TarInfo, after: int) -> _Key:
-    """A member as two readings of it are compared: everything recorded, and where the
-    next header sequence begins -- which for a GNU sparse member is not among the
-    recorded fields, since it records the file's expanded size.
+    """Return a member as two readings of it are compared.
+
+    That is everything recorded, and where the next header sequence begins -- which for
+    a GNU sparse member is not among the recorded fields, since it records the file's
+    expanded size.
 
     Parameters
     ----------
@@ -452,10 +454,12 @@ def _commit_in_batches(
     end: int,
     batch_size: int,
 ) -> None:
-    """Commit ``entries`` -- (where its header sequence begins, member), in order -- at
-    most ``batch_size`` members at a time: each commit with the cursor where the first
-    member it does not carry begins, the last with ``end``. With no entries, one commit
-    of none, which still moves the cursor to ``end``.
+    """Commit ``entries`` at most ``batch_size`` members at a time.
+
+    Each entry is (where its header sequence begins, member), in order. Each commit
+    carries the cursor where the first member it does not carry begins, the last with
+    ``end``. With no entries, one commit of none, which still moves the cursor to
+    ``end``.
 
     Parameters
     ----------
@@ -561,8 +565,10 @@ def _walk_chain(
     def finish(
         vpos: int, version: object, verdict: Callable[[int], WalkResult]
     ) -> _Pass:
-        """End the pass at ``vpos``, having read ``version`` there; ``verdict(seen)``
-        says what that means, and is asked only once the batch is committed.
+        """End the pass at ``vpos``, having read ``version`` there.
+
+        ``verdict(seen)`` says what that means, and is asked only once the batch is
+        committed.
 
         Parameters
         ----------
@@ -591,8 +597,10 @@ def _walk_chain(
         )
 
     def found_nothing(before: int, how: str | None) -> Callable[[int], WalkResult]:
-        """The verdict where no member begins at ``before``, as a walk arriving there
-        reports it: ``how`` is tarfile's ReadError message, or None if it saw no member.
+        """Return the verdict where no member begins at ``before``.
+
+        It is as a walk arriving there reports it: ``how`` is tarfile's ReadError
+        message, or None if it saw no member.
 
         Parameters
         ----------
@@ -751,7 +759,7 @@ def _settled(
     before: int,
     rescued: list[int],
 ) -> tarfile.TarInfo | _NoMember:
-    """The member to record, once nothing about it rests on one read alone.
+    """Return the member to record, once nothing about it rests on one read alone.
 
     Two things are taken on trust from blocks no checksum covers, and each is read
     again before it is believed. A GNU long name or link target: GNU tar (99 bytes in
@@ -844,9 +852,11 @@ class _NoMember:
 def _long_fields_agree(
     concat: ConcatFile, info: tarfile.TarInfo, encoding: str, errors: str
 ) -> bool:
-    """Whether a member's long name and link target begin as the checksummed header
-    after their blocks says. True for a member with no such blocks. The header was
-    read a moment ago, so it is still in the window: checking costs no request.
+    """Return whether a member's long name and link target begin as the header says.
+
+    That is the checksummed header after their blocks. True for a member with no such
+    blocks. The header was read a moment ago, so it is still in the window: checking
+    costs no request.
 
     Parameters
     ----------
@@ -909,9 +919,11 @@ def _read_here(
     encoding: str = tarfile.ENCODING,
     errors: str = "surrogateescape",
 ) -> tuple[tarfile.TarInfo, int] | str | None:
-    """What a walk arriving at ``offset`` finds there, parsed from what the reader returns:
-    (member, where the next header lies), or -- where no member begins -- the message of
-    the ReadError tarfile raised, or None if it simply saw none.
+    """Return what a walk arriving at ``offset`` finds there.
+
+    Parsed from what the reader returns: (member, where the next header lies), or --
+    where no member begins -- the message of the ReadError tarfile raised, or None if it
+    simply saw none.
 
     Parameters
     ----------
@@ -951,8 +963,10 @@ def _read_one(
     encoding: str = tarfile.ENCODING,
     errors: str = "surrogateescape",
 ) -> tuple[tarfile.TarInfo, int] | None:
-    """The member whose header sequence begins at ``offset``, parsed from what the
-    reader returns, and where the next header lies -- or None if none begins there.
+    """Return the member whose header sequence begins at ``offset``.
+
+    Parsed from what the reader returns, and where the next header lies -- or None if
+    none begins there.
 
     Parameters
     ----------
@@ -982,10 +996,12 @@ def _tie_break(
     theirs: object,
     rescued: list[int],
 ) -> tuple[tarfile.TarInfo, int] | str | None:
-    """Two passes read the header sequence at ``before`` differently: this one as
-    ``mine``, the one before it as ``theirs`` -- each a member's `_key`, or None for no
-    member there. Read it afresh until one version has two reads behind it, and return
-    what the deciding read found (as `_read_here` does).
+    """Settle two differing readings of the header sequence at ``before``.
+
+    Two passes read it differently: this one as ``mine``, the one before it as
+    ``theirs`` -- each a member's `_key`, or None for no member there. Read it afresh
+    until one version has two reads behind it, and return what the deciding read found
+    (as `_read_here` does).
 
     Either way, one of the two readings was wrong, so ``before`` joins ``rescued``.
 
@@ -1030,8 +1046,10 @@ def _tie_break(
 
 
 def read_member(concat: ConcatFile, offset: int) -> Member | None:
-    """The member whose header sequence begins at ``offset``, as the reader has it now
-    -- how a recorded row is checked against a fresh read. None if none begins there.
+    """Return the member whose header sequence begins at ``offset``.
+
+    As the reader has it now -- how a recorded row is checked against a fresh read.
+    None if none begins there.
 
     Reads through ``concat``'s window: a fresh ConcatFile gives a fresh read.
 
@@ -1130,7 +1148,7 @@ def find_chain_start(
     limit: int | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> int | None:
-    """The first checksum-valid header at or after ``from_offset``.
+    """Return the first checksum-valid header at or after ``from_offset``.
 
     A part boundary falls wherever split(1) put it, which is almost always inside a
     member, so a chain that starts at one has to find its footing. Task 1 measured
