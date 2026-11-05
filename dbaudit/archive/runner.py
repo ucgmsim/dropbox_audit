@@ -36,7 +36,29 @@ WALKED = frozenset({"complete", "truncated", "corrupt", "unsupported", "stale"})
 @dataclass
 class Job:
     """One archive to walk. ``chains`` is how many it wants at once: an estimate until its
-    walk begins, then the number its walk reports as chains finish."""
+    walk begins, then the number its walk reports as chains finish.
+
+    Parameters
+    ----------
+    key : str
+        Identifies the archive's content; unique among the jobs of a run.
+    label : str
+        What the logs call this job.
+    size : int
+        The archive's total size, in bytes; the largest are started first.
+    chains : int
+        How many chains the job wants at once, now.
+    folder : str
+        The Dropbox folder the archive was listed in.
+    name : str
+        The archive's file name.
+    archive_id : int | None
+        Its row in the index once registered; None before that.
+    retried : bool
+        Whether this is already the job's second try.
+    copies : tuple[tuple[str, str], ...]
+        ``(folder, name)`` of each copy of the same content.
+    """
 
     key: str
     label: str
@@ -54,7 +76,19 @@ class Job:
 class Done:
     """What one walk came to. ``state`` is the archive's state afterwards, or `stopped`
     (resumable), `gone` (no longer where the listing said) or `done` (walked before, or
-    being walked by another job)."""
+    being walked by another job).
+
+    Parameters
+    ----------
+    state : str
+        The archive's state after the walk, or `stopped`, `gone` or `done`.
+    members : int
+        How many members the walk recorded.
+    requests : int
+        How many reads the walk made.
+    bug : bool
+        Whether the walk failed in a way that is a defect, not a fact about the archive.
+    """
 
     state: str
     members: int = 0
@@ -64,6 +98,20 @@ class Done:
 
 @dataclass
 class Report:
+    """What a run came to.
+
+    Parameters
+    ----------
+    outcomes : Counter[str]
+        How many archives ended in each `Done.state`.
+    started : int
+        How many archives the run started, not counting second tries.
+    stopped : bool
+        Whether the run was stopped from outside before it finished.
+    failed : bool
+        Whether the run stopped itself after too many unexpected failures.
+    """
+
     outcomes: Counter
     started: int
     stopped: bool
@@ -77,9 +125,30 @@ class Runner:
     stream. An archive whose walk ends in `error` goes to the back of the queue once. A
     walk that reports a bug, or raises, counts towards ``max_bugs``; reaching it sets
     ``stop``, and the run fails. ``limit`` caps how many archives the run starts.
+
+    Parameters
+    ----------
+    walk : Callable[[Job], Done]
+        Walks one archive; called on its own thread, once per start.
+    limiter : AdaptiveLimiter
+        The limiter every walk shares; read for its concurrency and its grants.
+    stop : threading.Event
+        Set to stop starting archives; the run then waits for those in flight.
+    margin : int
+        Chains beyond the limiter's concurrency that may wait for a stream.
+    max_bugs : int
+        How many walks may report a bug or raise before the run stops itself.
+    limit : int
+        The most archives to start; 0 for no limit.
+    summary_every : float
+        Seconds between progress summaries.
+    on_bug : Callable[[Job, Exception], None] | None
+        Called with the job and the exception when a walk raises; None to only log it.
+    clock : Callable[[], float]
+        Monotonic seconds; replaced in tests.
     """
 
-    def __init__(
+    def __init__(  # noqa: D107
         self,
         walk: Callable[[Job], Done],
         limiter: AdaptiveLimiter,
@@ -97,6 +166,18 @@ class Runner:
         self.summary_every, self.on_bug, self.clock = summary_every, on_bug, clock
 
     def run(self, jobs: Iterable[Job]) -> Report:
+        """Walk every job, as the limiter allows, and report how it went.
+
+        Parameters
+        ----------
+        jobs : Iterable[Job]
+            The archives to walk; started largest first.
+
+        Returns
+        -------
+        Report
+            Outcomes by state, how many archives started, and whether the run stopped or failed.
+        """
         waiting = deque(sorted(jobs, key=lambda job: -job.size))
         estimate = {job.key: job.chains for job in waiting}  # a second try starts here
         flying: dict[str, tuple[Job, float]] = {}  # job key -> (job, when it started)
@@ -107,6 +188,13 @@ class Runner:
         last_summary, failed = started_at, False
 
         def work(job: Job) -> None:
+            """Run ``walk`` on one job, and hand its `Done` back through the queue.
+
+            Parameters
+            ----------
+            job : Job
+                The job to walk.
+            """
             done = Done(
                 "error", bug=True
             )  # unless the walk returns: even SystemExit reports
@@ -209,7 +297,25 @@ class Runner:
         rate: float,
     ) -> None:
         """What is left, in flight or queued, at the last hour's pace: by count and by
-        size. The largest archives go first, so the truth lies between the two."""
+        size. The largest archives go first, so the truth lies between the two.
+
+        Parameters
+        ----------
+        outcomes : Counter[str]
+            How many archives ended in each state so far.
+        flying : dict[str, tuple[Job, float]]
+            The jobs in flight, with when each started (clock seconds).
+        waiting : deque[Job]
+            The jobs not yet started.
+        done_size : int
+            Bytes of archive walked so far.
+        recent : deque[tuple[float, int]]
+            ``(clock seconds, bytes)`` of each walk that finished in the last hour.
+        elapsed : float
+            Seconds since the run began.
+        rate : float
+            Requests granted per second since the last summary.
+        """
         window = min(elapsed, 3600.0)
         left = sum(job.size for job, _ in flying.values()) + sum(
             job.size for job in waiting

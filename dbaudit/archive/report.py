@@ -65,6 +65,16 @@ def _utc(ts: int) -> datetime:
     `utcfromtimestamp` (deprecated since 3.12; `pytest.ini` turns that into a hard
     failure) and never `fromtimestamp(ts)` without a zone (silently the *process's*
     local zone -- correct on a UTC machine, silently wrong on any other).
+
+    Parameters
+    ----------
+    ts : int
+        Seconds since the Unix epoch, as a tar header records a modification time.
+
+    Returns
+    -------
+    datetime
+        The same instant, timezone-aware, in UTC.
     """
     return datetime.fromtimestamp(ts, tz=UTC)
 
@@ -72,6 +82,16 @@ def _utc(ts: int) -> datetime:
 def _iso(ts: int) -> str:
     """Full timestamp, for a per-member record (`manifest.csv`) where the hour can
     matter -- e.g. telling apart files written moments apart during one run.
+
+    Parameters
+    ----------
+    ts : int
+        Seconds since the Unix epoch.
+
+    Returns
+    -------
+    str
+        ISO 8601 date and time with a UTC offset, e.g. ``2024-05-01T03:04:05+00:00``.
     """
     return _utc(ts).isoformat()
 
@@ -80,6 +100,16 @@ def _iso_date(ts: int) -> str:
     """Date only, for a whole-archive span where a date is enough (T9-3) -- the
     question `mtime_span` answers is "roughly when is this data from", not which
     second a particular file was written.
+
+    Parameters
+    ----------
+    ts : int
+        Seconds since the Unix epoch.
+
+    Returns
+    -------
+    str
+        The UTC calendar date, ``YYYY-MM-DD``.
     """
     return _utc(ts).date().isoformat()
 
@@ -90,6 +120,19 @@ def _dir_prefix(dir_: str, depth: int) -> str:
     A `dir` shorter than `depth` (e.g. `"run"` at depth 2) returns as many
     components as it has, rather than padding or falling back to the root label --
     it is a real, if shallow, member of that directory, not one with no directory.
+
+    Parameters
+    ----------
+    dir_ : str
+        A member's directory, with ``/`` between components; empty for a member at the
+        archive's root.
+    depth : int
+        How many leading components to keep.
+
+    Returns
+    -------
+    str
+        The first ``depth`` components joined by ``/``, or ``ROOT_LABEL`` when ``dir_`` is empty.
     """
     if not dir_:
         return ROOT_LABEL
@@ -97,6 +140,18 @@ def _dir_prefix(dir_: str, depth: int) -> str:
 
 
 def _bump[K](table: dict[K, dict[str, int]], key: K, size: int) -> None:
+    """Count one more member of ``size`` bytes under ``key``.
+
+    Parameters
+    ----------
+    table : dict[K, dict[str, int]]
+        Running totals, ``{key: {"count": members, "bytes": bytes}}``; changed in place. A
+        key not yet in it starts at zero.
+    key : K
+        What the member is grouped by: a directory, an extension, an owner pair or a type flag.
+    size : int
+        The member's size, in bytes.
+    """
     entry = table.setdefault(key, {"count": 0, "bytes": 0})
     entry["count"] += 1
     entry["bytes"] += size
@@ -108,6 +163,16 @@ def _by_bytes_desc[K: (str, tuple[str, str])](
     """`(key, {count, bytes})` pairs -- a plain dict would not survive `dict(...)` in
     the caller and then back out again with a defined order, and the brief's own test
     relies on descending-by-bytes being the order a caller sees without re-sorting.
+
+    Parameters
+    ----------
+    table : dict[K, dict[str, int]]
+        Running totals as `_bump` keeps them.
+
+    Returns
+    -------
+    list[tuple[K, dict[str, int]]]
+        ``table``'s items, the largest total bytes first, ties by key.
     """
     return sorted(table.items(), key=lambda kv: (-kv[1]["bytes"], kv[0]))
 
@@ -115,6 +180,18 @@ def _by_bytes_desc[K: (str, tuple[str, str])](
 def _by_count_desc[K: (str, tuple[str, str])](
     table: dict[K, dict[str, int]],
 ) -> list[tuple[K, dict[str, int]]]:
+    """`(key, {count, bytes})` pairs, the most members first, ties by key.
+
+    Parameters
+    ----------
+    table : dict[K, dict[str, int]]
+        Running totals as `_bump` keeps them.
+
+    Returns
+    -------
+    list[tuple[K, dict[str, int]]]
+        ``table``'s items, the largest member count first, ties by key.
+    """
     return sorted(table.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
 
 
@@ -160,6 +237,23 @@ def summary(store: ArchiveStore, archive_id: int, top: int = 25) -> dict[str, An
     lookup, the streamed per-member pass, and the `largest` query all see the one
     snapshot that transaction opens, rather than whatever a walker happens to have
     committed between three separate autocommit statements.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive index to read.
+    archive_id : int
+        The archive's row id.
+    top : int
+        How many of the largest members to list; negative values count as 0.
+
+    Returns
+    -------
+    dict[str, Any]
+        The sections described above, keyed ``state``, ``n_parts``, ``n_members``,
+        ``member_bytes``, ``by_top_dir``, ``by_depth``, ``by_extension``, ``largest``,
+        ``mtime_span``, ``owners`` and ``types``. Sizes are in bytes; modification times
+        are not returned except as the ``mtime_span`` dates.
     """
     top = max(int(top), 0)
 
@@ -250,6 +344,20 @@ def write_csv(store: ArchiveStore, archive_id: int, out_dir: str | Path) -> list
     `by_extension` are accumulated into two small dicts *while* that same pass
     writes `manifest.csv`'s rows, rather than read a second time: one streamed
     scan of `members`, not two.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive index to read.
+    archive_id : int
+        The archive's row id.
+    out_dir : str | Path
+        The directory to write into; created, with its parents, if missing.
+
+    Returns
+    -------
+    list[str]
+        The paths written, in the order ``manifest.csv``, ``by_dir.csv``, ``by_extension.csv``.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
