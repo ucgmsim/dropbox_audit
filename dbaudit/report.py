@@ -17,6 +17,18 @@ from .store import Store
 
 @dataclass
 class DirRow:
+    """A folder with its subtree's totals.
+
+    Parameters
+    ----------
+    path : str
+        The folder's path as Dropbox displays it.
+    files : int
+        Files in the whole subtree.
+    bytes : int
+        Their total size, in bytes.
+    """
+
     path: str
     files: int
     bytes: int
@@ -24,6 +36,22 @@ class DirRow:
 
 @dataclass
 class DuplicateRow:
+    """A content stored more than once.
+
+    Parameters
+    ----------
+    content_hash : str
+        Dropbox's content hash, as hex.
+    copies : int
+        How many files hold it.
+    size : int
+        One copy's size, in bytes.
+    reclaimable : int
+        Bytes freed by keeping one copy, in bytes.
+    example : str, optional
+        The path of one copy; empty if none was found.
+    """
+
     content_hash: str
     copies: int
     size: int
@@ -33,6 +61,18 @@ class DuplicateRow:
 
 @dataclass
 class YearRow:
+    """Files last modified in one year.
+
+    Parameters
+    ----------
+    year : int
+        The calendar year (UTC).
+    files : int
+        Files last modified that year.
+    bytes : int
+        Their total size, in bytes.
+    """
+
     year: int
     files: int
     bytes: int
@@ -40,6 +80,18 @@ class YearRow:
 
 @dataclass
 class ExtRow:
+    """Files with one extension.
+
+    Parameters
+    ----------
+    ext : str
+        The lowercased extension without its dot; ``"(none)"`` for files with none.
+    files : int
+        How many files.
+    bytes : int
+        Their total size, in bytes.
+    """
+
     ext: str
     files: int
     bytes: int
@@ -47,6 +99,20 @@ class ExtRow:
 
 @dataclass
 class HotspotRow:
+    """A folder holding many tiny files.
+
+    Parameters
+    ----------
+    path : str
+        The folder's path as Dropbox displays it.
+    files : int
+        Files directly inside it.
+    bytes : int
+        Their total size, in bytes.
+    mean_size : float
+        The mean file size, in bytes.
+    """
+
     path: str
     files: int
     bytes: int
@@ -60,12 +126,39 @@ def reconcile(store: Store, reported_used_bytes: int) -> tuple[int, int, int]:
     listed (``DeletedMetadata`` carries no size, and per-file ``list_revisions``
     would take months), but it can be inferred, and it may be the largest single
     reduction opportunity.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    reported_used_bytes : int
+        Bytes in use as Dropbox reports them.
+
+    Returns
+    -------
+    tuple of int
+        The live bytes measured, the bytes reported, and the residual (reported minus
+        measured), all in bytes.
     """
     live = store.query("SELECT COALESCE(SUM(size), 0) FROM files")[0][0]
     return live, reported_used_bytes, reported_used_bytes - live
 
 
 def duplicate_report(store: Store, limit: int = 50) -> list[DuplicateRow]:
+    """The contents stored most redundantly.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    limit : int, optional
+        The most rows to return.
+
+    Returns
+    -------
+    list of DuplicateRow
+        Contents stored more than once, the most reclaimable bytes first.
+    """
     rows = store.query(
         "SELECT content_hash, COUNT(*), MAX(size), SUM(size) - MAX(size) AS reclaimable "
         "FROM files WHERE content_hash IS NOT NULL "
@@ -95,6 +188,18 @@ def duplicate_report(store: Store, limit: int = 50) -> list[DuplicateRow]:
 
 
 def total_reclaimable_duplicates(store: Store) -> int:
+    """The bytes freed by keeping one copy of every duplicated content.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+
+    Returns
+    -------
+    int
+        The total, in bytes.
+    """
     return store.query(
         "SELECT COALESCE(SUM(reclaimable), 0) FROM ("
         "  SELECT SUM(size) - MAX(size) AS reclaimable FROM files "
@@ -107,6 +212,16 @@ def _subtree(under: str) -> tuple[str, list]:
 
     Every path below `p` sorts between `p + "/"` and `p + "0"`, because "0" is the
     character after "/", so this is one range scan of the path index.
+
+    Parameters
+    ----------
+    under : str
+        A folder path; case is ignored and a trailing slash is dropped.
+
+    Returns
+    -------
+    tuple of (str, list of str)
+        An SQL condition on ``dir_id`` with three ``?`` placeholders, and their values.
     """
     low = under.rstrip("/").lower()
     return (
@@ -125,6 +240,18 @@ def cold_bytes(store: Store, under: str | None = None) -> list[YearRow]:
     `server_modified` can be years newer than the content: every file in one 10 TiB
     folder had a 2026 `server_modified` while 77% of its bytes had a `client_modified`
     more than two years older (measured 2026-10-13).
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    under : str, optional
+        Count only files at or below this folder; None counts them all.
+
+    Returns
+    -------
+    list of YearRow
+        One row per year, oldest first. Files with no date are left out.
     """
     conditions, values = ["client_modified IS NOT NULL"], []
     if under is not None:
@@ -142,7 +269,23 @@ def cold_bytes(store: Store, under: str | None = None) -> list[YearRow]:
 def bytes_older_than(
     store: Store, years: float, now: float | None = None
 ) -> tuple[int, int]:
-    """Files last modified more than `years` before `now`, by their own date."""
+    """Files last modified more than `years` before `now`, by their own date.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    years : float
+        The age, in years of 365.25 days.
+    now : float, optional
+        The time the age counts back from, in seconds since the Unix epoch; None
+        uses the current time.
+
+    Returns
+    -------
+    tuple of int
+        The number of files and their total size in bytes.
+    """
     import time
 
     cutoff = (now if now is not None else time.time()) - years * 365.25 * 86400
@@ -159,6 +302,18 @@ def top_dirs(store: Store, limit: int = 50) -> list[DirRow]:
     The obvious SQL -- joining every directory to every descendant path -- is
     quadratic and unusable at this scale. Walking the parent pointers in decreasing
     depth order visits each directory once.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    limit : int, optional
+        The most rows to return.
+
+    Returns
+    -------
+    list of DirRow
+        Folders with their subtrees' totals, the most bytes first.
     """
     conn = store.connect()
     # Take the directory rows first and derive the array bounds from *them*, so the
@@ -198,6 +353,22 @@ def small_file_hotspots(
 
     These dominate crawl time and are usually the best cleanup candidates: lots of
     objects, little data, often machine-generated.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    min_files : int, optional
+        The fewest files a folder must hold directly.
+    max_mean_size : int, optional
+        The largest mean file size, in bytes.
+    limit : int, optional
+        The most rows to return.
+
+    Returns
+    -------
+    list of HotspotRow
+        Matching folders, the most files first.
     """
     rows = store.query(
         "SELECT dirs.path_display, COUNT(*) AS n, COALESCE(SUM(files.size), 0), AVG(files.size) "
@@ -212,6 +383,22 @@ def small_file_hotspots(
 def extension_profile(
     store: Store, limit: int = 40, under: str | None = None
 ) -> list[ExtRow]:
+    """Bytes and files by extension.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    limit : int, optional
+        The most rows to return.
+    under : str, optional
+        Count only files at or below this folder; None counts them all.
+
+    Returns
+    -------
+    list of ExtRow
+        One row per extension, the most bytes first.
+    """
     where, values = "", []
     if under is not None:
         condition, values = _subtree(under)
@@ -225,7 +412,18 @@ def extension_profile(
 
 
 def top_level_summary(store: Store) -> list[DirRow]:
-    """One row per immediate child of the crawl root -- usually per person or project."""
+    """One row per immediate child of the crawl root -- usually per person or project.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+
+    Returns
+    -------
+    list of DirRow
+        The crawl root's immediate subfolders with their totals, the most bytes first.
+    """
     root = (store.get_meta("root") or "").rstrip("/")
     depth = root.count("/") + 1
     rolled = {row.path: row for row in top_dirs(store, limit=10**9)}
@@ -242,6 +440,21 @@ def top_level_summary(store: Store) -> list[DirRow]:
 
 
 def export_csv(store: Store, outdir: str) -> list[str]:
+    """Write the reports as CSV files.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    outdir : str
+        The folder to write into; created if it does not exist.
+
+    Returns
+    -------
+    list of str
+        The paths written: top folders, duplicates, bytes by year, by extension and
+        small-file hotspots.
+    """
     os.makedirs(outdir, exist_ok=True)
     written = []
     tables = {

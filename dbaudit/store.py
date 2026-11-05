@@ -38,6 +38,29 @@ ANALYSIS_INDEXES = [
 
 @dataclass
 class Shard:
+    """One row of the shards table: a subtree listed under one cursor.
+
+    Parameters
+    ----------
+    id : int
+        The shard's id.
+    path : str
+        The Dropbox folder the shard lists.
+    depth : int
+        Depth below the crawl root; the root shard is 0.
+    mode : str
+        ``"recursive"`` for one listing of the whole subtree, ``"split"`` for a
+        one-level listing whose subfolders become shards of their own.
+    state : str
+        ``"pending"``, ``"running"``, ``"done"`` or ``"error"``.
+    cursor : str or None
+        The cursor of the last committed page; None before the first page.
+    pages : int
+        Pages committed so far.
+    entries : int
+        Entries committed so far.
+    """
+
     id: int
     path: str
     depth: int
@@ -50,13 +73,36 @@ class Shard:
 
 @dataclass
 class PageStats:
+    """What one committed page added.
+
+    Parameters
+    ----------
+    files : int
+        Files written.
+    dirs : int
+        Directory rows newly inserted, ancestors created from child paths included.
+    bytes : int
+        Total size of the files, in bytes.
+    """
+
     files: int = 0
     dirs: int = 0
     bytes: int = 0
 
 
 def _epoch(stamp: str | None) -> int | None:
-    """Parse Dropbox's ``2020-01-02T03:04:05Z`` stamps without strptime overhead."""
+    """Parse Dropbox's ``2020-01-02T03:04:05Z`` stamps without strptime overhead.
+
+    Parameters
+    ----------
+    stamp : str or None
+        A stamp such as ``"2020-01-02T03:04:05Z"``; None or empty is accepted.
+
+    Returns
+    -------
+    int or None
+        Seconds since the Unix epoch, UTC; None if `stamp` is empty or malformed.
+    """
     if not stamp:
         return None
     try:
@@ -78,6 +124,19 @@ def _epoch(stamp: str | None) -> int | None:
 
 
 def _depth_of(path: str) -> int:
+    """The number of folders above a path.
+
+    Parameters
+    ----------
+    path : str
+        A folder path, with or without a trailing slash.
+
+    Returns
+    -------
+    int
+        The count of slashes in `path` once a trailing slash is dropped; the
+        top-level folder ``/x`` is 1.
+    """
     return path.rstrip("/").count("/")
 
 
@@ -89,6 +148,17 @@ def _extension(name: str) -> str:
 
     Bounded in length so that dotted filenames (``run.2024-01-01.backup.tar``) do not
     turn arbitrary text into a pseudo-extension.
+
+    Parameters
+    ----------
+    name : str
+        A file name.
+
+    Returns
+    -------
+    str
+        The lowercased extension without its dot, or ``""`` when there is none or it
+        is longer than ``MAX_EXT_LEN``.
     """
     dot = name.rfind(".")
     if dot <= 0 or dot == len(name) - 1 or len(name) - dot - 1 > MAX_EXT_LEN:
@@ -97,7 +167,15 @@ def _extension(name: str) -> str:
 
 
 class Store:
-    def __init__(self, path: str | os.PathLike[str]):
+    """The audit's SQLite database, with one connection per thread.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        The database file. It is created on the first connection.
+    """
+
+    def __init__(self, path: str | os.PathLike[str]):  # noqa: D107
         self.path = str(path)
         self._local = threading.local()
         self._meta_lock = threading.Lock()
@@ -105,7 +183,14 @@ class Store:
     # ---- connections ---------------------------------------------------
 
     def connect(self) -> sqlite3.Connection:
-        """One connection per thread. WAL lets readers run while a worker writes."""
+        """One connection per thread. WAL lets readers run while a worker writes.
+
+        Returns
+        -------
+        sqlite3.Connection
+            This thread's connection, opened on first use. It is in autocommit mode
+            (``isolation_level`` None), so callers open transactions themselves.
+        """
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self.path, timeout=60.0, isolation_level=None)
@@ -121,6 +206,7 @@ class Store:
         return conn
 
     def close(self) -> None:
+        """Close this thread's connection, if it has one."""
         conn = getattr(self._local, "conn", None)
         if conn is not None:
             conn.close()
@@ -129,6 +215,15 @@ class Store:
     def _caches(
         self,
     ) -> tuple[dict[str, int], dict[str, int], dict[str, int | None]]:
+        """This thread's lookup caches, opening the connection if needed.
+
+        Returns
+        -------
+        tuple of dict
+            The directory cache (lowercased path to dir id), the principal cache (Dropbox
+            account id to principal id) and the time cache (stamp to Unix seconds, or
+            None for a malformed stamp).
+        """
         self.connect()
         return (
             self._local.dir_cache,
@@ -144,10 +239,20 @@ class Store:
     # ---- schema and metadata -------------------------------------------
 
     def init_schema(self) -> None:
+        """Create the schema from ``schema.sql``, leaving tables that exist as they are."""
         conn = self.connect()
         conn.executescript(SCHEMA_PATH.read_text())
 
     def set_meta(self, key: str, value: object) -> None:
+        """Set a metadata value, replacing any earlier one.
+
+        Parameters
+        ----------
+        key : str
+            The metadata key.
+        value : object
+            The value; it is stored as ``str(value)``.
+        """
         with self._meta_lock:
             self.connect().execute(
                 "INSERT INTO meta(key, value) VALUES(?, ?) "
@@ -156,7 +261,13 @@ class Store:
             )
 
     def is_initialised(self) -> bool:
-        """True once `init` has created the schema. Probing must not raise."""
+        """True once `init` has created the schema. Probing must not raise.
+
+        Returns
+        -------
+        bool
+            Whether the database file exists and holds the ``meta`` table.
+        """
         if not os.path.exists(self.path):
             return False
         row = (
@@ -169,6 +280,21 @@ class Store:
         return row is not None
 
     def get_meta(self, key: str, default: str | None = None) -> str | None:
+        """Read a metadata value.
+
+        Parameters
+        ----------
+        key : str
+            The metadata key.
+        default : str, optional
+            Returned when the key is absent or the schema does not exist yet; None by
+            default.
+
+        Returns
+        -------
+        str or None
+            The stored text, or `default`.
+        """
         try:
             row = (
                 self.connect()
@@ -180,9 +306,32 @@ class Store:
         return default if row is None else row[0]
 
     def query(self, sql: str, params: Sequence[object] = ()) -> list[tuple]:
+        """Run a read query on this thread's connection.
+
+        Parameters
+        ----------
+        sql : str
+            The SQL text, with ``?`` placeholders.
+        params : sequence of object, optional
+            The values for the placeholders.
+
+        Returns
+        -------
+        list of tuple
+            Every row.
+        """
         return self.connect().execute(sql, params).fetchall()
 
     def log_event(self, kind: str, detail: str = "") -> None:
+        """Record an event in ``api_events`` with the current time.
+
+        Parameters
+        ----------
+        kind : str
+            The event's kind, such as ``"rate_limited"``.
+        detail : str, optional
+            More about it; cut to 500 characters.
+        """
         self.connect().execute(
             "INSERT INTO api_events(ts, kind, detail) VALUES(?, ?, ?)",
             (time.time(), kind, detail[:500]),
@@ -191,6 +340,22 @@ class Store:
     # ---- shards ---------------------------------------------------------
 
     def add_shard(self, path: str, depth: int, mode: str = "recursive") -> int:
+        """Add a pending shard for a folder, unless one exists for that path.
+
+        Parameters
+        ----------
+        path : str
+            The Dropbox folder.
+        depth : int
+            Depth below the crawl root.
+        mode : str, optional
+            ``"recursive"`` (the default) or ``"split"``.
+
+        Returns
+        -------
+        int
+            The id of the shard for `path`, new or existing.
+        """
         conn = self.connect()
         conn.execute(
             "INSERT OR IGNORE INTO shards(path, depth, mode, state, created_at) "
@@ -200,6 +365,18 @@ class Store:
         return conn.execute("SELECT id FROM shards WHERE path=?", (path,)).fetchone()[0]
 
     def get_shard(self, shard_id: int) -> Shard | None:
+        """Read one shard.
+
+        Parameters
+        ----------
+        shard_id : int
+            The shard's id.
+
+        Returns
+        -------
+        Shard or None
+            The shard, or None if there is none with that id.
+        """
         row = (
             self.connect()
             .execute(
@@ -211,7 +388,19 @@ class Store:
         return Shard(*row) if row else None
 
     def claim_shard(self, owner: str) -> Shard | None:
-        """Atomically take the shallowest pending shard, so progress stays breadth-first."""
+        """Atomically take the shallowest pending shard, so progress stays breadth-first.
+
+        Parameters
+        ----------
+        owner : str
+            The name of the claiming worker, stored on the shard.
+
+        Returns
+        -------
+        Shard or None
+            The shard, now running with its attempts incremented, or None if none is
+            pending.
+        """
         conn = self.connect()
         now = time.time()
         row = conn.execute(
@@ -225,6 +414,15 @@ class Store:
         return Shard(*row) if row else None
 
     def finish_shard(self, shard_id: int, note: str | None = None) -> None:
+        """Mark a shard done.
+
+        Parameters
+        ----------
+        shard_id : int
+            The shard's id.
+        note : str, optional
+            A note to keep on the shard; None leaves any earlier note.
+        """
         self.connect().execute(
             "UPDATE shards SET state='done', finished_at=?, owner=NULL, note=COALESCE(?, note) "
             "WHERE id=?",
@@ -232,13 +430,28 @@ class Store:
         )
 
     def fail_shard(self, shard_id: int, error: str) -> None:
+        """Mark a shard as ended in error.
+
+        Parameters
+        ----------
+        shard_id : int
+            The shard's id.
+        error : str
+            Why it failed; cut to 1000 characters.
+        """
         self.connect().execute(
             "UPDATE shards SET state='error', finished_at=?, owner=NULL, error=? WHERE id=?",
             (time.time(), error[:1000], shard_id),
         )
 
     def release_shard(self, shard_id: int) -> None:
-        """Hand an unfinished shard back to the queue, keeping its cursor."""
+        """Hand an unfinished shard back to the queue, keeping its cursor.
+
+        Parameters
+        ----------
+        shard_id : int
+            The shard's id. A shard that is not running is left as it is.
+        """
         self.connect().execute(
             "UPDATE shards SET state='pending', owner=NULL WHERE id=? AND state='running'",
             (shard_id,),
@@ -250,6 +463,13 @@ class Store:
         A cursor belongs to the kind of listing that produced it, so a resumed shard
         must continue in the same mode. Persisting the decision is what stops a
         restart from resuming a non-recursive cursor as a recursive one.
+
+        Parameters
+        ----------
+        shard_id : int
+            The shard's id.
+        mode : str
+            ``"recursive"`` or ``"split"``.
         """
         self.connect().execute("UPDATE shards SET mode=? WHERE id=?", (mode, shard_id))
 
@@ -263,6 +483,11 @@ class Store:
         as an ancestor of another shard's files, and deleting it here would orphan
         their dir_id. Re-listing upserts directories anyway -- and inserts none of
         these, so `n_dirs` keeps counting them.
+
+        Parameters
+        ----------
+        shard_id : int
+            The shard's id.
         """
         conn = self.connect()
         try:
@@ -281,7 +506,13 @@ class Store:
             self._drop_caches()
 
     def reset_stale_shards(self) -> int:
-        """Reclaim shards owned by a process that died. Cursors are preserved."""
+        """Reclaim shards owned by a process that died. Cursors are preserved.
+
+        Returns
+        -------
+        int
+            The number of shards put back to pending.
+        """
         cur = self.connect().execute(
             "UPDATE shards SET state='pending', owner=NULL WHERE state='running'"
         )
@@ -293,6 +524,11 @@ class Store:
         Its cursor is forgotten and its rows dropped, as after a cursor reset.
         Resuming would repeat the request that kept failing; starting over lets the
         crawler split a subtree that was too much for one listing.
+
+        Returns
+        -------
+        int
+            The number of shards queued again.
         """
         # A shard that never committed a page has no rows to drop and no cursor, so it
         # is spared clear_cursor's scan of `files`, which has no index on shard_id.
@@ -314,6 +550,13 @@ class Store:
         )
 
     def pending_count(self) -> int:
+        """Count the shards waiting to be claimed.
+
+        Returns
+        -------
+        int
+            The number of pending shards.
+        """
         return (
             self.connect()
             .execute("SELECT COUNT(*) FROM shards WHERE state='pending'")
@@ -321,6 +564,13 @@ class Store:
         )
 
     def running_count(self) -> int:
+        """Count the shards a worker is listing.
+
+        Returns
+        -------
+        int
+            The number of running shards.
+        """
         return (
             self.connect()
             .execute("SELECT COUNT(*) FROM shards WHERE state='running'")
@@ -328,6 +578,13 @@ class Store:
         )
 
     def shard_count(self) -> int:
+        """Count all shards, whatever their state.
+
+        Returns
+        -------
+        int
+            The number of shards.
+        """
         return self.connect().execute("SELECT COUNT(*) FROM shards").fetchone()[0]
 
     # ---- the hot path ---------------------------------------------------
@@ -335,6 +592,22 @@ class Store:
     def _principal_id(
         self, conn: sqlite3.Connection, cache: dict[str, int], account_id: str | None
     ) -> int | None:
+        """The id of the principal for a Dropbox account, creating the row if needed.
+
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+            The connection inside the page's transaction.
+        cache : dict of str to int
+            The principal cache, updated here.
+        account_id : str or None
+            The Dropbox account id; None or empty means no principal.
+
+        Returns
+        -------
+        int or None
+            The principal's id, or None when there is no account id.
+        """
         if not account_id:
             return None
         cached = cache.get(account_id)
@@ -366,6 +639,24 @@ class Store:
         Counting insertions rather than folder entries is what keeps SUM(shards.n_dirs)
         equal to COUNT(*) FROM dirs: a recursive listing repeats its own root, and
         ancestors are created from child paths without ever appearing as an entry.
+
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+            The connection inside the page's transaction.
+        path_display : str
+            The folder's path as Dropbox displays it; a trailing slash is ignored.
+        cache : dict of str to int
+            The directory cache, keyed by lowercased path and updated here.
+        shard_id : int, optional
+            The shard recorded on directories created here; None records none.
+        created : list of int, optional
+            One-element counter, incremented for each row inserted; None counts nothing.
+
+        Returns
+        -------
+        int
+            The folder's dir id.
         """
         path_display = path_display.rstrip("/")
         key = path_display.lower()
@@ -409,6 +700,27 @@ class Store:
 
         Anything raised in here rolls the whole page back, cursor included, so the
         page is simply re-fetched on restart.
+
+        Parameters
+        ----------
+        shard_id : int
+            The shard the page belongs to.
+        entries : list of dict
+            The page's entries as Dropbox returned them (``.tag`` of ``file``, ``folder``
+            or ``deleted``).
+        cursor : str or None
+            The cursor that follows this page, stored with it.
+        has_more : bool
+            Whether Dropbox has more pages; if not, the shard is marked done.
+        child_shards : iterable of tuple, optional
+            ``(path, depth, mode)`` of shards to queue in the same transaction.
+        shard_path : str, optional
+            The shard's folder, under which an entry with no path is placed.
+
+        Returns
+        -------
+        PageStats
+            What the page added.
         """
         conn = self.connect()
         dir_cache, principal_cache, time_cache = self._caches()
@@ -556,6 +868,20 @@ class Store:
 
         Dropbox always returns 64 hex chars, but a file recorded without its hash is
         a far better outcome than a subtree that fails to crawl.
+
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+            The connection inside the page's transaction, used to log a bad hash.
+        content_hash : str or None
+            Dropbox's content hash as hex text.
+        path_display : str
+            The file's path, for the log entry.
+
+        Returns
+        -------
+        bytes or None
+            The hash as bytes, or None if it is absent or not valid hex.
         """
         if not content_hash:
             return None
@@ -571,6 +897,20 @@ class Store:
     def _cached_epoch(
         self, stamp: str | None, cache: dict[str, int | None]
     ) -> int | None:
+        """Parse a Dropbox stamp, remembering the result.
+
+        Parameters
+        ----------
+        stamp : str or None
+            A stamp such as ``"2020-01-02T03:04:05Z"``.
+        cache : dict of str to int or None
+            The time cache, updated here and cleared when it is full.
+
+        Returns
+        -------
+        int or None
+            Seconds since the Unix epoch, UTC; None for an absent or malformed stamp.
+        """
         if not stamp:
             return None
         hit = cache.get(stamp)
@@ -584,6 +924,13 @@ class Store:
     # ---- reporting helpers ----------------------------------------------
 
     def stats(self) -> dict:
+        """Count what the store holds.
+
+        Returns
+        -------
+        dict
+            ``files``, ``dirs``, ``bytes``, ``shards_done`` and ``shards_total``.
+        """
         conn = self.connect()
         files, size = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files"
@@ -601,7 +948,14 @@ class Store:
         }
 
     def progress(self) -> dict:
-        """Cheap counters straight off `shards`, for frequent progress logging."""
+        """Cheap counters straight off `shards`, for frequent progress logging.
+
+        Returns
+        -------
+        dict
+            ``files``, ``dirs``, ``bytes``, ``pages``, ``shards_done``, ``shards_total``
+            and ``shards_error``, summed over the shards.
+        """
         conn = self.connect()
         row = conn.execute(
             "SELECT COALESCE(SUM(n_files),0), COALESCE(SUM(n_dirs),0), "
@@ -625,11 +979,19 @@ class Store:
         )
 
     def build_indexes(self) -> None:
+        """Create the analysis indexes and run ANALYZE; call it once a pass completes."""
         conn = self.connect()
         for statement in ANALYSIS_INDEXES:
             conn.execute(statement)
         conn.execute("ANALYZE")
 
     def free_space_bytes(self) -> int:
+        """Measure the free space where the database lives.
+
+        Returns
+        -------
+        int
+            Bytes available to an unprivileged process on that file system.
+        """
         stat = os.statvfs(os.path.dirname(os.path.abspath(self.path)) or ".")
         return stat.f_bavail * stat.f_frsize

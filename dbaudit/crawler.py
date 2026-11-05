@@ -36,9 +36,9 @@ from .api import (
     ApiError,
     AuthExpiredError,
     CursorResetError,
+    Lister,
     PathNotFoundError,
     RateLimitedError,
-    Lister,
     TransientError,
 )
 from .limiter import AdaptiveLimiter
@@ -49,6 +49,26 @@ log = logging.getLogger("dbaudit.crawler")
 
 @dataclass
 class RunSummary:
+    """What a crawl run added up to, read off the store when the workers stopped.
+
+    Parameters
+    ----------
+    files : int
+        Files in the store.
+    dirs : int
+        Directories in the store.
+    bytes : int
+        Total size of the files, in bytes.
+    pages : int
+        Pages committed.
+    shards_done : int
+        Shards that finished.
+    errors : int
+        Shards this run ended in error.
+    rate_limit_events : int
+        Rate-limit responses the limiter saw; 0 if it does not count them.
+    """
+
     files: int = 0
     dirs: int = 0
     bytes: int = 0
@@ -59,7 +79,38 @@ class RunSummary:
 
 
 class Crawler:
-    def __init__(
+    """Lists a Dropbox subtree into a store, with a pool of worker threads.
+
+    Parameters
+    ----------
+    store : Store
+        Where shards and pages are kept.
+    lister : Lister
+        Fetches pages from Dropbox.
+    limiter : AdaptiveLimiter
+        Paces every request, for the whole process.
+    workers : int, optional
+        Worker threads; at least 1.
+    split_depth : int, optional
+        Shards this deep or deeper below the crawl root are not split to keep workers
+        busy.
+    queue_target : int, optional
+        Pending shards to keep stocked; None, or 0, means twice `workers`.
+    max_shards : int, optional
+        No shard is split once the store holds this many.
+    max_page_attempts : int, optional
+        Failed attempts at one page before its shard fails.
+    backoff_base : float, optional
+        Base of the wait after a transient failure, in seconds: ``backoff_base ** attempts``,
+        at most 60.
+    idle_poll : float, optional
+        Seconds an idle worker waits before looking for a shard again.
+    one_level_after : int, optional
+        Subfolders of one folder that must have been listed before the rest are listed
+        one level at a time; see ``_one_level_by_siblings``.
+    """
+
+    def __init__(  # noqa: D107
         self,
         store: Store,
         lister: Lister,
@@ -106,6 +157,16 @@ class Crawler:
         Shard depth is measured *relative to the crawl root*, so ``--split-depth 2``
         means "split the root and its children", leaving recursive shards two levels
         below the root regardless of how deep the root itself sits.
+
+        Parameters
+        ----------
+        root : str
+            The folder to crawl; slashes at either end are optional.
+
+        Returns
+        -------
+        int
+            The id of the root shard.
         """
         root = "/" + root.strip("/")
         self.store.set_meta("root", root)
@@ -114,6 +175,18 @@ class Crawler:
     # ---- the decision that keeps workers busy ---------------------------
 
     def _should_split(self, shard: Shard) -> bool:
+        """Decide whether a shard is listed one level at a time or recursively.
+
+        Parameters
+        ----------
+        shard : Shard
+            The claimed shard.
+
+        Returns
+        -------
+        bool
+            True to list one level and queue the subfolders as shards.
+        """
         # The persisted mode is checked first and wins unconditionally. A cursor
         # belongs to the kind of listing that created it, so a resumed split shard
         # must stay split: continuing a non-recursive cursor in recursive mode would
@@ -169,6 +242,16 @@ class Crawler:
         more than one in ten held folders, the rest are listed one level -- until more
         than one in ten do. The guess costs requests either way, never entries: a
         one-level listing queues any subfolders it finds as shards of their own.
+
+        Parameters
+        ----------
+        path : str
+            The folder about to be listed.
+
+        Returns
+        -------
+        bool
+            True to list `path` one level at a time.
         """
         parent = path.rstrip("/").rsplit("/", 1)[0]
         with self._siblings_lock:
@@ -176,9 +259,33 @@ class Crawler:
         return self._leafy(listed, with_folders)
 
     def _leafy(self, listed: int, with_folders: int) -> bool:
+        """Whether enough siblings have been listed, and few enough held folders.
+
+        Parameters
+        ----------
+        listed : int
+            Subfolders of one parent listed so far.
+        with_folders : int
+            How many of them held folders of their own.
+
+        Returns
+        -------
+        bool
+            True once `listed` reaches ``one_level_after`` and no more than one in ten
+            held folders.
+        """
         return listed >= self.one_level_after and with_folders * 10 <= listed
 
     def _record_listed(self, path: str, had_folders: bool) -> None:
+        """Note a finished listing against its parent, and log when the guess flips.
+
+        Parameters
+        ----------
+        path : str
+            The folder that was listed.
+        had_folders : bool
+            Whether the listing showed any subfolder.
+        """
         parent = path.rstrip("/").rsplit("/", 1)[0]
         with self._siblings_lock:
             listed, with_folders = self._siblings.get(parent, (0, 0))
@@ -207,6 +314,20 @@ class Crawler:
         stop: threading.Event,
         after_page: Callable[[int], None] | None,
     ) -> None:
+        """List one shard to its end, committing each page with its cursor.
+
+        The shard ends done, failed, or released with its cursor if `stop` is set.
+
+        Parameters
+        ----------
+        shard : Shard
+            The claimed shard.
+        stop : threading.Event
+            Set to make the crawl stop between requests.
+        after_page : callable or None
+            Called with the running number of committed pages after each commit; None
+            for no callback.
+        """
         mode = "split" if self._should_split(shard) else "recursive"
         if mode != shard.mode:
             self.store.set_shard_mode(shard.id, mode)
@@ -329,6 +450,15 @@ class Crawler:
         self.store.release_shard(shard.id)
 
     def _fail(self, shard: Shard, message: str) -> None:
+        """Log a shard's failure, mark it in the store and count it.
+
+        Parameters
+        ----------
+        shard : Shard
+            The shard that failed.
+        message : str
+            Why.
+        """
         log.error("shard %s failed: %s", shard.path, message)
         self.store.log_event("shard_error", f"{shard.path}: {message}")
         self.store.fail_shard(shard.id, message)
@@ -343,6 +473,17 @@ class Crawler:
         stop: threading.Event,
         after_page: Callable[[int], None] | None,
     ) -> None:
+        """Claim and process shards until none is left or `stop` is set.
+
+        Parameters
+        ----------
+        name : str
+            The worker's name, recorded as the owner of the shards it claims.
+        stop : threading.Event
+            Set to make the worker stop.
+        after_page : callable or None
+            Passed on to ``_process``.
+        """
         store = self.store
         try:
             while not stop.is_set():
@@ -365,6 +506,25 @@ class Crawler:
         stop_event: threading.Event | None = None,
         _after_page: Callable[[int], None] | None = None,
     ) -> RunSummary:
+        """Crawl every pending shard with the worker pool, until done or stopped.
+
+        Shards left running by a dead process are put back first, and shards that
+        failed are queued again from scratch.
+
+        Parameters
+        ----------
+        stop_event : threading.Event, optional
+            Set to stop early; the shards in flight go back to pending with their
+            cursors. None makes a fresh event no one sets.
+        _after_page : callable, optional
+            Called with the running number of committed pages after each page; for
+            tests and progress.
+
+        Returns
+        -------
+        RunSummary
+            The totals when the workers stopped.
+        """
         stop = stop_event or threading.Event()
 
         # Any shard still marked running belongs to a process that died; the

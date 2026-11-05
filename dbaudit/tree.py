@@ -41,7 +41,43 @@ BAR_WIDTH = 28
 
 @dataclass
 class Figures:
-    """Per-folder figures indexed by dir id. Totals cover each folder's whole subtree."""
+    """Per-folder figures indexed by dir id. Totals cover each folder's whole subtree.
+
+    Parameters
+    ----------
+    parent : array of int
+        Each folder's parent id; 0 for a top folder.
+    depth : array of int
+        Each folder's depth below the account root.
+    order : array of int
+        Dir ids, deepest first.
+    kids : array of int
+        Direct subfolders.
+    own_files : array of int
+        Files directly inside.
+    files : array of int
+        Files in the whole subtree.
+    folders : array of int
+        Folders in the whole subtree, not counting the folder itself.
+    size : array of int
+        Bytes in the whole subtree.
+    newest : array of int
+        The latest ``client_modified`` below, in seconds since the Unix epoch; 0 if none.
+    cold : array of int
+        Bytes last modified before the cold cut-off.
+    held : array of int
+        Bytes whose content also exists outside the folder.
+    on_page : bytearray
+        1 for the page root and everything below it, else 0.
+    page_root : int
+        The dir id of the page's root folder.
+    copies : array of int, optional
+        By ``files.rowid``: the copies of that file's content, or 0 for a file below the
+        minimum size.
+    reclaimable : int, optional
+        Bytes on the page that deleting duplicates frees while one copy of everything
+        stays.
+    """
 
     parent: array
     depth: array
@@ -63,7 +99,20 @@ class Figures:
 
 
 def find_dir(store: Store, path: str) -> tuple[int, str] | None:
-    """The (id, path_display) of the folder at `path`, matched without case, or None."""
+    """The (id, path_display) of the folder at `path`, matched without case, or None.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    path : str
+        A folder path; a trailing slash and case are ignored.
+
+    Returns
+    -------
+    tuple of (int, str) or None
+        The folder's dir id and displayed path, or None if it is not listed.
+    """
     rows = store.query(
         "SELECT id, path_display FROM dirs WHERE path_lower = ?",
         (path.rstrip("/").lower(),),
@@ -72,7 +121,19 @@ def find_dir(store: Store, path: str) -> tuple[int, str] | None:
 
 
 def crawl_time(store: Store) -> tuple[float, bool]:
-    """When the listing was taken, and whether a pass over it finished."""
+    """When the listing was taken, and whether a pass over it finished.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+
+    Returns
+    -------
+    tuple of (float, bool)
+        The time in seconds since the Unix epoch: when the last pass finished, else when
+        the listing began, else now; and whether a pass finished.
+    """
     finished = store.get_meta("last_pass_completed_at")
     if finished:
         return float(finished), True
@@ -94,7 +155,21 @@ def duplicate_groups(
     conn: sqlite3.Connection, top: int
 ) -> Iterator[list[tuple[int, int, int]]]:
     """Yield each duplicated content's copies as (dir_id, size, rowid), one content at a
-    time, so memory stays flat however many duplicates there are."""
+    time, so memory stays flat however many duplicates there are.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        A connection to the audit database.
+    top : int
+        One more than the largest dir id to count; copies in other folders are ignored.
+
+    Yields
+    ------
+    list of tuple
+        The copies of one content, as ``(dir_id, size, rowid)``, when it has more than
+        one.
+    """
     group, last = [], None
     for digest, dir_id, size, rowid in conn.execute(DUPLICATES):
         if digest != last:
@@ -108,7 +183,22 @@ def duplicate_groups(
 
 
 def common_folder(dirs: list[int], parent: array[int], depth: array[int]) -> int:
-    """The deepest folder holding every one of `dirs`: their lowest common ancestor."""
+    """The deepest folder holding every one of `dirs`: their lowest common ancestor.
+
+    Parameters
+    ----------
+    dirs : list of int
+        Dir ids; at least one.
+    parent : array of int
+        Each folder's parent id.
+    depth : array of int
+        Each folder's depth.
+
+    Returns
+    -------
+    int
+        The dir id of the lowest common ancestor.
+    """
     meet = dirs[0]
     for other in dirs[1:]:
         while depth[meet] > depth[other]:
@@ -121,7 +211,24 @@ def common_folder(dirs: list[int], parent: array[int], depth: array[int]) -> int
 
 
 def measure(store: Store, listed: float, min_size: int, page_root: int) -> Figures:
-    """Figures for every folder, as of `listed`, the time the listing was taken."""
+    """Figures for every folder, as of `listed`, the time the listing was taken.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    listed : float
+        When the listing was taken, in seconds since the Unix epoch.
+    min_size : int
+        Files of at least this many bytes get their number of copies counted.
+    page_root : int
+        The dir id of the page's root folder.
+
+    Returns
+    -------
+    Figures
+        The figures for every folder.
+    """
     conn = store.connect()
     # Bound the snapshot before reading it: folders created while a crawl runs get
     # higher ids, and a folder's parent is always created before the folder.
@@ -129,6 +236,13 @@ def measure(store: Store, listed: float, min_size: int, page_root: int) -> Figur
     rowids = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] + 1
 
     def zeros():
+        """An array of zeros with a slot for every dir id.
+
+        Returns
+        -------
+        array of int
+            ``top`` zeros, of 64-bit integers.
+        """
         return array("q", [0]) * top
 
     f = Figures(
@@ -207,6 +321,21 @@ def measure(store: Store, listed: float, min_size: int, page_root: int) -> Figur
 
 
 def is_tiny(figures: Figures, d: int) -> bool:
+    """Whether a folder is made of many tiny files.
+
+    Parameters
+    ----------
+    figures : Figures
+        The folders' figures.
+    d : int
+        The folder's dir id.
+
+    Returns
+    -------
+    bool
+        True if it holds at least ``TINY_FILES`` files, averaging ``TINY_MEAN`` bytes or
+        less.
+    """
     return (
         figures.files[d] >= TINY_FILES
         and figures.size[d] <= figures.files[d] * TINY_MEAN
@@ -215,6 +344,44 @@ def is_tiny(figures: Figures, d: int) -> bool:
 
 @dataclass
 class Row:
+    """One row of the page's tree: a folder, a file, or a fold of the rest.
+
+    Parameters
+    ----------
+    kind : str
+        ``"dir"``, ``"file"`` or ``"fold"``.
+    name : str
+        The folder or file name; empty for a fold.
+    path : str
+        Below the crawl root; a fold row carries its folder's.
+    size : int
+        Bytes.
+    files : int, optional
+        Files in the subtree.
+    folders : int, optional
+        Folders in the subtree.
+    date : int, optional
+        A folder's newest file, or a file's own date, in seconds since the Unix epoch.
+    dir_id : int, optional
+        A folder's dir id.
+    copies : int, optional
+        A file's content: copies in the listing, this one included.
+    held : int, optional
+        Bytes whose content is also stored outside the folder.
+    cold : int, optional
+        Bytes last modified before the cold cut-off.
+    tiny : bool, optional
+        Whether the folder is made of tiny files.
+    entries : int, optional
+        A fold row: the folder's direct children folded into it.
+    group : str, optional
+        A folder's largest kind of data (kinds.GROUPS); empty if none.
+    group_bytes : float, optional
+        The bytes of that group.
+    children : list of Row, optional
+        The rows below this one.
+    """
+
     kind: str  # "dir", "file" or "fold"
     name: str
     path: str  # below the crawl root; a fold row carries its folder's
@@ -235,6 +402,20 @@ class Row:
 
 @dataclass
 class Page:
+    """The rows the page shows.
+
+    Parameters
+    ----------
+    root : Row
+        The page's root folder, with its rows below it.
+    threshold : int
+        Entries smaller than this many bytes fold away.
+    rows : int
+        The number of rows, folds included.
+    shown : set of int
+        Dir ids that have a row of their own.
+    """
+
     root: Row
     threshold: int  # entries below this fold
     rows: int
@@ -242,7 +423,20 @@ class Page:
 
 
 def below(path: str, crawl_root: str) -> str:
-    """`path` relative to the crawl root, as `data-path` carries it."""
+    """`path` relative to the crawl root, as `data-path` carries it.
+
+    Parameters
+    ----------
+    path : str
+        A displayed path in the listing.
+    crawl_root : str
+        The folder the crawl began at.
+
+    Returns
+    -------
+    str
+        `path` without the crawl root, and without a leading slash; empty for the root itself.
+    """
     root = crawl_root.rstrip("/")
     if path.lower() == root.lower():
         return ""
@@ -254,7 +448,22 @@ def below(path: str, crawl_root: str) -> str:
 def chunked(
     conn: sqlite3.Connection, query: str, ids: Iterable[int]
 ) -> Iterator[tuple]:
-    """The rows `query` finds for `ids`, a chunk at a time; it ends in `IN ({})`."""
+    """The rows `query` finds for `ids`, a chunk at a time; it ends in `IN ({})`.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        A connection to the audit database.
+    query : str
+        SQL with ``{}`` where the placeholders go.
+    ids : iterable of int
+        The values to look for, taken 500 at a time.
+
+    Yields
+    ------
+    tuple
+        Each row the query finds.
+    """
     ids = list(ids)
     for i in range(0, len(ids), 500):
         chunk = ids[i : i + 500]
@@ -264,7 +473,20 @@ def chunked(
 def dir_names(
     conn: sqlite3.Connection, ids: Iterable[int]
 ) -> dict[int, tuple[str, str]]:
-    """{dir id: (name, path_display)}."""
+    """{dir id: (name, path_display)}.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        A connection to the audit database.
+    ids : iterable of int
+        Dir ids.
+
+    Returns
+    -------
+    dict of int to tuple of (str, str)
+        Each folder's name and displayed path.
+    """
     return {
         d: (name, path)
         for d, name, path in chunked(
@@ -274,13 +496,44 @@ def dir_names(
 
 
 def past(threshold: int, size: int) -> int:
-    """The first threshold, doubling from `threshold`, that is above `size`."""
+    """The first threshold, doubling from `threshold`, that is above `size`.
+
+    Parameters
+    ----------
+    threshold : int
+        The size to start from, in bytes.
+    size : int
+        The size to get above, in bytes.
+
+    Returns
+    -------
+    int
+        A bytes threshold greater than `size`.
+    """
     while threshold <= size:
         threshold = max(threshold * 2, 1)
     return threshold
 
 
 def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
+    """The row for a folder.
+
+    Parameters
+    ----------
+    f : Figures
+        The folders' figures.
+    d : int
+        The folder's dir id.
+    name : str
+        Its name.
+    path : str
+        Its path below the crawl root.
+
+    Returns
+    -------
+    Row
+        A ``"dir"`` row with the folder's figures.
+    """
     return Row(
         "dir",
         name,
@@ -297,6 +550,27 @@ def folder_row(f: Figures, d: int, name: str, path: str) -> Row:
 
 
 def layout(store: Store, figures: Figures, threshold: int, max_rows: int) -> Page:
+    """Decide which folders and files get a row of their own.
+
+    Entries below the threshold fold away; the threshold doubles until the page fits
+    `max_rows`.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    figures : Figures
+        From `measure`.
+    threshold : int
+        The size, in bytes, from which an entry gets a row.
+    max_rows : int
+        The most rows the page may have.
+
+    Returns
+    -------
+    Page
+        The rows, as a tree under the page root.
+    """
     f, root = figures, figures.page_root
     conn = store.connect()
     top = len(f.size)
@@ -329,6 +603,19 @@ def layout(store: Store, figures: Figures, threshold: int, max_rows: int) -> Pag
         threshold = past(threshold, files[-1][2])
 
     def rows_at(t: int) -> int:
+        """Count the rows the page would have at a threshold.
+
+        Parameters
+        ----------
+        t : int
+            A threshold, in bytes.
+
+        Returns
+        -------
+        int
+            The rows: the root, each shown folder and file, and a fold for each folder with
+            anything left out.
+        """
         shown = [d for d in folders if f.size[d] >= t]
         subfolders = Counter(f.parent[d] for d in shown)
         own = Counter(row[1] for row in files if row[2] >= t)
@@ -377,6 +664,13 @@ def layout(store: Store, figures: Figures, threshold: int, max_rows: int) -> Pag
             )
 
     def assemble(row: Row) -> None:
+        """Attach a folder's rows to it, and add a fold for what is left out.
+
+        Parameters
+        ----------
+        row : Row
+            A shown folder; its ``children`` are set here.
+        """
         children = sorted(inside.get(row.dir_id, ()), key=lambda r: (-r.size, r.name))
         for child in children:
             if child.kind == "dir":
@@ -416,6 +710,22 @@ def measure_kinds(
 
     Only the folders with a row keep totals, so memory follows --max-rows: each byte counts
     toward the nearest of them at or above its folder, and the totals roll up from there.
+
+    Parameters
+    ----------
+    figures : Figures
+        From `measure`.
+    page : Page
+        From `layout`; its folder rows get their ``group`` set.
+    rows : iterable of tuple
+        What `kinds.walk` gives, read once.
+    listed : float
+        When the listing was taken, in seconds since the Unix epoch.
+
+    Returns
+    -------
+    Tally
+        The bytes by kind, month and age.
     """
     shown = [d for d in figures.order if d in page.shown]  # deepest first
     at = {d: i for i, d in enumerate(shown)}
@@ -431,6 +741,13 @@ def measure_kinds(
     slot = {kind: kinds.GROUPS.index(group) for kind, (_, group) in kinds.KINDS.items()}
 
     def counted():
+        """Pass the walk's rows on, adding each to its nearest folder row.
+
+        Yields
+        ------
+        tuple
+            Each row unchanged.
+        """
         for row in rows:
             if 0 < row[0] < len(near) and near[row[0]] >= 0:
                 totals[near[row[0]] * width + slot[row[1]]] += row[2]
@@ -458,6 +775,20 @@ def measure_kinds(
 
 
 def ancestors(d: int, parent: array[int]) -> Iterator[int]:
+    """The folders above a folder, nearest first.
+
+    Parameters
+    ----------
+    d : int
+        A dir id.
+    parent : array of int
+        Each folder's parent id.
+
+    Yields
+    ------
+    int
+        The dir ids of its parent, grandparent and so on, up to a top folder.
+    """
     d = parent[d]
     while d:
         yield d
@@ -466,6 +797,32 @@ def ancestors(d: int, parent: array[int]) -> Iterator[int]:
 
 @dataclass
 class Entry:
+    """A folder in one of the tables.
+
+    Parameters
+    ----------
+    dir_id : int
+        The folder's dir id.
+    path : str
+        Its path below the crawl root.
+    target : int
+        The row its link opens: itself, or its nearest shown ancestor.
+    size : int
+        Bytes.
+    files : int
+        Files in the subtree.
+    held : int
+        Bytes whose content is also stored outside the folder.
+    cold : int
+        Bytes last modified before the cold cut-off.
+    newest : int
+        The latest file date below, in seconds since the Unix epoch.
+    place : str, optional
+        Where most of its held-elsewhere bytes have their copies; empty if unknown.
+    place_share : float, optional
+        The share of the held bytes that lie in `place`.
+    """
+
     dir_id: int
     path: str
     target: int  # the row its link opens: itself, or its nearest shown ancestor
@@ -481,7 +838,22 @@ class Entry:
 def choose(
     ranked: Iterable[int], parent: array[int], limit: int = TABLE_ROWS
 ) -> list[int]:
-    """Take folders in ranking order, skipping any inside or above one already taken."""
+    """Take folders in ranking order, skipping any inside or above one already taken.
+
+    Parameters
+    ----------
+    ranked : iterable of int
+        Dir ids, best first.
+    parent : array of int
+        Each folder's parent id.
+    limit : int, optional
+        The most folders to take.
+
+    Returns
+    -------
+    list of int
+        The chosen dir ids, in ranking order.
+    """
     taken, above, out = set(), set(), []
     for d in ranked:
         chain = list(ancestors(d, parent))
@@ -500,6 +872,24 @@ def place(d: int, near: set, parent: array[int], depth: array[int], floor: int) 
 
     The copy's ancestor one level below where the two paths part, never shallower than
     `floor`; a copy shallower than that is its own place.
+
+    Parameters
+    ----------
+    d : int
+        The dir id of the folder holding the copy.
+    near : set of int
+        The folder and its ancestors.
+    parent : array of int
+        Each folder's parent id.
+    depth : array of int
+        Each folder's depth.
+    floor : int
+        The shallowest depth a place may have.
+
+    Returns
+    -------
+    int
+        The dir id of the place.
     """
     chain = [d]
     while chain[-1] and chain[-1] not in near:
@@ -515,7 +905,24 @@ def counterparts(
     conn: sqlite3.Connection, figures: Figures, folders: list[int], floor: int
 ) -> dict:
     """{folder: (place, bytes)}: the place holding copies of the most of each folder's
-    held-elsewhere bytes. A second pass over the duplicates, for these folders only."""
+    held-elsewhere bytes. A second pass over the duplicates, for these folders only.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        A connection to the audit database.
+    figures : Figures
+        From `measure`.
+    folders : list of int
+        Dir ids to find places for.
+    floor : int
+        The shallowest depth a place may have.
+
+    Returns
+    -------
+    dict of int to tuple of (int, int)
+        For each folder with held bytes, the dir id of the place and the bytes held there.
+    """
     if not folders:
         return {}
     f, wanted = figures, set(folders)
@@ -542,6 +949,22 @@ def counterparts(
 
 
 def tables(store: Store, figures: Figures, page: Page) -> dict[str, list[Entry]]:
+    """Pick the folders worth a closer look.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    figures : Figures
+        From `measure`.
+    page : Page
+        From `layout`.
+
+    Returns
+    -------
+    dict of str to list of Entry
+        The ``"dup"``, ``"cold"`` and ``"tiny"`` tables.
+    """
     f, root = figures, figures.page_root
     below_root = [d for d in range(1, len(f.size)) if f.on_page[d] and d != root]
     big = [d for d in below_root if f.size[d] >= page.threshold]
@@ -572,6 +995,18 @@ def tables(store: Store, figures: Figures, page: Page) -> dict[str, list[Entry]]
     names = dir_names(conn, {*dup, *cold, *tiny, *(spot for spot, _ in spots.values())})
 
     def entry(d: int) -> Entry:
+        """The table entry for a folder.
+
+        Parameters
+        ----------
+        d : int
+            A dir id.
+
+        Returns
+        -------
+        Entry
+            Its figures, and where its held bytes have their copies.
+        """
         target = d
         while target not in page.shown:
             target = f.parent[target]
@@ -605,6 +1040,40 @@ def tables(store: Store, figures: Figures, page: Page) -> dict[str, list[Entry]]
 
 @dataclass
 class Summary:
+    """What the page's header and tables show besides the tree.
+
+    Parameters
+    ----------
+    title : str
+        The page root's path.
+    db_name : str
+        The database's name.
+    listed : float
+        When the listing was taken, in seconds since the Unix epoch.
+    finished : bool
+        Whether a pass over the listing finished.
+    generated : float
+        When the page was made, in seconds since the Unix epoch.
+    reclaimable : int
+        Bytes that deleting duplicates frees on the page.
+    pending : int
+        Pieces of the listing still waiting.
+    running : int
+        Pieces being listed.
+    failed : int
+        Pieces that failed.
+    min_size : int
+        The size, in bytes, from which an entry gets a row.
+    types : list of ExtRow
+        Bytes by file type.
+    years : list of YearRow
+        Bytes by year last modified.
+    kinds : Tally, optional
+        Bytes by kind; None is shown as empty.
+    looked_inside : bool, optional
+        Whether an archive index was given, to look inside tarballs.
+    """
+
     title: str  # the page root's path
     db_name: str
     listed: float  # when the listing was taken
@@ -631,7 +1100,30 @@ def build(
     index: sqlite3.Connection | None = None,
 ):
     """(page, summary, tables) for the folder at `page_path`. `rules` and `index` (an
-    archive index, see kinds.archive_index) say what kinds of data the files are."""
+    archive index, see kinds.archive_index) say what kinds of data the files are.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+    page_path : str
+        The folder to show.
+    min_size : int
+        The size, in bytes, from which an entry gets a row.
+    max_rows : int
+        The most rows the tree may have.
+    db_name : str
+        The database's name, shown in the header.
+    rules : kinds.Rules, optional
+        The classifier; None uses the built-in rules.
+    index : sqlite3.Connection, optional
+        The archive index; None judges tarballs by their names.
+
+    Returns
+    -------
+    tuple
+        The `Page`, the `Summary` and the tables (see `tables`).
+    """
     conn = store.connect()
     # One read transaction for every query below: read separately, a crawl still writing
     # could show measure one listing and layout another.
@@ -690,11 +1182,34 @@ BLOCKS = " ▏▎▍▌▋▊▉"
 
 
 def esc(text: str) -> str:
+    """Escape text for HTML.
+
+    Parameters
+    ----------
+    text : str
+        Any text.
+
+    Returns
+    -------
+    str
+        `text` with ``&``, ``<``, ``>`` and quotes escaped.
+    """
     return html.escape(text, quote=True)
 
 
 def compact(n: float) -> str:
-    """A size in at most four characters, the way the reference page shows them."""
+    """A size in at most four characters, the way the reference page shows them.
+
+    Parameters
+    ----------
+    n : float
+        A size in bytes.
+
+    Returns
+    -------
+    str
+        For example ``"512B"``, ``"1.5K"`` or ``"230G"``.
+    """
     for unit in "BKMGTP":
         if n < 1024 or unit == "P":
             break
@@ -705,25 +1220,91 @@ def compact(n: float) -> str:
 
 
 def bar(share: float) -> str:
+    """A text bar for a share.
+
+    Parameters
+    ----------
+    share : float
+        A share of the whole, clamped to 0 to 1.
+
+    Returns
+    -------
+    str
+        Block characters up to ``BAR_WIDTH`` wide, in eighths.
+    """
     eighths = round(max(0.0, min(share, 1.0)) * BAR_WIDTH * 8)
     full, part = divmod(eighths, 8)
     return "█" * full + (BLOCKS[part] if part else "")
 
 
 def day(t: float) -> str:
+    """Format a date.
+
+    Parameters
+    ----------
+    t : float
+        Seconds since the Unix epoch; 0 means no date.
+
+    Returns
+    -------
+    str
+        ``"YYYY-MM-DD"`` in UTC, or empty for 0.
+    """
     return time.strftime("%Y-%m-%d", time.gmtime(t)) if t else ""
 
 
 def plural(n: int, word: str) -> str:
+    """A count with its noun.
+
+    Parameters
+    ----------
+    n : int
+        The count.
+    word : str
+        The noun, singular.
+
+    Returns
+    -------
+    str
+        For example ``"1 file"`` or ``"1,200 files"``.
+    """
     return f"{n:,} {word}{'' if n == 1 else 's'}"
 
 
 def _counts(row: Row) -> str:
+    """The files and folders of a row, as text.
+
+    Parameters
+    ----------
+    row : Row
+        A folder or fold row.
+
+    Returns
+    -------
+    str
+        For example ``"3 files, 1 folder"``; folders are left out when there are none.
+    """
     text = plural(row.files, "file")
     return text + (", " + plural(row.folders, "folder") if row.folders else "")
 
 
 def _cells(size: int, total: int, tree: str) -> str:
+    """The size, share, bar and tree cells of a row.
+
+    Parameters
+    ----------
+    size : int
+        The row's bytes.
+    total : int
+        The page's bytes, which the share is of.
+    tree : str
+        The tree-drawing characters before the name.
+
+    Returns
+    -------
+    str
+        HTML.
+    """
     share = size / total if total else 0.0
     return (
         f'<span class="size">{compact(size)}</span><span class="pct">{share:.1%}</span>'
@@ -733,6 +1314,18 @@ def _cells(size: int, total: int, tree: str) -> str:
 
 
 def _badges(row: Row) -> str:
+    """The badges of a folder row: kind, duplicate, cold and tiny.
+
+    Parameters
+    ----------
+    row : Row
+        A folder row.
+
+    Returns
+    -------
+    str
+        HTML; empty if no badge applies.
+    """
     out = ""
     if row.group_bytes >= KIND_BADGE * row.size > 0:
         out += (
@@ -749,7 +1342,21 @@ def _badges(row: Row) -> str:
 
 
 def _folder(out: TextIO, row: Row, total: int, lines: str, twig: str) -> None:
-    """Write a folder's row and, inside it, everything below it."""
+    """Write a folder's row and, inside it, everything below it.
+
+    Parameters
+    ----------
+    out : TextIO
+        The text file or stream written to.
+    row : Row
+        The folder.
+    total : int
+        The page's bytes, which the shares are of.
+    lines : str
+        The tree-drawing characters carried down from the folders above.
+    twig : str
+        This folder's own branch, ``MID`` or ``LAST``; empty for the page root.
+    """
     top = twig == ""
     meta = _counts(row) + (f" &middot; newest {day(row.date)}" if row.date else "")
     out.write(
@@ -786,6 +1393,17 @@ def _folder(out: TextIO, row: Row, total: int, lines: str, twig: str) -> None:
 
 
 def _header(out: TextIO, page: Page, summary: Summary) -> None:
+    """Write the header: title, banners, tiles and tools.
+
+    Parameters
+    ----------
+    out : TextIO
+        The text file or stream written to.
+    page : Page
+        The page's rows.
+    summary : Summary
+        The page's figures.
+    """
     root = page.root
     made = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(summary.generated))
     when = "listed" if summary.finished else "listing begun"
@@ -831,11 +1449,40 @@ def _table(
     rows: list[list[str]],
     left: tuple[int, ...] = (0,),
 ) -> None:
+    """Write a table, or a note that it is empty.
+
+    Parameters
+    ----------
+    out : TextIO
+        The text file or stream written to.
+    headings : list of str
+        The column headings, as HTML.
+    rows : list of list of str
+        The cells, as HTML.
+    left : tuple of int, optional
+        The columns aligned left.
+    """
     if not rows:
         out.write('<p class="note">None.</p>\n')
         return
 
     def cell(tag: str, i: int, text: str) -> str:
+        """One table cell.
+
+        Parameters
+        ----------
+        tag : str
+            ``"th"`` or ``"td"``.
+        i : int
+            The column.
+        text : str
+            The cell's HTML.
+
+        Returns
+        -------
+        str
+            The element.
+        """
         return (
             f'<{tag} class="left">{text}</{tag}>'
             if i in left
@@ -847,22 +1494,59 @@ def _table(
         + "".join(cell("th", i, h) for i, h in enumerate(headings))
         + "</tr>\n"
     )
-    for row in rows:
-        out.write(
-            "<tr>" + "".join(cell("td", i, c) for i, c in enumerate(row)) + "</tr>\n"
-        )
+    out.writelines(
+        "<tr>" + "".join(cell("td", i, c) for i, c in enumerate(row)) + "</tr>\n"
+        for row in rows
+    )
     out.write("</table>\n")
 
 
 def _link(e: Entry) -> str:
+    """A link to a folder's row.
+
+    Parameters
+    ----------
+    e : Entry
+        The table entry.
+
+    Returns
+    -------
+    str
+        HTML; it says "(folded)" when the row is an ancestor's.
+    """
     folded = " (folded)" if e.target != e.dir_id else ""
     return f'<a href="#d{e.target}">{esc(e.path or "/")}</a>{folded}'
 
 
 def _tables(out: TextIO, page: Page, summary: Summary, chosen: dict) -> None:
+    """Write the tables below the tree.
+
+    Parameters
+    ----------
+    out : TextIO
+        The text file or stream written to.
+    page : Page
+        The page's rows.
+    summary : Summary
+        The page's figures.
+    chosen : dict
+        The folder tables, from `tables`.
+    """
     total = page.root.size
 
     def share(n: float) -> str:
+        """A share of the page, as text.
+
+        Parameters
+        ----------
+        n : float
+            Bytes.
+
+        Returns
+        -------
+        str
+            A percentage of the page root's bytes to one decimal place.
+        """
         return f"{n / total:.1%}" if total else "0.0%"
 
     out.write(
@@ -982,6 +1666,15 @@ def _tables(out: TextIO, page: Page, summary: Summary, chosen: dict) -> None:
 
 
 def _reading(out: TextIO, page: Page) -> None:
+    """Write the notes on how to read the page.
+
+    Parameters
+    ----------
+    out : TextIO
+        The text file or stream written to.
+    page : Page
+        The page's rows.
+    """
     out.write(f"""<h2>Reading this</h2>
 <p class="note">Folder sizes are rolled up from the files listed below them: Dropbox reports
 no folder sizes. Percentages and bars are shares of this page's {compact(page.root.size)}.
@@ -1009,7 +1702,19 @@ inside or above one already listed is skipped, so no two listed folders overlap.
 
 
 def render(out: TextIO, page: Page, summary: Summary, chosen: dict) -> None:
-    """Write the whole page to the text file `out`."""
+    """Write the whole page to the text file `out`.
+
+    Parameters
+    ----------
+    out : TextIO
+        The text file or stream written to.
+    page : Page
+        The page's rows.
+    summary : Summary
+        The page's figures.
+    chosen : dict
+        The folder tables, from `tables`.
+    """
     out.write(HEAD.replace("{title}", esc(summary.title)))
     _header(out, page, summary)
     out.write('<main>\n<div id="tree">\n')
