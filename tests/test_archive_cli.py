@@ -105,7 +105,7 @@ def fake_build_lister(pages: Sequence[list[dict[str, object]] | Exception]):
             self.calls = calls
 
         def __call__(
-            self, remote: str, tokens: object | None = None
+            self, remote: str, tokens: TokenProvider | None = None
         ) -> tuple[object, Lister]:
             return object(), Lister()
 
@@ -1124,7 +1124,7 @@ def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(
     )
 
     class Lister:
-        def list_folder(self, path: str, recursive: bool = False):
+        def list_folder(self, path: str, recursive: bool = False) -> Page:
             answer = next(answers)
             if isinstance(answer, Exception):
                 raise answer
@@ -2068,9 +2068,8 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(
     )
     stop, audited, real_read = threading.Event(), [], cli.read_member
 
-    def read_member(
-        concat: ConcatFile, offset: int
-    ):  # only the audit reads members this way
+    # only the audit reads members this way
+    def read_member(concat: ConcatFile, offset: int):
         audited.append(offset)
         stop.set()  # a signal, as the audit begins
         return real_read(concat, offset)
