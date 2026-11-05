@@ -286,7 +286,8 @@ def build_lister(
 def cmd_init(args: SimpleNamespace) -> int:
     """Create the database and seed it with the root shard.
 
-    Checks first that the disk has room and that the account and the root can be reached.
+    Checks first that the disk has room and that the account and the root can be
+    reached.
 
     Parameters
     ----------
@@ -935,8 +936,6 @@ def _kinds_inputs(
 ) -> tuple[kinds.Rules, sqlite3.Connection | None]:
     """Load the site rules and open the archive index a command was given.
 
-    Raises KindsError when either cannot be used.
-
     Parameters
     ----------
     args : SimpleNamespace
@@ -947,6 +946,11 @@ def _kinds_inputs(
     tuple of (kinds.Rules, sqlite3.Connection or None)
         The rules, and a connection to the archive index or None when no
         ``archive_db`` was given. The caller closes the connection.
+
+    Raises
+    ------
+    kinds.KindsError
+        If either cannot be used.
     """
     rules = kinds.load_rules(args.rules)
     return rules, kinds.archive_index(args.archive_db) if args.archive_db else None
@@ -1401,10 +1405,6 @@ def _reader_for(
     has no `--local-dir` of its own. Task 8's `cat` builds its `ConcatFile` from this
     helper and `_stored_archive_set`, so `cat` and `index` reach the bytes the same way.
 
-    Where a local archive's parts live is the folder recorded at registration -- `index`
-    has no `--local-dir` of its own. Task 8's `cat` builds its `ConcatFile` from this
-    helper and `_stored_archive_set`, so `cat` and `index` reach the bytes the same way.
-
     Parameters
     ----------
     row : sqlite3.Row
@@ -1483,9 +1483,6 @@ def _fingerprint(
 
 def _open_archive_store(path: str) -> ArchiveStore | None:
     """Open the archive store at `path`, or return None if it holds no archive index.
-
-    `index` and `status` never create one: `register` initialises the schema, so a typo
-    in `--db` is a usage error rather than a silently created empty database.
 
     `index` and `status` never create one: `register` initialises the schema, so a typo
     in `--db` is a usage error rather than a silently created empty database.
@@ -1820,8 +1817,8 @@ def _walk_segment(run: _Run, segment: sqlite3.Row) -> None:
     def delta():
         """Return what this reader has cost *since the last report*.
 
-        The store adds what it is given, so handing it the running total every time would
-        compound it.
+        The store adds what it is given, so handing it the running total every time
+        would compound it.
 
         Returns
         -------
@@ -2305,9 +2302,6 @@ def _compression(
     A format is named only once two readings agree, as every verdict is: the second asks
     for a whole window, so its request ends tens of kilobytes from the first's.
 
-    A format is named only once two readings agree, as every verdict is: the second asks
-    for a whole window, so its request ends tens of kilobytes from the first's.
-
     Parameters
     ----------
     row : sqlite3.Row
@@ -2368,9 +2362,9 @@ def _compressed_as(row: sqlite3.Row) -> str | None:
 class _Walked:
     """How one archive's walk ended.
 
-    It is what `archive index` reports and `archive run` counts. ``started`` is False for
-    a walk refused before it began, which has no figures worth printing; ``bug`` marks the
-    machinery failing, not the archive.
+    It is what `archive index` reports and `archive run` counts. ``started`` is False
+    for a walk refused before it began, which has no figures worth printing; ``bug``
+    marks the machinery failing, not the archive.
 
     Parameters
     ----------
@@ -2922,11 +2916,6 @@ def _run_jobs(
     folder and name. A job carries the places of its copies, walked instead if its own
     has gone. Returns (jobs, counts, sizes), the last two keyed by kind.
 
-    Every valid archive the listing names that has no verdict yet, and every archive the
-    database holds without one -- imported mid-walk, or registered by hand -- once per
-    folder and name. A job carries the places of its copies, walked instead if its own
-    has gone. Returns (jobs, counts, sizes), the last two keyed by kind.
-
     Parameters
     ----------
     store : ArchiveStore
@@ -3107,10 +3096,10 @@ def _walk_job(
 ) -> Done:
     """Walk one archive at its turn.
 
-    One listing of its folder registers what is there now: the same row, with its walk so
-    far, if the content is unchanged -- wherever it was registered before -- or a new one
-    if not. Then the walk. If the archive has gone, or its parts no longer make a set, the
-    next copy the listing saw is tried instead.
+    One listing of its folder registers what is there now: the same row, with its walk
+    so far, if the content is unchanged -- wherever it was registered before -- or a new
+    one if not. Then the walk. If the archive has gone, or its parts no longer make a
+    set, the next copy the listing saw is tried instead.
 
     Parameters
     ----------
@@ -3693,8 +3682,8 @@ def _print_index_completeness_warning(row: sqlite3.Row) -> None:
 def cmd_archive_report(args: SimpleNamespace) -> int:
     """Print the rollups of one archive's manifest.
 
-    They are what `archive_report.summary` computes, laid out the way `cmd_report` lays out
-    the audit's own numbers.
+    They are what `archive_report.summary` computes, laid out the way `cmd_report` lays
+    out the audit's own numbers.
 
     Read-only, and offline (T9-10): everything comes out of the local database, so
     there is no `--remote` here and nothing above this function touches Dropbox.
@@ -3812,8 +3801,8 @@ def cmd_archive_export(args: SimpleNamespace) -> int:
 def _print_candidates(matches: Sequence[sqlite3.Row]) -> None:
     """Print the offset, size and mtime of every member a path matched.
 
-    That lets `--offset` name one of them. Shared by the two `cat` outcomes that need it:
-    ambiguous (no `--offset` given) and a given `--offset` that names none of them.
+    That lets `--offset` name one of them. Shared by the two `cat` outcomes that need
+    it: ambiguous (no `--offset` given) and a given `--offset` that names none of them.
 
     Parameters
     ----------
@@ -3855,15 +3844,6 @@ def _plan_reads(
     archive_set: ArchiveSet, hdr_offset: int, data_offset: int, end: int, stop: int
 ) -> list[tuple[int, int]]:
     """Plan the reads that cover [hdr_offset, stop), as (offset, length) pairs.
-
-    Each is at most CAT_CHUNK, and consecutive ones share bytes, so every read is checked
-    at both ends by another request. That holds only if no read crosses a part boundary:
-    a read that does is two requests, and the two ends that meet at the boundary share
-    nothing. So reads stop at each boundary, and a short read straddling it shares bytes
-    with the reads either side. The exceptions are the two anchors, which are checked by
-    what they say rather than by an overlap, and so are read whole wherever a boundary
-    falls -- parts need not be a multiple of 512 bytes (`split -b 1GB`): the member's own
-    header sequence [hdr_offset, data_offset), and what follows it [end, stop).
 
     Each is at most CAT_CHUNK, and consecutive ones share bytes, so every read is checked
     at both ends by another request. That holds only if no read crosses a part boundary:
@@ -3939,8 +3919,8 @@ def _headers_mismatch(block: bytes, member: sqlite3.Row) -> str | None:
     """Return why ``block`` is not the member its index row describes, or None if it is.
 
     ``block`` is the bytes from a member's first header to its data. Every field the row
-    holds is compared: a read of another member's headers is caught even at the same size,
-    and so is a part rewritten under the index.
+    holds is compared: a read of another member's headers is caught even at the same
+    size, and so is a part rewritten under the index.
 
     Parameters
     ----------
@@ -4138,7 +4118,8 @@ def _verified_member_bytes(
     def trailer(buf: bytes) -> bytes | None:
         """Return what follows the member, as the last read has it.
 
-        That is the next member's header sequence, or one block. None if the archive ends first.
+        That is the next member's header sequence, or one block. None if the archive
+        ends first.
 
         Parameters
         ----------
@@ -4188,10 +4169,10 @@ def _verified_member_bytes(
         """Return the version of read i that leads every other by two votes.
 
         Normally that is ``buf`` and one fresh fetch agreeing with it. Once fetches have
-        disagreed it takes more, so a wrong body served twice cannot outvote a right one served
-        first. What no vote can catch is a server repeating one wrong answer -- ``buf`` and the
-        fetch after it, or three fetches in a row. Versions are counted by digest; only the
-        leader's bytes are kept.
+        disagreed it takes more, so a wrong body served twice cannot outvote a right one
+        served first. What no vote can catch is a server repeating one wrong answer --
+        ``buf`` and the fetch after it, or three fetches in a row. Versions are counted
+        by digest; only the leader's bytes are kept.
 
         Parameters
         ----------
@@ -4337,9 +4318,9 @@ def _verified_member_bytes(
 def cmd_archive_cat(args: SimpleNamespace) -> int:
     """Extract one member's bytes by path, addressed directly through the index.
 
-    There is no search: a walk already recorded `data_offset` and `size` for every member,
-    so retrieving one is a direct read, not a scan. Each read is checked against the
-    member's own header, the block that follows it and the read beside it
+    There is no search: a walk already recorded `data_offset` and `size` for every
+    member, so retrieving one is a direct read, not a scan. Each read is checked against
+    the member's own header, the block that follows it and the read beside it
     (`_verified_member_bytes`), because Dropbox has returned 206 bodies that were some
     other range -- and here there is no second walk to catch it.
 
