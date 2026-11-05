@@ -1,5 +1,6 @@
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -952,3 +953,58 @@ def test_read_transaction_rolls_back_when_its_body_raises(tmp_path: Path):
         raise RuntimeError("body failed")
 
     assert not store.connect().in_transaction
+
+
+# ---- closing: `close` is this thread's connection, `close_all` every thread's ----
+# A one-thread pool runs every call on the same other thread, so the connection that
+# thread opens lasts from one call to the next.
+
+
+def test_close_all_closes_a_connection_another_thread_opened(tmp_path: Path):
+    store = ArchiveStore(tmp_path / "archives.db")
+    with ThreadPoolExecutor(max_workers=1) as other:
+        theirs = other.submit(store.connect).result()
+        store.close_all()
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            other.submit(theirs.execute, "SELECT 1").result()
+
+
+def test_a_store_opens_new_connections_after_close_all(tmp_path: Path):
+    store, _, _ = registered(tmp_path)
+    with ThreadPoolExecutor(max_workers=1) as other:
+        theirs = other.submit(store.connect).result()
+        store.close_all()
+        assert store.get("a.tar")["n_parts"] == 2
+        assert other.submit(store.get, "a.tar").result()["n_parts"] == 2
+        assert other.submit(store.connect).result() is not theirs
+    store.close_all()
+
+
+def test_a_with_block_closes_the_store_when_it_ends(tmp_path: Path):
+    store = ArchiveStore(tmp_path / "archives.db")
+    with store as entered:
+        assert entered is store
+        conn = store.connect()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conn.execute("SELECT 1")
+
+
+def test_a_with_block_closes_the_store_and_lets_the_error_through(tmp_path: Path):
+    store = ArchiveStore(tmp_path / "archives.db")
+    conn = store.connect()
+    with pytest.raises(LookupError, match="body failed"), store:
+        raise LookupError("body failed")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conn.execute("SELECT 1")
+
+
+def test_close_leaves_other_threads_connections_open(tmp_path: Path):
+    store = ArchiveStore(tmp_path / "archives.db")
+    with ThreadPoolExecutor(max_workers=1) as other:
+        theirs = other.submit(store.connect).result()
+        store.connect()
+        store.close()
+        one = other.submit(lambda: theirs.execute("SELECT 1").fetchone()[0])
+        assert one.result() == 1
+        assert other.submit(store.connect).result() is theirs
+        other.submit(store.close).result()

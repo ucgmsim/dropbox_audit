@@ -16,13 +16,13 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
-import threading
 import time
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Self, TypedDict, cast
 
 from dbaudit.archive.parts import ArchiveSet, Part
+from dbaudit.connections import ThreadConnections
 
 if TYPE_CHECKING:
     from dbaudit.archive.tarwalk import Member, WalkResult
@@ -112,6 +112,8 @@ class ArchiveStats(TypedDict):
 class ArchiveStore:
     """The archive content index: archives, their parts and segments, and the members found in them.
 
+    A ``with`` block closes every connection when it ends, as `close_all` does.
+
     Parameters
     ----------
     path : str | Path
@@ -120,7 +122,28 @@ class ArchiveStore:
 
     def __init__(self, path: str | Path):  # noqa: D107
         self.path = str(path)
-        self._local = threading.local()
+        self._connections = ThreadConnections()
+
+    def __enter__(self) -> Self:
+        """Return this store, for a ``with`` block that closes it.
+
+        Returns
+        -------
+        ArchiveStore
+            This store.
+        """
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close every connection the store opened, as `close_all` does.
+
+        Parameters
+        ----------
+        *exc : object
+            The exception type, value and traceback, if the block raised; unused, so
+            the exception propagates.
+        """
+        self.close_all()
 
     # ---- connections and schema -----------------------------------------
 
@@ -136,22 +159,33 @@ class ArchiveStore:
         sqlite3.Connection
             The calling thread's connection, in autocommit mode with rows as `sqlite3.Row`.
         """
-        conn = getattr(self._local, "conn", None)
+        conn = self._connections.get()
         if conn is None:
-            conn = sqlite3.connect(self.path, timeout=60.0, isolation_level=None)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=60000")
+            conn = sqlite3.connect(
+                self.path, timeout=60.0, isolation_level=None, check_same_thread=False
+            )
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=60000")
+            except BaseException:
+                conn.close()  # e.g. the file is not a database
+                raise
             conn.row_factory = sqlite3.Row
-            self._local.conn = conn
+            self._connections.add(conn)
         return conn
 
     def close(self) -> None:
         """Close the calling thread's connection, if it has one."""
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()
-            self._local.conn = None
+        self._connections.close()
+
+    def close_all(self) -> None:
+        """Close every connection the store opened, on any thread, that is still open.
+
+        Call it once no other thread is using the store. The store still works after:
+        each thread's next `connect` opens a new connection.
+        """
+        self._connections.close_all()
 
     def init_schema(self) -> None:
         """Create the tables and indexes of ``schema.sql`` where they are missing."""

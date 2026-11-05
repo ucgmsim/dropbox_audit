@@ -17,7 +17,9 @@ import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import overload
+from typing import Self, overload
+
+from dbaudit.connections import ThreadConnections
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -170,6 +172,8 @@ def _extension(name: str) -> str:
 class Store:
     """The audit's SQLite database, with one connection per thread.
 
+    A ``with`` block closes every connection when it ends, as `close_all` does.
+
     Parameters
     ----------
     path : str or os.PathLike
@@ -178,8 +182,30 @@ class Store:
 
     def __init__(self, path: str | os.PathLike[str]):  # noqa: D107
         self.path = str(path)
-        self._local = threading.local()
+        self._connections = ThreadConnections()
+        self._local = threading.local()  # each thread's lookup caches
         self._meta_lock = threading.Lock()
+
+    def __enter__(self) -> Self:
+        """Return this store, for a ``with`` block that closes it.
+
+        Returns
+        -------
+        Store
+            This store.
+        """
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close every connection the store opened, as `close_all` does.
+
+        Parameters
+        ----------
+        *exc : object
+            The exception type, value and traceback, if the block raised; unused, so
+            the exception propagates.
+        """
+        self.close_all()
 
     # ---- connections ---------------------------------------------------
 
@@ -192,15 +218,21 @@ class Store:
             This thread's connection, opened on first use. It is in autocommit mode
             (``isolation_level`` None), so callers open transactions themselves.
         """
-        conn = getattr(self._local, "conn", None)
+        conn = self._connections.get()
         if conn is None:
-            conn = sqlite3.connect(self.path, timeout=60.0, isolation_level=None)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=60000")
-            conn.execute("PRAGMA cache_size=-262144")  # 256 MB page cache
-            conn.execute("PRAGMA temp_store=MEMORY")
-            self._local.conn = conn
+            conn = sqlite3.connect(
+                self.path, timeout=60.0, isolation_level=None, check_same_thread=False
+            )
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=60000")
+                conn.execute("PRAGMA cache_size=-262144")  # 256 MB page cache
+                conn.execute("PRAGMA temp_store=MEMORY")
+            except BaseException:
+                conn.close()  # e.g. the file is not a database
+                raise
+            self._connections.add(conn)
             self._local.dir_cache = {}
             self._local.principal_cache = {}
             self._local.time_cache = {}
@@ -208,10 +240,15 @@ class Store:
 
     def close(self) -> None:
         """Close this thread's connection, if it has one."""
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()
-            self._local.conn = None
+        self._connections.close()
+
+    def close_all(self) -> None:
+        """Close every connection the store opened, on any thread, that is still open.
+
+        Call it once no other thread is using the store. The store still works after:
+        each thread's next `connect` opens a new connection.
+        """
+        self._connections.close_all()
 
     def _caches(
         self,
