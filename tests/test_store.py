@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from dbaudit.store import Store
@@ -24,14 +26,14 @@ FOLDER = {
 }
 
 
-def new_store(tmp_path):
+def new_store(tmp_path: Path):
     store = Store(tmp_path / "a.db")
     store.init_schema()
     store.set_meta("root", "/TeamSpace")
     return store
 
 
-def test_commit_page_writes_rows_and_cursor(tmp_path):
+def test_commit_page_writes_rows_and_cursor(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace/x", depth=2, mode="recursive")
     store.claim_shard("w1")
@@ -42,7 +44,7 @@ def test_commit_page_writes_rows_and_cursor(tmp_path):
     assert store.stats()["files"] == 1
 
 
-def test_page_commit_is_atomic(tmp_path):
+def test_page_commit_is_atomic(tmp_path: Path):
     """A failure mid-page must leave neither rows nor an advanced cursor."""
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace/x", depth=2, mode="recursive")
@@ -55,7 +57,7 @@ def test_page_commit_is_atomic(tmp_path):
     assert store.get_shard(sid).cursor is None
 
 
-def test_replaying_a_page_does_not_duplicate(tmp_path):
+def test_replaying_a_page_does_not_duplicate(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace/x", depth=2, mode="recursive")
     store.claim_shard("w1")
@@ -68,7 +70,7 @@ def test_replaying_a_page_does_not_duplicate(tmp_path):
     assert after_first["dirs"] == after_second["dirs"] == 2
 
 
-def test_dirs_are_normalised_with_ancestors(tmp_path):
+def test_dirs_are_normalised_with_ancestors(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace", depth=1, mode="recursive")
     store.claim_shard("w1")
@@ -88,7 +90,7 @@ def test_dirs_are_normalised_with_ancestors(tmp_path):
     assert joined[0][0] == "/TeamSpace/a/b/c/f.txt"
 
 
-def test_folder_entry_upgrades_dir_created_from_child_path(tmp_path):
+def test_folder_entry_upgrades_dir_created_from_child_path(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace", depth=1, mode="recursive")
     store.claim_shard("w1")
@@ -106,7 +108,7 @@ def test_folder_entry_upgrades_dir_created_from_child_path(tmp_path):
     )
 
 
-def test_mount_points_are_flagged(tmp_path):
+def test_mount_points_are_flagged(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace", depth=1, mode="recursive")
     store.claim_shard("w1")
@@ -118,21 +120,21 @@ def test_mount_points_are_flagged(tmp_path):
     )
 
 
-def test_claim_shard_is_exclusive(tmp_path):
+def test_claim_shard_is_exclusive(tmp_path: Path):
     store = new_store(tmp_path)
     store.add_shard("/a", 1, "recursive")
     assert store.claim_shard("w1") is not None
     assert store.claim_shard("w2") is None
 
 
-def test_claim_shard_prefers_shallow_shards(tmp_path):
+def test_claim_shard_prefers_shallow_shards(tmp_path: Path):
     store = new_store(tmp_path)
     store.add_shard("/a/b/c", 3, "recursive")
     store.add_shard("/a", 1, "recursive")
     assert store.claim_shard("w1").path == "/a"
 
 
-def test_reset_stale_shards_preserves_cursor(tmp_path):
+def test_reset_stale_shards_preserves_cursor(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/a", 1, "recursive")
     store.claim_shard("w1")
@@ -142,7 +144,7 @@ def test_reset_stale_shards_preserves_cursor(tmp_path):
     assert shard.state == "pending" and shard.cursor == "c9"
 
 
-def test_last_page_marks_shard_done(tmp_path):
+def test_last_page_marks_shard_done(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/a", 1, "recursive")
     store.claim_shard("w1")
@@ -150,7 +152,7 @@ def test_last_page_marks_shard_done(tmp_path):
     assert store.get_shard(sid).state == "done"
 
 
-def test_clear_cursor_removes_rows_from_that_shard_only(tmp_path):
+def test_clear_cursor_removes_rows_from_that_shard_only(tmp_path: Path):
     store = new_store(tmp_path)
     keep = store.add_shard("/keep", 1, "recursive")
     drop = store.add_shard("/drop", 1, "recursive")
@@ -168,7 +170,7 @@ def test_clear_cursor_removes_rows_from_that_shard_only(tmp_path):
     assert store.get_shard(keep).cursor == "c"
 
 
-def test_relisting_after_clear_cursor_keeps_the_folder_count(tmp_path):
+def test_relisting_after_clear_cursor_keeps_the_folder_count(tmp_path: Path):
     """clear_cursor keeps a shard's folder rows, so listing again inserts none of them:
     the count must keep them too, or `status` and `report` come out low."""
     store = new_store(tmp_path)
@@ -180,7 +182,7 @@ def test_relisting_after_clear_cursor_keeps_the_folder_count(tmp_path):
     assert store.progress()["dirs"] == store.stats()["dirs"] == 2
 
 
-def test_content_hash_stored_as_blob(tmp_path):
+def test_content_hash_stored_as_blob(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/a", 1, "recursive")
     store.claim_shard("w1")
@@ -189,7 +191,7 @@ def test_content_hash_stored_as_blob(tmp_path):
     assert isinstance(value, bytes) and len(value) == 32
 
 
-def test_timestamps_stored_as_epoch_integers(tmp_path):
+def test_timestamps_stored_as_epoch_integers(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/a", 1, "recursive")
     store.claim_shard("w1")
@@ -198,7 +200,7 @@ def test_timestamps_stored_as_epoch_integers(tmp_path):
     assert cmod == 1577934245 and smod == 1577934246
 
 
-def test_modified_by_is_normalised_into_principals(tmp_path):
+def test_modified_by_is_normalised_into_principals(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/a", 1, "recursive")
     store.claim_shard("w1")
@@ -215,7 +217,7 @@ def test_modified_by_is_normalised_into_principals(tmp_path):
     )
 
 
-def test_entry_without_path_display_is_kept_not_dropped(tmp_path):
+def test_entry_without_path_display_is_kept_not_dropped(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace/x", depth=2, mode="recursive")
     store.claim_shard("w1")
@@ -232,7 +234,7 @@ def test_entry_without_path_display_is_kept_not_dropped(tmp_path):
     )
 
 
-def test_a_deleted_entry_is_logged_not_applied(tmp_path):
+def test_a_deleted_entry_is_logged_not_applied(tmp_path: Path):
     """A crawl asks for no deleted entries. One arriving anyway names something that
     went while the crawl ran, which a snapshot cannot be exact about either way: keep
     the rows and leave a trace rather than delete on a feed this crawl never reads."""
@@ -257,7 +259,7 @@ def test_a_deleted_entry_is_logged_not_applied(tmp_path):
     ]
 
 
-def test_child_shards_are_enqueued_in_the_same_transaction(tmp_path):
+def test_child_shards_are_enqueued_in_the_same_transaction(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/TeamSpace", depth=1, mode="split")
     store.claim_shard("w1")
@@ -274,7 +276,7 @@ def test_child_shards_are_enqueued_in_the_same_transaction(tmp_path):
     )
 
 
-def test_progress_counters_track_committed_pages(tmp_path):
+def test_progress_counters_track_committed_pages(tmp_path: Path):
     store = new_store(tmp_path)
     sid = store.add_shard("/a", 1, "recursive")
     store.claim_shard("w1")
@@ -288,7 +290,7 @@ def test_progress_counters_track_committed_pages(tmp_path):
     )
 
 
-def test_dir_counter_equals_actual_rows(tmp_path):
+def test_dir_counter_equals_actual_rows(tmp_path: Path):
     """SUM(shards.n_dirs) must equal COUNT(*) FROM dirs.
 
     A recursive listing repeats its own root folder, so counting folder *entries*
@@ -302,7 +304,7 @@ def test_dir_counter_equals_actual_rows(tmp_path):
     assert store.progress()["dirs"] == store.stats()["dirs"]
 
 
-def test_build_indexes_is_idempotent(tmp_path):
+def test_build_indexes_is_idempotent(tmp_path: Path):
     store = new_store(tmp_path)
     store.build_indexes()
     store.build_indexes()

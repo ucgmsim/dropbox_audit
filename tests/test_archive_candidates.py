@@ -1,6 +1,7 @@
 """Which tar archives an audit database holds, as `archive run` will walk them."""
 
 import hashlib
+from pathlib import Path
 
 from dbaudit.archive.candidates import find_candidates
 from dbaudit.store import Store
@@ -30,7 +31,7 @@ def folder(path):
     }
 
 
-def listing(tmp_path, *entries):
+def listing(tmp_path: Path, *entries):
     """An audit database holding ``entries`` under the root /R."""
     store = Store(tmp_path / "audit.db")
     store.init_schema()
@@ -42,7 +43,9 @@ def listing(tmp_path, *entries):
     return tmp_path / "audit.db"
 
 
-def test_a_plain_tar_and_a_set_of_parts_are_each_one_candidate_largest_first(tmp_path):
+def test_a_plain_tar_and_a_set_of_parts_are_each_one_candidate_largest_first(
+    tmp_path: Path,
+):
     found = find_candidates(
         listing(
             tmp_path,
@@ -57,7 +60,7 @@ def test_a_plain_tar_and_a_set_of_parts_are_each_one_candidate_largest_first(tmp
     assert all(len(c.set_hash) == 64 for c in found.candidates)
 
 
-def test_the_same_content_elsewhere_is_a_copy_walked_once(tmp_path):
+def test_the_same_content_elsewhere_is_a_copy_walked_once(tmp_path: Path):
     found = find_candidates(
         listing(
             tmp_path,
@@ -71,7 +74,7 @@ def test_the_same_content_elsewhere_is_a_copy_walked_once(tmp_path):
     ]
 
 
-def test_compressed_names_are_counted_not_listed(tmp_path):
+def test_compressed_names_are_counted_not_listed(tmp_path: Path):
     found = find_candidates(
         listing(tmp_path, file("/R/a/y.tar.gz", 7), file("/R/a/z.tgz", 5))
     )
@@ -79,7 +82,7 @@ def test_compressed_names_are_counted_not_listed(tmp_path):
     assert found.compressed == (2, 12)
 
 
-def test_a_set_register_would_refuse_is_listed_as_refused(tmp_path):
+def test_a_set_register_would_refuse_is_listed_as_refused(tmp_path: Path):
     found = find_candidates(
         listing(tmp_path, file("/R/a/g.tar.aa", 4), file("/R/a/g.tar.ac", 4))
     )
@@ -88,7 +91,7 @@ def test_a_set_register_would_refuse_is_listed_as_refused(tmp_path):
     assert "missing part 'ab'" in refused.detail
 
 
-def test_parts_each_in_a_folder_of_their_own_are_refused(tmp_path):
+def test_parts_each_in_a_folder_of_their_own_are_refused(tmp_path: Path):
     found = find_candidates(listing(tmp_path, file("/R/h.tar.aa/h.tar.aa", 4)))
     [refused] = found.candidates
     assert (refused.status, refused.detail) == (
@@ -97,13 +100,13 @@ def test_parts_each_in_a_folder_of_their_own_are_refused(tmp_path):
     )
 
 
-def test_names_that_are_neither_a_tar_nor_a_part_are_counted(tmp_path):
+def test_names_that_are_neither_a_tar_nor_a_part_are_counted(tmp_path: Path):
     found = find_candidates(listing(tmp_path, file("/R/a/old.tar.1", 3)))
     assert found.candidates == []
     assert found.other == (1, 3)
 
 
-def test_an_audit_database_at_an_awkward_path_still_opens(tmp_path):
+def test_an_audit_database_at_an_awkward_path_still_opens(tmp_path: Path):
     """It is opened read-only through a file: URI, which a `?`, `#` or `%` in its path
     would otherwise cut short or change."""
     awkward = tmp_path / "odd ?#%"

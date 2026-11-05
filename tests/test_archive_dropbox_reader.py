@@ -326,7 +326,9 @@ def test_a_lead_that_lands_on_a_blocks_last_byte_is_still_guarded():
         assert session.ranges == [(BLOCK - 2, pos + 1023 + lead)]
 
 
-def test_the_block_edge_fault_is_caught_even_without_its_guard(monkeypatch):
+def test_the_block_edge_fault_is_caught_even_without_its_guard(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Dropbox's own fault with the guard that avoids it switched off. Shape 0 asks from
     the byte before the header that starts the second block, as the October walks did, and
     gets that block's start. The confirming pass asks in the next shape and is answered

@@ -7,6 +7,8 @@ import random
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from dbaudit.api import Page, PathNotFoundError
 from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import LocalRangeReader
@@ -62,7 +64,7 @@ def write_parts(directory, data, part_size, base="a.tar"):
 class World:
     """Archives as Dropbox would list them, with their parts on local disk."""
 
-    def __init__(self, tmp_path):
+    def __init__(self, tmp_path: Path):
         self.tmp_path, self.folders, self.local, self.gone = tmp_path, {}, {}, set()
         self.faults = {}  # folder -> exceptions its next listings raise, in turn
         self.page_size = None  # entries per listing page; None lists a folder in one
@@ -108,7 +110,7 @@ class World:
         store.close()
         return str(self.tmp_path / "audit.db")
 
-    def install(self, monkeypatch):
+    def install(self, monkeypatch: pytest.MonkeyPatch):
         world = self
 
         class Lister:

@@ -10,6 +10,9 @@ confirmed. Each test here fails under `pytest --unshaped`, which asks as dbaudit
 import io
 import random
 import tarfile
+from pathlib import Path
+
+import pytest
 
 from dbaudit import cli
 from dbaudit.archive import tarwalk
@@ -89,7 +92,7 @@ def _jumped():
     return members, data, _offsets(data)
 
 
-def _walk(tmp_path, data, server):
+def _walk(tmp_path: Path, data, server):
     archive = write_parts(tmp_path, data, part_size=len(data))
     rows = {}
     result = walk(
@@ -100,7 +103,7 @@ def _walk(tmp_path, data, server):
     return result, [f"{rows[k].dir}/{rows[k].name}" for k in sorted(rows)]
 
 
-def _indexed(tmp_path, data):
+def _indexed(tmp_path: Path, data):
     source = tmp_path / "parts"
     source.mkdir()
     write_parts(source, data, part_size=len(data))
@@ -145,7 +148,7 @@ def _while(module, name, flag):
     return wrapped
 
 
-def test_the_confirming_pass_does_not_repeat_a_bad_request(tmp_path):
+def test_the_confirming_pass_does_not_repeat_a_bad_request(tmp_path: Path):
     """Review finding 1. The walk's read of member 0's header -- from the byte before it,
     as tarfile reads -- is answered with member 5's header, which sends the chain into
     member data. The confirming pass used to ask the same and agree: `corrupt`."""
@@ -162,7 +165,7 @@ def test_the_confirming_pass_does_not_repeat_a_bad_request(tmp_path):
 
 
 def test_recheck_does_not_repeat_the_request_that_condemned_an_archive(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Review finding 1, `--recheck`. A walk that asked as before shapes confirmed the bad
     read and left the archive `corrupt`, as October's walks did. --recheck walks the chain
@@ -189,7 +192,9 @@ def test_recheck_does_not_repeat_the_request_that_condemned_an_archive(
     assert server.lied == lied, "--recheck asked the bad request again"
 
 
-def test_the_audits_second_read_does_not_repeat_its_first(tmp_path, monkeypatch):
+def test_the_audits_second_read_does_not_repeat_its_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Review finding 2. The archive holds one path twice, as `tar -r` leaves it, so the
     audit reads both rows again. Its read of the newer one is answered with member 7's
     header. The audit's second read used to ask the same and agree, so the segment was
@@ -240,7 +245,9 @@ def test_the_audits_second_read_does_not_repeat_its_first(tmp_path, monkeypatch)
     assert server.lied == 1, "the audit asked the bad request again"
 
 
-def test_a_tie_break_is_not_won_by_one_bad_request(tmp_path, monkeypatch):
+def test_a_tie_break_is_not_won_by_one_bad_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Review finding 3, tie-breaks. The walk first reads member 0's header as member 5's;
     the confirming pass reads it truly; the tie-break's first read is answered with member
     7's. Its later reads used to ask the same, so member 7 had two votes and won."""
@@ -273,7 +280,9 @@ def _pax(name):
     return block
 
 
-def test_a_fake_pax_header_is_not_confirmed_by_one_bad_request(tmp_path, monkeypatch):
+def test_a_fake_pax_header_is_not_confirmed_by_one_bad_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Review finding 3, pax. The walk first reads a pax header where member 0's belongs;
     its re-read is answered with another pax header. The next re-read used to ask the same
     and agree, and pax confirmed twice made the archive `unsupported`."""
@@ -295,7 +304,9 @@ def test_a_fake_pax_header_is_not_confirmed_by_one_bad_request(tmp_path, monkeyp
     assert server.lied == 1, "a pax re-read asked the bad request again"
 
 
-def test_a_garbled_long_name_is_not_confirmed_by_one_bad_request(tmp_path, monkeypatch):
+def test_a_garbled_long_name_is_not_confirmed_by_one_bad_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Review finding 3, long names. The walk first reads member 0's long name garbled; its
     re-read is answered with another garbling. The next re-read used to ask the same and
     agree, and the garbled name was recorded."""
@@ -328,7 +339,9 @@ def test_a_garbled_long_name_is_not_confirmed_by_one_bad_request(tmp_path, monke
     assert server.lied == 1, "a long-name re-read asked the bad request again"
 
 
-def test_cat_rereads_a_bad_body_in_a_new_shape(tmp_path, monkeypatch):
+def test_cat_rereads_a_bad_body_in_a_new_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """`cat` re-reads whatever does not line up. A body wrong for one request -- here the
     member's own header, replaced by another member's -- used to come back the same on
     every re-read, until cat refused the member. (Big members either side keep its reads

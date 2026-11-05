@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from dbaudit.store import Store
 from dbaudit.verify import verify_subtree
@@ -18,7 +19,7 @@ FILE = {
 NESTED = dict(FILE, id="id:2", name="c.bin", size=7, path_display="/R/sub/c.bin")
 
 
-def seed(tmp_path, entries):
+def seed(tmp_path: Path, entries):
     store = Store(tmp_path / "a.db")
     store.init_schema()
     store.set_meta("root", "/R")
@@ -28,7 +29,7 @@ def seed(tmp_path, entries):
     return store
 
 
-def test_clean_match(tmp_path):
+def test_clean_match(tmp_path: Path):
     store = seed(tmp_path, [FILE])
     result = verify_subtree(
         store, "/R", rclone_fn=lambda p: json.dumps([{"Path": "a.bin", "Size": 10}])
@@ -38,7 +39,7 @@ def test_clean_match(tmp_path):
     assert result.db_bytes == result.rclone_bytes == 10
 
 
-def test_missing_file_detected(tmp_path):
+def test_missing_file_detected(tmp_path: Path):
     store = seed(tmp_path, [FILE])
     result = verify_subtree(
         store,
@@ -51,13 +52,13 @@ def test_missing_file_detected(tmp_path):
     assert not result.ok
 
 
-def test_extra_file_detected(tmp_path):
+def test_extra_file_detected(tmp_path: Path):
     store = seed(tmp_path, [FILE])
     result = verify_subtree(store, "/R", rclone_fn=lambda p: json.dumps([]))
     assert result.only_in_db == ["a.bin"]
 
 
-def test_size_mismatch_detected(tmp_path):
+def test_size_mismatch_detected(tmp_path: Path):
     store = seed(tmp_path, [FILE])
     result = verify_subtree(
         store, "/R", rclone_fn=lambda p: json.dumps([{"Path": "a.bin", "Size": 99}])
@@ -65,7 +66,7 @@ def test_size_mismatch_detected(tmp_path):
     assert result.size_mismatches == [("a.bin", 10, 99)]
 
 
-def test_nested_paths_are_compared_relative_to_the_subtree(tmp_path):
+def test_nested_paths_are_compared_relative_to_the_subtree(tmp_path: Path):
     store = seed(tmp_path, [FILE, NESTED])
     result = verify_subtree(
         store,
@@ -77,7 +78,7 @@ def test_nested_paths_are_compared_relative_to_the_subtree(tmp_path):
     assert result.ok, (result.only_in_db, result.only_in_rclone)
 
 
-def test_verifying_a_subdirectory_only(tmp_path):
+def test_verifying_a_subdirectory_only(tmp_path: Path):
     store = seed(tmp_path, [FILE, NESTED])
     result = verify_subtree(
         store, "/R/sub", rclone_fn=lambda p: json.dumps([{"Path": "c.bin", "Size": 7}])
@@ -85,7 +86,7 @@ def test_verifying_a_subdirectory_only(tmp_path):
     assert result.ok and result.db_files == 1
 
 
-def test_empty_rclone_output_is_handled(tmp_path):
+def test_empty_rclone_output_is_handled(tmp_path: Path):
     store = seed(tmp_path, [])
     result = verify_subtree(store, "/R", rclone_fn=lambda p: "")
     assert result.ok and result.db_files == 0

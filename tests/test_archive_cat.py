@@ -21,7 +21,7 @@ from tests.archive_fakes import build_tar, write_parts
 PAYLOAD = bytes(range(256)) * 30  # 7,680 bytes: spans a 4 KiB part boundary
 
 
-def setup_archive(tmp_path):
+def setup_archive(tmp_path: Path):
     source = tmp_path / "parts"
     source.mkdir()
     data = build_tar([("run/small.txt", b"hello\n"), ("run/big.bin", PAYLOAD)])
@@ -43,7 +43,7 @@ def setup_archive(tmp_path):
     return db
 
 
-def test_cat_extracts_a_member_that_spans_parts(tmp_path):
+def test_cat_extracts_a_member_that_spans_parts(tmp_path: Path):
     db = setup_archive(tmp_path)
     out = tmp_path / "big.bin"
     assert (
@@ -66,7 +66,9 @@ def test_cat_extracts_a_member_that_spans_parts(tmp_path):
     assert out.read_bytes() == PAYLOAD
 
 
-def test_cat_refuses_an_ambiguous_path(tmp_path, capsys):
+def test_cat_refuses_an_ambiguous_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = tmp_path / "parts"
     source.mkdir()
     data = build_tar([("run/dup.txt", b"first\n"), ("run/dup.txt", b"second\n")])
@@ -106,7 +108,9 @@ def test_cat_refuses_an_ambiguous_path(tmp_path, capsys):
 # ---- T8-1: stdout is never closed -----------------------------------------------
 
 
-def test_cat_to_stdout_leaves_stdout_usable_afterwards(tmp_path, capsys):
+def test_cat_to_stdout_leaves_stdout_usable_afterwards(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Discriminates closing sys.stdout.buffer (T8-1): `with sys.stdout.buffer as
     sink:` closes it on the way out, so a later write to stdout would raise."""
     db = setup_archive(tmp_path)
@@ -137,7 +141,9 @@ def test_cat_to_stdout_leaves_stdout_usable_afterwards(tmp_path, capsys):
 # ---- T8-2: usage errors exit 2, not a traceback ---------------------------------
 
 
-def test_cat_an_unknown_archive_or_a_missing_db_exits_2(tmp_path, capsys):
+def test_cat_an_unknown_archive_or_a_missing_db_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     db = setup_archive(tmp_path)
     capsys.readouterr()
 
@@ -179,7 +185,9 @@ def test_cat_an_unknown_archive_or_a_missing_db_exits_2(tmp_path, capsys):
 # ---- T8-3: --offset is an int, and a bad one is a clean error -------------------
 
 
-def test_cat_an_offset_naming_no_member_exits_2_and_lists_candidates(tmp_path, capsys):
+def test_cat_an_offset_naming_no_member_exits_2_and_lists_candidates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = tmp_path / "parts"
     source.mkdir()
     data = build_tar([("run/dup.txt", b"first\n"), ("run/dup.txt", b"second\n")])
@@ -227,7 +235,7 @@ def test_cat_an_offset_naming_no_member_exits_2_and_lists_candidates(tmp_path, c
         assert str(match["hdr_offset"]) in err
 
 
-def test_cat_with_offset_selects_the_named_duplicate(tmp_path):
+def test_cat_with_offset_selects_the_named_duplicate(tmp_path: Path):
     source = tmp_path / "parts"
     source.mkdir()
     data = build_tar([("run/dup.txt", b"first\n"), ("run/dup.txt", b"second\n")])
@@ -277,7 +285,7 @@ def test_cat_with_offset_selects_the_named_duplicate(tmp_path):
 # ---- T8-4: a stale archive refuses to cat ---------------------------------------
 
 
-def test_cat_refuses_a_stale_archive_and_writes_nothing(tmp_path):
+def test_cat_refuses_a_stale_archive_and_writes_nothing(tmp_path: Path):
     db = setup_archive(tmp_path)
     store = ArchiveStore(db)
     row = store.get("a.tar")
@@ -307,7 +315,9 @@ def test_cat_refuses_a_stale_archive_and_writes_nothing(tmp_path):
 # ---- T8-5: only a regular file may be cat'd -------------------------------------
 
 
-def test_cat_refuses_a_directory_naming_its_type(tmp_path, capsys):
+def test_cat_refuses_a_directory_naming_its_type(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = tmp_path / "parts"
     source.mkdir()
     data = build_tar([("run/adir", b"", {"type": tarfile.DIRTYPE})])
@@ -355,7 +365,9 @@ def test_cat_refuses_a_directory_naming_its_type(tmp_path, capsys):
 
 
 @pytest.mark.unshaped
-def test_cat_fetches_the_member_and_its_anchors_not_the_window(tmp_path, monkeypatch):
+def test_cat_fetches_the_member_and_its_anchors_not_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """With the real CAT_CHUNK (16 MiB) a member this size is one request regardless
     of the window, so CAT_CHUNK is shrunk here to force several fills -- the only way
     the window's floor and doubling would diverge from an exact read at unit-test
@@ -435,7 +447,7 @@ def test_cat_fetches_the_member_and_its_anchors_not_the_window(tmp_path, monkeyp
 # ---- T8-8: a short read is a hard failure ---------------------------------------
 
 
-def test_cat_a_member_running_past_the_end_of_the_parts_exits_1(tmp_path):
+def test_cat_a_member_running_past_the_end_of_the_parts_exits_1(tmp_path: Path):
     """Truncate a part *after* indexing, without re-registering: the DB still believes
     the part is its original size, so LocalRangeReader raises ShortReadError reading past
     what is actually there -- a real exception, not a clean empty chunk.
@@ -492,7 +504,9 @@ def test_cat_a_member_running_past_the_end_of_the_parts_exits_1(tmp_path):
 # ---- T8-9: a missing --out directory is a clean error ---------------------------
 
 
-def test_cat_out_in_a_missing_directory_exits_2(tmp_path, capsys):
+def test_cat_out_in_a_missing_directory_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     db = setup_archive(tmp_path)
     capsys.readouterr()
 
@@ -520,7 +534,7 @@ def test_cat_out_in_a_missing_directory_exits_2(tmp_path, capsys):
 # ---- fix round 1: a multi-chunk --out failure must not touch the target path ----
 
 
-def _setup_for_a_mid_stream_failure(tmp_path, monkeypatch):
+def _setup_for_a_mid_stream_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A member big enough, with CAT_CHUNK shrunk, that a --out cat needs several
     chunks -- and a reader that raises ShortReadError on the *second* read_range call, so
     at least one chunk has already reached `sink.write()` before the failure. Task
@@ -562,7 +576,7 @@ def _setup_for_a_mid_stream_failure(tmp_path, monkeypatch):
 
 
 def test_cat_out_a_multi_chunk_failure_leaves_no_file_at_the_target(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     db, calls = _setup_for_a_mid_stream_failure(tmp_path, monkeypatch)
 
@@ -591,7 +605,7 @@ def test_cat_out_a_multi_chunk_failure_leaves_no_file_at_the_target(
 
 
 def test_cat_out_a_multi_chunk_failure_preserves_an_existing_file(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     db, calls = _setup_for_a_mid_stream_failure(tmp_path, monkeypatch)
 
@@ -664,7 +678,7 @@ class _Swaps(LocalRangeReader):
         return super().read_range(part_idx, at, length)
 
 
-def _single_part_archive(tmp_path, members):
+def _single_part_archive(tmp_path: Path, members):
     source = tmp_path / "parts"
     source.mkdir()
     data = build_tar(members)
@@ -686,7 +700,7 @@ def _single_part_archive(tmp_path, members):
     return db, source
 
 
-def _with_reader(monkeypatch, make):
+def _with_reader(monkeypatch: pytest.MonkeyPatch, make):
     monkeypatch.setattr(
         "dbaudit.cli._reader_for",
         lambda row, archive_set, tokens=None, limiter=None: make(
@@ -706,7 +720,9 @@ AROUND = [
 
 
 @pytest.mark.unshaped
-def test_cat_repairs_a_read_whose_body_is_another_range(tmp_path, monkeypatch):
+def test_cat_repairs_a_read_whose_body_is_another_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     db, _ = _single_part_archive(tmp_path, AROUND)
     readers = []
     _with_reader(
@@ -737,7 +753,7 @@ def test_cat_repairs_a_read_whose_body_is_another_range(tmp_path, monkeypatch):
 @pytest.mark.parametrize("liar", [1, 2, 3])
 @pytest.mark.unshaped
 def test_cat_repairs_a_bad_read_on_any_chunk_of_a_large_member(
-    tmp_path, monkeypatch, liar
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, liar
 ):
     """Several reads per member, and whichever of them comes back wrong, the file is
     right. Before, only the chunk boundaries of the *index* were checked: none."""
@@ -772,7 +788,7 @@ def test_cat_repairs_a_bad_read_on_any_chunk_of_a_large_member(
 
 @pytest.mark.unshaped
 def test_cat_gives_up_on_reads_that_never_line_up_and_writes_nothing(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     db, _ = _single_part_archive(tmp_path, AROUND)
     _with_reader(monkeypatch, lambda d, a: _Swaps(d, a, None))
@@ -798,7 +814,7 @@ def test_cat_gives_up_on_reads_that_never_line_up_and_writes_nothing(
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".cat-")]
 
 
-def test_cat_notices_a_part_that_changed_under_the_index(tmp_path):
+def test_cat_notices_a_part_that_changed_under_the_index(tmp_path: Path):
     """A part rewritten since `index` ran, without a re-register: the stored offsets now
     point at other bytes, and nothing but the anchors can tell."""
     db, source = _single_part_archive(tmp_path, AROUND)
@@ -833,7 +849,7 @@ def test_cat_notices_a_part_that_changed_under_the_index(tmp_path):
 
 @pytest.mark.unshaped
 def test_cat_trusts_an_all_zero_overlap_only_when_two_reads_agree(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Zeros where two reads overlap agree with anything that is also zeros there -- so
     a wrong body of zeros would sail through. Such a read is taken only once a second
@@ -877,7 +893,9 @@ def test_cat_trusts_an_all_zero_overlap_only_when_two_reads_agree(
 
 
 @pytest.mark.unshaped
-def test_cat_checks_a_zero_length_member_against_its_neighbours(tmp_path, monkeypatch):
+def test_cat_checks_a_zero_length_member_against_its_neighbours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     db, _ = _single_part_archive(
         tmp_path,
         [
@@ -913,7 +931,9 @@ def test_cat_checks_a_zero_length_member_against_its_neighbours(tmp_path, monkey
 
 
 @pytest.mark.unshaped
-def test_cat_checks_the_last_member_against_the_terminator(tmp_path, monkeypatch):
+def test_cat_checks_the_last_member_against_the_terminator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     db, _ = _single_part_archive(
         tmp_path, [("run/before.bin", b"b" * 3000), ("run/last.bin", RANDOMISH[:5000])]
     )
@@ -944,7 +964,9 @@ def test_cat_checks_the_last_member_against_the_terminator(tmp_path, monkeypatch
 
 
 @pytest.mark.unshaped
-def test_cat_catches_a_read_that_goes_wrong_partway_through(tmp_path, monkeypatch):
+def test_cat_catches_a_read_that_goes_wrong_partway_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Right at its head, wrong from the middle on: only the trailing anchor -- the next
     member's header, one block past this one -- can see that."""
     db, _ = _single_part_archive(tmp_path, AROUND)
@@ -976,7 +998,9 @@ def test_cat_catches_a_read_that_goes_wrong_partway_through(tmp_path, monkeypatc
 
 
 @pytest.mark.unshaped
-def test_cat_checks_a_bad_read_over_the_terminator(tmp_path, monkeypatch):
+def test_cat_checks_a_bad_read_over_the_terminator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The same failure on the archive's last member, whose trailing anchor is the
     terminator: those bytes must be zeros, not merely present."""
     db, _ = _single_part_archive(
@@ -1011,7 +1035,7 @@ def test_cat_checks_a_bad_read_over_the_terminator(tmp_path, monkeypatch):
 
 @pytest.mark.unshaped
 def test_cat_rejects_another_members_header_before_writing_a_byte(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The likeliest wrong body on a busy account is some other read's range -- and
     reads start on headers, so it opens with a perfectly valid one. Only its size gives
@@ -1092,7 +1116,7 @@ def _random(seed, n):
     return random.Random(seed).randbytes(n)
 
 
-def _split_archive(tmp_path, members, part_size):
+def _split_archive(tmp_path: Path, members, part_size):
     source = tmp_path / "parts"
     source.mkdir()
     write_parts(source, build_tar(members), part_size=part_size)
@@ -1135,7 +1159,7 @@ def _cat(db, member, out):
     )
 
 
-def _planned(monkeypatch, plan):
+def _planned(monkeypatch: pytest.MonkeyPatch, plan):
     readers = []
     _with_reader(
         monkeypatch, lambda d, a: readers.append(_Planned(d, a, plan)) or readers[-1]
@@ -1149,7 +1173,9 @@ def _back_half(reader, at, length, true):
 
 
 @pytest.mark.unshaped
-def test_cat_is_not_fooled_by_another_member_of_the_same_size(tmp_path, monkeypatch):
+def test_cat_is_not_fooled_by_another_member_of_the_same_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """root_params.yaml in two realisations: same size, other bytes. The body of a
     concurrent `cat` of the other one opens on a valid header stating the same size --
     all the anchor used to ask for -- and ends on a valid header too. Its path gives it
@@ -1176,7 +1202,7 @@ def test_cat_is_not_fooled_by_another_member_of_the_same_size(tmp_path, monkeypa
 
 @pytest.mark.unshaped
 def test_cat_is_not_fooled_by_a_long_name_header_of_the_right_size(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A GNU ././@LongLink header states the name's length + 1: for a 200-byte member, a
     body starting on it passes a size check, the name block standing in for the data."""
@@ -1197,7 +1223,9 @@ def test_cat_is_not_fooled_by_a_long_name_header_of_the_right_size(
     assert out.read_bytes() == small
 
 
-def test_cat_refuses_a_part_rewritten_with_the_same_layout(tmp_path, capsys):
+def test_cat_refuses_a_part_rewritten_with_the_same_layout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Re-tarred under the same names and sizes, one file changed: every header is valid
     and the right size, so only the fields the index recorded -- here the mtime -- can
     tell. The file is refused, naming what differs, and nothing is written."""
@@ -1230,7 +1258,7 @@ def test_cat_refuses_a_part_rewritten_with_the_same_layout(tmp_path, capsys):
 
 @pytest.mark.unshaped
 def test_cat_repairs_a_read_wrong_in_its_back_half_before_writing_it(
-    tmp_path, monkeypatch, capsysbinary
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsysbinary
 ):
     """Right at its head, wrong from halfway: on a read that is not the last, only the
     next read can see it, so no read is written until the next has agreed with its tail.
@@ -1269,7 +1297,9 @@ def test_cat_repairs_a_read_wrong_in_its_back_half_before_writing_it(
 
 
 @pytest.mark.unshaped
-def test_cat_does_not_take_zeros_at_a_reads_tail_on_trust(tmp_path, monkeypatch):
+def test_cat_does_not_take_zeros_at_a_reads_tail_on_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The first read replaced by another same-size member's range, both zero where the
     first and second reads meet: the second read's head agrees with the wrong first read,
     because zeros agree with zeros. Agreement on zeros vouches for neither side."""
@@ -1297,7 +1327,9 @@ def test_cat_does_not_take_zeros_at_a_reads_tail_on_trust(tmp_path, monkeypatch)
 
 
 @pytest.mark.unshaped
-def test_cat_does_not_take_fill_at_both_ends_of_a_read_on_trust(tmp_path, monkeypatch):
+def test_cat_does_not_take_fill_at_both_ends_of_a_read_on_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Zeros have a twin: any overlap whose bytes recur elsewhere. Both ends of the
     second read fall in 0xFF fill, and the wrong body is fill from another member -- it
     agrees with both neighbours while its own middle, which is data, is lost."""
@@ -1323,7 +1355,7 @@ def test_cat_does_not_take_fill_at_both_ends_of_a_read_on_trust(tmp_path, monkey
 @pytest.mark.parametrize("extra", [0, 300])
 @pytest.mark.unshaped
 def test_cat_confirms_the_last_read_when_nothing_follows_the_member(
-    tmp_path, monkeypatch, extra
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra
 ):
     """An archive that ends at the member, or within a block of it, offers no block
     after it to vouch for the read's tail -- so the read is taken only once a second
@@ -1361,7 +1393,7 @@ def test_cat_confirms_the_last_read_when_nothing_follows_the_member(
 
 @pytest.mark.unshaped
 def test_cat_checks_every_request_when_a_member_spans_small_parts(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A read over three parts is three requests, and the middle one touches neither end
     of the read -- so no read may cross a part boundary, and a short read straddles each
@@ -1389,7 +1421,7 @@ def test_cat_checks_every_request_when_a_member_spans_small_parts(
 
 @pytest.mark.unshaped
 def test_cat_checks_both_ends_of_a_read_that_meets_a_part_boundary(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The observed failure's own shape -- real content from 777 bytes away -- on the
     part of the first read that lies past a boundary, where the member is zeros around
@@ -1441,7 +1473,9 @@ def test_cat_checks_both_ends_of_a_read_that_meets_a_part_boundary(
 
 
 @pytest.mark.unshaped
-def test_cat_vouches_for_every_request_at_both_ends(tmp_path, monkeypatch):
+def test_cat_vouches_for_every_request_at_both_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The rule behind the boundary handling, checked directly: every request cat makes
     shares its first and its last byte with some other request -- or has them vouched for
     by the member's own headers, or by the block after the member."""
@@ -1470,7 +1504,9 @@ def test_cat_vouches_for_every_request_at_both_ends(tmp_path, monkeypatch):
         assert head and tail, f"request [{lo}, {hi}) is checked by nothing at one end"
 
 
-def test_cat_refuses_a_pax_member_left_in_an_older_index(tmp_path, capsys):
+def test_cat_refuses_a_pax_member_left_in_an_older_index(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Indexes built before pax was refused may still hold pax members, recorded as
     tarfile applied their extended headers. cat reads a member's whole header sequence
     now, so it sees the pax header itself -- and refuses, saying why."""
@@ -1512,7 +1548,9 @@ def test_cat_refuses_a_pax_member_left_in_an_older_index(tmp_path, capsys):
     assert not out.exists()
 
 
-def test_cat_refuses_a_member_the_archive_ends_inside(tmp_path, capsys):
+def test_cat_refuses_a_member_the_archive_ends_inside(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """A truncated archive's last member is indexed at its full size, but its bytes stop
     short. Extracting it must fail, not hand over a short file with exit 0."""
     payload = _random(24, 20_000)
@@ -1547,7 +1585,7 @@ def test_cat_refuses_a_member_the_archive_ends_inside(tmp_path, capsys):
 
 @pytest.mark.unshaped
 def test_cat_reads_repetitive_data_twice_and_distinctive_data_once(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """What the ambiguity rule costs, pinned: a member of zeros is read twice over, one
     of random bytes once. (For a real 16 MiB read the price is 1.6 s per extra request.)"""
@@ -1577,7 +1615,7 @@ def test_cat_reads_repetitive_data_twice_and_distinctive_data_once(
     "where", ["in the block after the member", "in the member's own headers"]
 )
 def test_cat_extracts_a_member_whose_anchor_block_a_part_boundary_splits(
-    tmp_path, monkeypatch, where
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where
 ):
     """Parts need not be a multiple of 512 bytes (`split -b 1GB` is 10**9), so a
     boundary can fall inside a block. Inside the one after the member, or between a long
@@ -1632,7 +1670,9 @@ def _zeros_at(payload_len, start, stop, seed):
 
 
 @pytest.mark.unshaped
-def test_cat_reads_twice_a_read_whose_head_only_zeros_vouch_for(tmp_path, monkeypatch):
+def test_cat_reads_twice_a_read_whose_head_only_zeros_vouch_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The second read begins in zeros, so the first read agreeing with its head proves
     nothing -- and this bad read is zeros where its data begins and right from halfway
     on, so its tail agrees with the third read. Only reading it twice shows it wrong."""
@@ -1660,7 +1700,9 @@ def test_cat_reads_twice_a_read_whose_head_only_zeros_vouch_for(tmp_path, monkey
 
 
 @pytest.mark.unshaped
-def test_cat_holds_a_re_read_to_its_own_head_too(tmp_path, monkeypatch):
+def test_cat_holds_a_re_read_to_its_own_head_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The first read comes back wrong in its back half; two reads of the second agree
     with each other and not with it, so the first is read again -- and that re-read is
     wrong too, everywhere but the bytes it shares with the second. It must meet its own
@@ -1690,7 +1732,7 @@ def test_cat_holds_a_re_read_to_its_own_head_too(tmp_path, monkeypatch):
 
 @pytest.mark.unshaped
 def test_cat_refuses_rather_than_take_a_thrice_served_body_its_neighbour_denies(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """If a server ever served the same wrong body three times running, even a lead of two
     would not be enough: here the second read's tail is zeros, so it is settled -- and
@@ -1722,7 +1764,9 @@ def test_cat_refuses_rather_than_take_a_thrice_served_body_its_neighbour_denies(
 
 
 @pytest.mark.unshaped
-def test_cat_does_not_take_the_terminators_zeros_as_proof(tmp_path, monkeypatch):
+def test_cat_does_not_take_the_terminators_zeros_as_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The archive's last member ends on the terminator: zeros. A read wrong from halfway
     -- zeros from there on -- agrees with that as well as the true one does, so the last
     read is taken only once a second fetch agrees with it."""
@@ -1743,7 +1787,9 @@ def test_cat_does_not_take_the_terminators_zeros_as_proof(tmp_path, monkeypatch)
 
 
 @pytest.mark.unshaped
-def test_cat_rereads_zeros_where_the_index_says_a_header_follows(tmp_path, monkeypatch):
+def test_cat_rereads_zeros_where_the_index_says_a_header_follows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """What follows a member that is not the last is another header. Zeros there are not
     what the index says, so the read is made again -- one request -- rather than merely
     confirmed by two more."""
@@ -1763,7 +1809,9 @@ def test_cat_rereads_zeros_where_the_index_says_a_header_follows(tmp_path, monke
     assert readers[0].calls == 2
 
 
-def test_cat_refuses_a_member_whose_data_moved_under_the_same_header(tmp_path, capsys):
+def test_cat_refuses_a_member_whose_data_moved_under_the_same_header(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """GNU tar gives a 100-character name a long-name block; Python does not. A part
     re-written by the other tool keeps every header field the same and moves the data by
     two blocks -- which only the check on where the data begins can see."""
@@ -1807,7 +1855,7 @@ def test_cat_refuses_a_member_whose_data_moved_under_the_same_header(tmp_path, c
     assert not out.exists()
 
 
-def _cat_across_parts(tmp_path, monkeypatch, part_size):
+def _cat_across_parts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part_size):
     monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 16_384)
     monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 1_024)
     payload = _random(33, 40_000)
@@ -1829,7 +1877,7 @@ def _cat_across_parts(tmp_path, monkeypatch, part_size):
 
 @pytest.mark.unshaped
 def test_cat_reads_each_part_once_when_the_reads_vouch_for_each_other(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Random data across 10,000-byte parts: the member's span [3584, 45056) touches five
     parts, read once each, and a short read straddles each of the four boundaries -- two
@@ -1841,7 +1889,9 @@ def test_cat_reads_each_part_once_when_the_reads_vouch_for_each_other(
 
 
 @pytest.mark.unshaped
-def test_cat_does_not_let_a_few_shared_bytes_vouch_for_a_read(tmp_path, monkeypatch):
+def test_cat_does_not_let_a_few_shared_bytes_vouch_for_a_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Consecutive reads share 4 KiB; shared bytes much fewer -- 64 here -- are too few
     to go on: a read right at both ends and wrong in between agrees with both its
     neighbours. Under 512 bytes, a read is taken only once a second fetch agrees."""
@@ -1891,7 +1941,9 @@ def _twins_back_half(me, twin):
 
 
 @pytest.mark.unshaped
-def test_cat_is_not_fooled_by_a_twins_back_half(tmp_path, monkeypatch):
+def test_cat_is_not_fooled_by_a_twins_back_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Two realisations' out.bin: same size, same header layout. Half of this read is the
     twin's, ending on the header after the twin -- valid, so a check for "some header"
     passed it. What follows this member is run/r01/next.bin, and the index says so."""
@@ -1907,7 +1959,7 @@ def test_cat_is_not_fooled_by_a_twins_back_half(tmp_path, monkeypatch):
 
 @pytest.mark.unshaped
 def test_cat_is_not_fooled_by_a_twins_back_half_on_the_last_of_several_reads(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 2_048)
     monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 512)
@@ -1926,7 +1978,7 @@ def test_cat_is_not_fooled_by_a_twins_back_half_on_the_last_of_several_reads(
 
 @pytest.mark.unshaped
 def test_cat_on_a_partial_index_does_not_take_any_header_after_the_member_on_trust(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A walk stopped early knows nothing past its last member, so what follows the
     member it last recorded could be anything -- and so it vouches for nothing: the read
@@ -1993,7 +2045,7 @@ def test_cat_on_a_partial_index_does_not_take_any_header_after_the_member_on_tru
 
 @pytest.mark.unshaped
 def test_cat_reads_a_long_named_successors_headers_whole_wherever_a_read_ends(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A member followed by one with a GNU long name: what must follow it is three
     blocks, longer than two reads share. A read ending inside those blocks must not leave
@@ -2020,7 +2072,7 @@ def test_cat_reads_a_long_named_successors_headers_whole_wherever_a_read_ends(
 
 @pytest.mark.unshaped
 def test_cat_does_not_let_a_few_zero_bytes_of_a_header_vouch_for_a_request(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A part boundary 48 bytes before a long-named member's data: the request after it
     holds the end of the member's header -- zeros -- and then data. The anchor checks
@@ -2076,7 +2128,7 @@ def test_cat_does_not_let_a_few_zero_bytes_of_a_header_vouch_for_a_request(
 
 @pytest.mark.unshaped
 def test_cat_does_not_let_a_few_bytes_of_the_next_header_vouch_for_a_request(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The mirror image: a part boundary 200 bytes into the header after the member. The
     request before it ends on those 200 bytes -- too few to vouch for it -- so a read
@@ -2124,7 +2176,7 @@ def test_cat_does_not_let_a_few_bytes_of_the_next_header_vouch_for_a_request(
     assert out.read_bytes() == payload
 
 
-def _split_at(tmp_path, data, cuts):
+def _split_at(tmp_path: Path, data, cuts):
     source = tmp_path / "parts"
     source.mkdir()
     edges = [0, *cuts, len(data)]
@@ -2149,7 +2201,7 @@ def _split_at(tmp_path, data, cuts):
 
 @pytest.mark.unshaped
 def test_cat_repairs_a_twins_body_behind_five_bytes_of_header_padding(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Review 5's T3, real constants: a part boundary 5 bytes before the member's data,
     and the request after it replaced by the same shape of range around an equal-size
@@ -2179,7 +2231,7 @@ def test_cat_repairs_a_twins_body_behind_five_bytes_of_header_padding(
 
 @pytest.mark.unshaped
 def test_cat_repairs_a_twins_body_that_ends_one_byte_into_the_next_header(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Review 5's T4: a boundary one byte past the member's padded end, so the request
     before it ends on a single byte of the next header -- 'r', as in every sibling's
@@ -2239,7 +2291,7 @@ class _ServesTwice(LocalRangeReader):
 
 @pytest.mark.unshaped
 def test_cat_does_not_let_a_body_served_twice_outvote_a_right_one(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Review 5's T2: zeros at both of the middle read's overlaps, data only inside it.
     Its first fetch is right, but nothing distinctive vouches for it, so it is fetched
@@ -2281,7 +2333,9 @@ def test_cat_does_not_let_a_body_served_twice_outvote_a_right_one(
     assert out.read_bytes() == body
 
 
-def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(tmp_path, capsys):
+def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Review 5's T5: a walk stopped early can hold rows from a chain whose start nothing
     has confirmed -- here one that began inside a stored tarball and walked its members.
     Its run/x.bin is the tarball's old copy, not the archive's. `cat` refuses such a row
@@ -2355,7 +2409,7 @@ def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(tmp_path, capsys):
 # ---- review 5's mutant-killers: each pins a check no earlier test could see --------------
 
 
-def _clean_log(monkeypatch, db, path):
+def _clean_log(monkeypatch: pytest.MonkeyPatch, db, path):
     """The requests a clean `cat` of ``path`` makes, to aim a bad read at one of them."""
     readers = _planned(monkeypatch, {})
     assert _cat(db, path, Path(db).parent / "clean.bin") == 0
@@ -2363,7 +2417,9 @@ def _clean_log(monkeypatch, db, path):
 
 
 @pytest.mark.unshaped
-def test_cat_bridges_a_part_boundary_exactly_at_the_members_end(tmp_path, monkeypatch):
+def test_cat_bridges_a_part_boundary_exactly_at_the_members_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """`split -b 300G` boundaries are 512-aligned, so a part can end exactly where a
     member does. The read ending there still has its tail checked by a bridge: a body
     right at its head and wrong from halfway is repaired, not written."""
@@ -2392,7 +2448,9 @@ def test_cat_bridges_a_part_boundary_exactly_at_the_members_end(tmp_path, monkey
 
 
 @pytest.mark.unshaped
-def test_cat_expects_the_terminator_after_the_last_member(tmp_path, monkeypatch):
+def test_cat_expects_the_terminator_after_the_last_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The archive's last member is followed by the terminator. A last read whose tail
     is a valid header -- spliced from a same-shape member's range -- must not stand."""
     monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 16_384)
@@ -2424,7 +2482,9 @@ def test_cat_expects_the_terminator_after_the_last_member(tmp_path, monkeypatch)
 
 
 @pytest.mark.unshaped
-def test_cat_tells_two_copies_of_a_path_apart_by_owner_and_mode(tmp_path, monkeypatch):
+def test_cat_tells_two_copies_of_a_path_apart_by_owner_and_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """`tar -r` after a chown: the same path, size and mtime twice, owners and modes
     differ. A body from the other copy's range is caught by the header anchor."""
     a, b = _random(7, 1_359), _random(8, 1_359)
@@ -2468,7 +2528,7 @@ def test_cat_tells_two_copies_of_a_path_apart_by_owner_and_mode(tmp_path, monkey
 
 @pytest.mark.parametrize("part", [300, 511, 700, 1_000])
 def test_cat_extracts_every_member_across_parts_smaller_than_the_overlap(
-    tmp_path, monkeypatch, part
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part
 ):
     """A bridge across a boundary must stop at the next one: parts smaller than the
     bytes two reads share are otherwise straddled twice by one bridge."""
@@ -2503,7 +2563,9 @@ def test_cat_extracts_every_member_across_parts_smaller_than_the_overlap(
 
 
 @pytest.mark.unshaped
-def test_cat_holds_a_re_read_last_read_to_its_own_head(tmp_path, monkeypatch):
+def test_cat_holds_a_re_read_last_read_to_its_own_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The last read's tail fails the check after it; its re-read comes back wrong at its
     head -- a second bad read. That re-read must not replace it unless its head agrees
     with the read before."""
@@ -2535,7 +2597,7 @@ def test_cat_holds_a_re_read_last_read_to_its_own_head(tmp_path, monkeypatch):
 
 @pytest.mark.unshaped
 def test_cat_checks_a_settled_last_read_against_the_read_before_it(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The archive's last member ends on the terminator's zeros, so its last read is
     settled. A wrong body served three times running wins that vote -- and must still
@@ -2566,7 +2628,7 @@ def test_cat_checks_a_settled_last_read_against_the_read_before_it(
 
 @pytest.mark.unshaped
 def test_cat_rereads_a_header_where_the_terminator_belongs_even_served_thrice(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """After the archive's last member come the terminator's zeros, so a header there is
     wrong on its face and the read is made again. Were it only confirmed by vote, the

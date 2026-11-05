@@ -3,6 +3,7 @@ and an archive dropped so that the next run walks it from scratch."""
 
 import shutil
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -12,7 +13,7 @@ from dbaudit.lock import InstanceLock
 from tests.archive_fakes import World, build_tar, members, write_parts
 
 
-def three(tmp_path, monkeypatch):
+def three(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     world = World(tmp_path)
     world.add("/R/a", "one.tar", build_tar(members(5, 1)))
     world.add("/R/b", "two.tar", build_tar(members(30, 2)), part_size=40_000)
@@ -72,7 +73,7 @@ def manifest(db):
 
 
 def test_import_copies_every_archive_under_new_ids_with_everything_recorded(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     world, audit = three(tmp_path, monkeypatch)
     source, target = str(tmp_path / "source.db"), str(tmp_path / "target.db")
@@ -136,7 +137,7 @@ def test_import_copies_every_archive_under_new_ids_with_everything_recorded(
 
 
 def test_import_replaces_an_archive_of_the_same_content_and_everything_it_held(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     _world, audit = three(tmp_path, monkeypatch)
     source, target = str(tmp_path / "source.db"), str(tmp_path / "target.db")
@@ -198,7 +199,7 @@ def test_import_replaces_an_archive_of_the_same_content_and_everything_it_held(
 
 
 def test_an_imported_mid_walk_archive_finishes_with_the_members_a_fresh_walk_records(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     _world, audit = three(tmp_path, monkeypatch)
     source, target, fresh = (
@@ -260,7 +261,9 @@ def test_an_imported_mid_walk_archive_finishes_with_the_members_a_fresh_walk_rec
     assert members_of(target) == members_of(fresh)
 
 
-def test_import_refuses_while_either_database_is_held(tmp_path, monkeypatch, capsys):
+def test_import_refuses_while_either_database_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     _world, audit = three(tmp_path, monkeypatch)
     source, target = str(tmp_path / "source.db"), str(tmp_path / "target.db")
     assert run(source, audit) == 0
@@ -271,7 +274,9 @@ def test_import_refuses_while_either_database_is_held(tmp_path, monkeypatch, cap
     assert not (tmp_path / "target.db").exists() or archives(target) == {}
 
 
-def test_import_refuses_databases_whose_tables_differ(tmp_path, monkeypatch, capsys):
+def test_import_refuses_databases_whose_tables_differ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     _world, audit = three(tmp_path, monkeypatch)
     source, target = str(tmp_path / "source.db"), str(tmp_path / "target.db")
     assert run(source, audit) == 0
@@ -303,7 +308,7 @@ def test_import_refuses_databases_whose_tables_differ(tmp_path, monkeypatch, cap
 
 @pytest.mark.parametrize("which", ["missing", "same", "not an archive database"])
 def test_import_from_nothing_or_itself_or_into_another_kind_is_a_usage_error(
-    tmp_path, monkeypatch, which
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which
 ):
     _world, audit = three(tmp_path, monkeypatch)
     target = str(tmp_path / "target.db")
@@ -327,7 +332,7 @@ def test_import_from_nothing_or_itself_or_into_another_kind_is_a_usage_error(
 
 
 def test_forget_drops_an_archive_so_the_next_run_walks_it_from_scratch(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     world, audit = three(tmp_path, monkeypatch)
     db = str(tmp_path / "archives.db")
@@ -375,7 +380,7 @@ def test_forget_drops_an_archive_so_the_next_run_walks_it_from_scratch(
 
 
 def test_forget_refuses_an_archive_that_is_not_there_and_a_held_database(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     _world, audit = three(tmp_path, monkeypatch)
     db = str(tmp_path / "archives.db")
@@ -389,7 +394,7 @@ def test_forget_refuses_an_archive_that_is_not_there_and_a_held_database(
 
 @pytest.mark.parametrize("imported", ["newer", "older"])
 def test_import_leaves_only_the_latest_content_of_one_name_in_one_folder(
-    tmp_path, imported
+    tmp_path: Path, imported
 ):
     """As register does: of the archives of one name in one folder, the latest registered
     is what the folder holds, and other content there is stale -- whichever database held
@@ -431,7 +436,9 @@ def test_import_leaves_only_the_latest_content_of_one_name_in_one_folder(
     assert latest["state"] != "stale"
 
 
-def test_import_and_forget_take_the_lock_a_run_was_given(tmp_path, monkeypatch):
+def test_import_and_forget_take_the_lock_a_run_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """A run started with --lock PATH holds PATH, not DB.lock: import and forget take
     --lock too, so they wait for that run rather than write beside it."""
     _world, audit = three(tmp_path, monkeypatch)
@@ -462,7 +469,7 @@ def test_import_and_forget_take_the_lock_a_run_was_given(tmp_path, monkeypatch):
         )
 
 
-def test_import_keeps_the_live_content_of_a_folder_that_went_back(tmp_path):
+def test_import_keeps_the_live_content_of_a_folder_that_went_back(tmp_path: Path):
     """A fourth part appears, then goes again: X, then Y, then X once more. register leaves
     X live and Y stale, though X was registered first; an import must agree."""
     folder = tmp_path / "parts"
@@ -503,7 +510,9 @@ def test_import_keeps_the_live_content_of_a_folder_that_went_back(tmp_path):
     assert states[3] != "stale" and states[4] == "stale"
 
 
-def test_import_waits_for_a_source_run_started_with_its_own_lock(tmp_path, monkeypatch):
+def test_import_waits_for_a_source_run_started_with_its_own_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     _world, audit = three(tmp_path, monkeypatch)
     db, other = str(tmp_path / "a.db"), str(tmp_path / "b.db")
     assert run(db, audit) == 0 and run(other, audit) == 0
@@ -518,7 +527,7 @@ def test_import_waits_for_a_source_run_started_with_its_own_lock(tmp_path, monke
 
 
 def test_a_lock_in_a_folder_that_does_not_exist_is_a_usage_error(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Said plainly, not as a traceback from opening the lock file."""
     _world, audit = three(tmp_path, monkeypatch)

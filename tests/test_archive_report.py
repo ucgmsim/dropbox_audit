@@ -14,6 +14,9 @@ import csv
 import tarfile
 import time as time_mod
 from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
 
 from dbaudit.archive.report import summary, write_csv
 from dbaudit.archive.store import ArchiveStore
@@ -27,7 +30,7 @@ MEMBERS = (
 )
 
 
-def indexed(tmp_path):
+def indexed(tmp_path: Path):
     source = tmp_path / "parts"
     source.mkdir()
     write_parts(source, build_tar(MEMBERS), part_size=8192)
@@ -50,7 +53,7 @@ def indexed(tmp_path):
 
 
 def build_and_index(
-    tmp_path, members, part_size=8192, name="a.tar", db_name="archives.db"
+    tmp_path: Path, members, part_size=8192, name="a.tar", db_name="archives.db"
 ):
     """Like `indexed`, but with a caller-supplied member list."""
     source = tmp_path / "parts"
@@ -68,7 +71,7 @@ def build_and_index(
 # ---- the brief's own tests (Step 1) ----------------------------------------------
 
 
-def test_summary_rolls_up_by_directory_and_extension(tmp_path):
+def test_summary_rolls_up_by_directory_and_extension(tmp_path: Path):
     store, archive_id, _ = indexed(tmp_path)
     result = summary(store, archive_id)
     assert result["n_members"] == len(MEMBERS)
@@ -79,7 +82,7 @@ def test_summary_rolls_up_by_directory_and_extension(tmp_path):
     assert result["largest"][0]["size"] == 2000
 
 
-def test_export_writes_the_manifest_and_rollups(tmp_path):
+def test_export_writes_the_manifest_and_rollups(tmp_path: Path):
     store, archive_id, _db = indexed(tmp_path)
     out = tmp_path / "exports"
     write_csv(store, archive_id, out)
@@ -91,7 +94,9 @@ def test_export_writes_the_manifest_and_rollups(tmp_path):
 # ---- T9-7: unknown --archive or a missing --db exit 2, for both commands --------
 
 
-def test_report_and_export_on_unknown_archive_or_missing_db_exit_2(tmp_path, capsys):
+def test_report_and_export_on_unknown_archive_or_missing_db_exit_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     _store, _archive_id, db = indexed(tmp_path)
     capsys.readouterr()
 
@@ -142,7 +147,7 @@ def test_report_and_export_on_unknown_archive_or_missing_db_exit_2(tmp_path, cap
 
 
 def test_report_on_a_partially_walked_archive_warns_before_the_figures(
-    tmp_path, capsys
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
     # A deliberately interrupted walk: real, non-zero figures attached to a state that
     # is not 'complete' -- the exact shape of Task 11's smoke test (a manifest that is
@@ -193,7 +198,9 @@ def test_report_on_a_partially_walked_archive_warns_before_the_figures(
     assert warn_at < figures_at
 
 
-def test_report_on_a_stale_archive_says_so(tmp_path, capsys):
+def test_report_on_a_stale_archive_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     store, archive_id, db = indexed(tmp_path)
     store.mark_stale(archive_id, "parts changed underneath the index")
     capsys.readouterr()
@@ -211,7 +218,9 @@ def test_report_on_a_stale_archive_says_so(tmp_path, capsys):
 # ---- T9-9: a registered-but-unindexed archive reports cleanly -------------------
 
 
-def test_report_on_an_unindexed_archive_says_so_and_returns_0(tmp_path, capsys):
+def test_report_on_an_unindexed_archive_says_so_and_returns_0(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = tmp_path / "parts"
     source.mkdir()
     write_parts(source, build_tar(MEMBERS), part_size=8192)
@@ -247,7 +256,9 @@ def test_report_on_an_unindexed_archive_says_so_and_returns_0(tmp_path, capsys):
 # ---- T9-3: mtime_span is UTC, not the process's local timezone ------------------
 
 
-def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(tmp_path, monkeypatch):
+def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Discriminates T9-3. `datetime.fromtimestamp(ts)` without `tz=utc` silently reads
     the epoch second through the process's local timezone; `utcfromtimestamp` would
     instead fail the whole suite outright (pytest.ini turns its DeprecationWarning into
@@ -282,7 +293,7 @@ def test_mtime_span_is_utc_even_when_the_local_timezone_is_not(tmp_path, monkeyp
 # ---- T9-4: owners and types cover directories, symlinks and two owners ----------
 
 
-def test_owners_and_types_report_directories_symlinks_and_two_owners(tmp_path):
+def test_owners_and_types_report_directories_symlinks_and_two_owners(tmp_path: Path):
     members = [
         ("run/file_a.bin", b"a" * 100, {"uname": "alice", "gname": "teamA"}),
         ("run/file_b.bin", b"b" * 200, {"uname": "alice", "gname": "teamA"}),
@@ -319,7 +330,7 @@ def test_owners_and_types_report_directories_symlinks_and_two_owners(tmp_path):
 # ---- T9-6: a comma-and-quote path round-trips through manifest.csv --------------
 
 
-def test_manifest_csv_round_trips_a_path_with_comma_and_quote(tmp_path):
+def test_manifest_csv_round_trips_a_path_with_comma_and_quote(tmp_path: Path):
     tricky_name = 'odd, name "with quotes".bin'
     members = [("run/" + tricky_name, b"z" * 42)]
     store, archive_id, _ = build_and_index(tmp_path, members)
@@ -336,7 +347,7 @@ def test_manifest_csv_round_trips_a_path_with_comma_and_quote(tmp_path):
 # ---- T9-5: by_depth groups by the first 1, 2 and 3 path components --------------
 
 
-def test_by_depth_groups_by_first_1_2_3_path_components(tmp_path):
+def test_by_depth_groups_by_first_1_2_3_path_components(tmp_path: Path):
     members = [
         ("run/fault_a/rel01/output/seismo.bin", b"x" * 1000),
         ("run/fault_a/rel02/output/seismo.bin", b"y" * 500),
@@ -366,7 +377,7 @@ def test_by_depth_groups_by_first_1_2_3_path_components(tmp_path):
 # ---- T9-4: --top limits `largest` ------------------------------------------------
 
 
-def test_top_limits_the_largest_list(tmp_path):
+def test_top_limits_the_largest_list(tmp_path: Path):
     store, archive_id, _ = indexed(tmp_path)  # sizes: 1000 x5, 2000 x3, 6 x1
     result = summary(store, archive_id, top=2)
     assert len(result["largest"]) == 2
@@ -376,7 +387,9 @@ def test_top_limits_the_largest_list(tmp_path):
 # ---- T9-6: export creates a missing --out dir and names what it wrote -----------
 
 
-def test_export_command_creates_the_out_dir_and_names_what_it_wrote(tmp_path, capsys):
+def test_export_command_creates_the_out_dir_and_names_what_it_wrote(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     _store, _archive_id, db = indexed(tmp_path)
     out_dir = tmp_path / "new_export_dir"
     assert not out_dir.exists()
@@ -530,7 +543,7 @@ EXPECTED_BY_DIR_CSV = (
 EXPECTED_BY_EXTENSION_CSV = "extension,count,bytes\nbin,10,14000\ntxt,1,6\n(none),1,0\n"
 
 
-def test_summary_and_csv_output_is_unchanged_by_the_streaming_refactor(tmp_path):
+def test_summary_and_csv_output_is_unchanged_by_the_streaming_refactor(tmp_path: Path):
     """Pins summary()/write_csv() to the exact output captured from the pre-fix
     implementation. Discriminates any behavioural drift from switching `members`
     reads from one `fetchall()` to a streamed, column-limited, transaction-scoped
@@ -552,7 +565,7 @@ def test_summary_and_csv_output_is_unchanged_by_the_streaming_refactor(tmp_path)
 
 
 def test_summary_and_write_csv_stream_members_instead_of_materialising_them(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Row-count proof, not a functional one -- the fix-round ruling is explicit that
     the honest check here is about *how much* a call reads, not what it returns
@@ -623,7 +636,7 @@ def test_summary_and_write_csv_stream_members_instead_of_materialising_them(
     )
 
 
-def test_largest_query_uses_the_size_index_not_a_full_scan(tmp_path):
+def test_largest_query_uses_the_size_index_not_a_full_scan(tmp_path: Path):
     """Confirms `summary()`'s own `largest` query is answered by the `members_size`
     index `build_indexes` creates, not a full scan -- the specific, measured claim in
     `summary()`'s docstring (~0.0001 s against 300,000 rows including a worst-case
@@ -655,7 +668,7 @@ def test_largest_query_uses_the_size_index_not_a_full_scan(tmp_path):
     assert "members_size" in plan_text
 
 
-def test_summary_and_write_csv_open_one_explicit_read_transaction(tmp_path):
+def test_summary_and_write_csv_open_one_explicit_read_transaction(tmp_path: Path):
     """Confirms `summary()`/`write_csv()` genuinely wrap their reads in a `BEGIN`/
     `COMMIT` pair (`ArchiveStore.read_transaction`), traced from the real connection,
     rather than relying on "reads everything in one call" being an accidental
@@ -700,7 +713,7 @@ def test_summary_and_write_csv_open_one_explicit_read_transaction(tmp_path):
 
 
 def test_export_warns_on_a_non_complete_archive_but_not_on_a_complete_one(
-    tmp_path, capsys
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
     store, archive_id, db = indexed(tmp_path)
     capsys.readouterr()
@@ -746,7 +759,7 @@ def test_export_warns_on_a_non_complete_archive_but_not_on_a_complete_one(
 
 
 def test_export_warns_on_a_partially_walked_archive_before_the_wrote_lines(
-    tmp_path, capsys
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
     members = [(f"run/file{i:02d}.bin", b"x" * 100) for i in range(40)]
     source = tmp_path / "parts"

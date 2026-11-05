@@ -2,6 +2,7 @@
 
 import calendar
 import hashlib
+from pathlib import Path
 
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.store import Store
@@ -38,7 +39,7 @@ def folder(path):
     }
 
 
-def listing(tmp_path, *entries, finished=True) -> Store:
+def listing(tmp_path: Path, *entries, finished=True) -> Store:
     """An audit database of `entries` under the root /R, its crawl finished at LISTED."""
     store = Store(tmp_path / "audit.db")
     store.init_schema()
@@ -69,7 +70,7 @@ def archive(name, folder, parts, members, state="complete") -> dict:
     }
 
 
-def archive_index(tmp_path, *archives, name="archives.db") -> str:
+def archive_index(tmp_path: Path, *archives, name="archives.db") -> str:
     """An archive index database holding `archives`, flushed and closed."""
     path = str(tmp_path / name)
     store = ArchiveStore(path)

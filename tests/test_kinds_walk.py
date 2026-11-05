@@ -2,6 +2,7 @@ import calendar
 import hashlib
 import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -37,14 +38,14 @@ def by_kind(found):
     return out
 
 
-def test_a_loose_file_gets_its_kind_folder_and_own_date(tmp_path):
+def test_a_loose_file_gets_its_kind_folder_and_own_date(tmp_path: Path):
     store = listing(
         tmp_path, file("/R/v01p0/vp3dfile.p", 100, modified="2024-01-01T00:00:00Z")
     )
     assert rows(store) == [(dir_of(store, "/R/v01p0"), "vm", 100, LOOSE, T[2024])]
 
 
-def test_a_copy_takes_the_date_of_its_oldest_copy(tmp_path):
+def test_a_copy_takes_the_date_of_its_oldest_copy(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/a/x.txt", 5, "x", "2020-01-01T00:00:00Z"),
@@ -53,7 +54,7 @@ def test_a_copy_takes_the_date_of_its_oldest_copy(tmp_path):
     assert [date for *_, date in rows(store)] == [T[2020], T[2020]]
 
 
-def test_a_tarball_is_shared_over_its_listed_members_by_size(tmp_path):
+def test_a_tarball_is_shared_over_its_listed_members_by_size(tmp_path: Path):
     store = listing(tmp_path, file("/R/runs/a.tar", 900, "A"))
     index = index_file(
         tmp_path,
@@ -74,7 +75,7 @@ def test_a_tarball_is_shared_over_its_listed_members_by_size(tmp_path):
     ]
 
 
-def test_each_part_and_copy_of_a_tarball_shares_out_its_own_bytes(tmp_path):
+def test_each_part_and_copy_of_a_tarball_shares_out_its_own_bytes(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/t/a.tar.aa", 600, "P1"),
@@ -106,7 +107,7 @@ def test_each_part_and_copy_of_a_tarball_shares_out_its_own_bytes(tmp_path):
     ],
 )
 def test_a_listing_is_trusted_when_finished_or_at_least_half_the_archive(
-    tmp_path, state, listed, how
+    tmp_path: Path, state, listed, how
 ):
     store = listing(
         tmp_path,
@@ -130,7 +131,7 @@ def test_a_listing_is_trusted_when_finished_or_at_least_half_the_archive(
         ]
 
 
-def test_an_archive_with_no_file_members_is_judged_by_name(tmp_path):
+def test_an_archive_with_no_file_members_is_judged_by_name(tmp_path: Path):
     store = listing(tmp_path, file("/R/t/faultsz03_bb.tar", 1000, "A"))
     index = index_file(
         tmp_path,
@@ -144,7 +145,9 @@ def test_an_archive_with_no_file_members_is_judged_by_name(tmp_path):
     assert by_kind(rows(store, index=index)) == {("wf_bin_bb", BY_NAME): 1000}
 
 
-def test_a_trusted_row_beats_an_untrusted_one_and_the_latest_trusted_row_wins(tmp_path):
+def test_a_trusted_row_beats_an_untrusted_one_and_the_latest_trusted_row_wins(
+    tmp_path: Path,
+):
     store = listing(tmp_path, file("/R/t/a.tar", 1000, "A"))
     part = [("a.tar", 1000, "A")]
     index = index_file(
@@ -156,7 +159,7 @@ def test_a_trusted_row_beats_an_untrusted_one_and_the_latest_trusted_row_wins(tm
     assert by_kind(rows(store, index=index)) == {("src", MEMBERS): 1000}
 
 
-def test_a_finished_listing_beats_a_stale_one_registered_later(tmp_path):
+def test_a_finished_listing_beats_a_stale_one_registered_later(tmp_path: Path):
     # A stale row lists the archive as it was, before a part went: the finished walk of the
     # parts still there shows what they hold.
     store = listing(tmp_path, file("/R/t/a.tar.aa", 1000, "A"))
@@ -180,14 +183,14 @@ def test_a_finished_listing_beats_a_stale_one_registered_later(tmp_path):
     assert by_kind(rows(store, index=index)) == {("src", MEMBERS): 1000}
 
 
-def test_a_tarball_the_index_does_not_know_is_judged_by_name(tmp_path):
+def test_a_tarball_the_index_does_not_know_is_judged_by_name(tmp_path: Path):
     store = listing(tmp_path, file("/R/t/faultsz03_lf.tar", 1000))
     assert by_kind(rows(store)) == pytest.approx(
         {(kind, BY_NAME): 1000 * w for kind, w in LF_SPLIT.items()}
     )
 
 
-def test_archives_the_index_does_not_know_are_dated_by_their_own_time(tmp_path):
+def test_archives_the_index_does_not_know_are_dated_by_their_own_time(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/t/big.tar.aa", 5, "A", "2025-01-01T00:00:00Z"),
@@ -201,7 +204,7 @@ def test_archives_the_index_does_not_know_are_dated_by_their_own_time(tmp_path):
     ]
 
 
-def test_split_parts_the_index_does_not_know_count_as_tarred(tmp_path):
+def test_split_parts_the_index_does_not_know_count_as_tarred(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/t/big.tar.partaa", 1),
@@ -216,7 +219,7 @@ def test_split_parts_the_index_does_not_know_count_as_tarred(tmp_path):
     }
 
 
-def test_kept_velocity_models_are_labelled_apart(tmp_path):
+def test_kept_velocity_models_are_labelled_apart(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/Scratch/Proj00001/v01p0/vp3dfile.p", 3),
@@ -226,7 +229,9 @@ def test_kept_velocity_models_are_labelled_apart(tmp_path):
     assert by_kind(rows(store, rules)) == {("vm_kept", LOOSE): 3, ("vm", LOOSE): 5}
 
 
-def test_a_subtree_walks_only_the_files_below_it_but_dates_by_copies_anywhere(tmp_path):
+def test_a_subtree_walks_only_the_files_below_it_but_dates_by_copies_anywhere(
+    tmp_path: Path,
+):
     store = listing(
         tmp_path,
         file("/R/a/x.txt", 1, "x", "2025-01-01T00:00:00Z"),
@@ -238,7 +243,7 @@ def test_a_subtree_walks_only_the_files_below_it_but_dates_by_copies_anywhere(tm
     ]
 
 
-def test_an_archive_index_must_be_one(tmp_path):
+def test_an_archive_index_must_be_one(tmp_path: Path):
     store = listing(tmp_path)
     with pytest.raises(KindsError, match="holds no archive index"):
         archive_index(store.path)
@@ -246,7 +251,7 @@ def test_an_archive_index_must_be_one(tmp_path):
         archive_index(str(tmp_path / "missing.db"))
 
 
-def test_an_archive_index_may_sit_at_a_path_with_odd_characters(tmp_path):
+def test_an_archive_index_may_sit_at_a_path_with_odd_characters(tmp_path: Path):
     store = listing(tmp_path, file("/R/t/a.tar", 10, "A"))
     index = index_file(
         tmp_path,
@@ -256,7 +261,7 @@ def test_an_archive_index_may_sit_at_a_path_with_odd_characters(tmp_path):
     assert by_kind(rows(store, index=index)) == {("src", MEMBERS): 10}
 
 
-def test_a_walk_leaves_both_databases_as_they_were(tmp_path):
+def test_a_walk_leaves_both_databases_as_they_were(tmp_path: Path):
     store = listing(tmp_path, file("/R/t/a.tar", 10, "A"), file("/R/x.txt", 1))
     index = index_file(
         tmp_path,
@@ -325,7 +330,7 @@ def test_files_with_no_bytes_leave_no_mark():
     assert list(t.months) == [("vm", "2020-01")]
 
 
-def test_a_part_hash_that_is_not_hex_is_passed_over(tmp_path):
+def test_a_part_hash_that_is_not_hex_is_passed_over(tmp_path: Path):
     store = listing(tmp_path, file("/R/t/faultsz03_bb.tar", 10, "A"))
     index = index_file(
         tmp_path,

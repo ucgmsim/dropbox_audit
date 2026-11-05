@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -110,7 +111,7 @@ def test_our_content_hash_is_the_one_dropbox_computed(live):
     )
 
 
-def test_cat_extracts_a_member_matching_the_downloaded_copy(live, tmp_path):
+def test_cat_extracts_a_member_matching_the_downloaded_copy(live, tmp_path: Path):
     """Task 8 step 4 in miniature: retrieve one real member from Dropbox by offset,
     and check it byte for byte against the same member pulled from the copy already
     downloaded for this module with `tarfile`. Costs one or two `files/download`

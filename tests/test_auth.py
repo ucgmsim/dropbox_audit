@@ -255,7 +255,7 @@ class _Answer:
 
 @pytest.mark.parametrize("status", [429, 500, 503])
 def test_an_account_lookup_dropbox_cannot_answer_now_is_not_dead_credentials(
-    monkeypatch, status
+    monkeypatch: pytest.MonkeyPatch, status
 ):
     """A rate limit or a server error at the start of a run says nothing about the token:
     called dead credentials, it stopped the run within seconds."""
@@ -267,7 +267,9 @@ def test_an_account_lookup_dropbox_cannot_answer_now_is_not_dead_credentials(
     assert not isinstance(raised.value, AuthError)
 
 
-def test_an_account_lookup_that_refuses_the_token_is_an_auth_error(monkeypatch):
+def test_an_account_lookup_that_refuses_the_token_is_an_auth_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from dbaudit import auth
 
     monkeypatch.setattr("requests.post", lambda *args, **kwargs: _Answer(401))

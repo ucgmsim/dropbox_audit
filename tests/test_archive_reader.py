@@ -1,5 +1,6 @@
 import itertools
 import random
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,7 @@ from dbaudit.archive.reader import LEAD_STEP, SHAPES, ConcatFile, LocalRangeRead
 from tests.archive_fakes import write_parts
 
 
-def test_reads_across_parts_return_the_original_bytes(tmp_path):
+def test_reads_across_parts_return_the_original_bytes(tmp_path: Path):
     data = bytes(range(256)) * 40  # 10,240 bytes
     archive = write_parts(tmp_path, data, part_size=1024)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
@@ -18,7 +19,7 @@ def test_reads_across_parts_return_the_original_bytes(tmp_path):
     assert handle.read(len(data)) == data
 
 
-def test_small_hops_coalesce_into_few_requests(tmp_path):
+def test_small_hops_coalesce_into_few_requests(tmp_path: Path):
     """A run of small members must not cost one round trip per header."""
     archive = write_parts(tmp_path, b"x" * 200_000, part_size=100_000)
     reader = LocalRangeReader(tmp_path, archive)
@@ -29,7 +30,7 @@ def test_small_hops_coalesce_into_few_requests(tmp_path):
     assert reader.requests <= 8
 
 
-def test_long_jumps_fetch_only_the_minimum(tmp_path):
+def test_long_jumps_fetch_only_the_minimum(tmp_path: Path):
     """A run of large members must not drag a full window behind each header. (Shape 0
     has no lead, so the bytes counted are the windows' alone.)"""
     archive = write_parts(tmp_path, b"y" * 400_000, part_size=400_000)
@@ -42,7 +43,7 @@ def test_long_jumps_fetch_only_the_minimum(tmp_path):
     assert reader.bytes_fetched == 8 * 1024
 
 
-def test_reading_past_the_end_returns_what_exists(tmp_path):
+def test_reading_past_the_end_returns_what_exists(tmp_path: Path):
     archive = write_parts(tmp_path, b"z" * 100, part_size=100)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
     handle.seek(90)
@@ -50,14 +51,14 @@ def test_reading_past_the_end_returns_what_exists(tmp_path):
     assert handle.tell() == 100
 
 
-def test_unbounded_read_is_refused(tmp_path):
+def test_unbounded_read_is_refused(tmp_path: Path):
     archive = write_parts(tmp_path, b"z" * 100, part_size=100)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
     with pytest.raises(ValueError):
         handle.read(-1)
 
 
-def test_the_default_window_bounds_are_the_measured_ones(tmp_path):
+def test_the_default_window_bounds_are_the_measured_ones(tmp_path: Path):
     """64 KiB to 16 MiB, from Task 1: a request costs 1.60 s + 0.044 s/MiB, so the cap
     is generous and the floor is small because it is paid on every jump."""
     archive = write_parts(tmp_path, b"z" * 100, part_size=100)
@@ -66,7 +67,7 @@ def test_the_default_window_bounds_are_the_measured_ones(tmp_path):
     assert handle._window_max == 16 << 20
 
 
-def test_seek_from_end_and_current(tmp_path):
+def test_seek_from_end_and_current(tmp_path: Path):
     archive = write_parts(tmp_path, bytes(range(100)), part_size=40)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive))
     handle.seek(-10, 2)
@@ -115,7 +116,7 @@ def _replay(handle):
     return seen
 
 
-def test_what_a_read_returns_does_not_depend_on_the_shape(tmp_path):
+def test_what_a_read_returns_does_not_depend_on_the_shape(tmp_path: Path):
     """Bytes, the cached span and the fill count are what they were before shapes, in
     every shape: only the requests change."""
     archive = write_parts(tmp_path, DATA, part_size=100_000)
@@ -138,7 +139,7 @@ def test_what_a_read_returns_does_not_depend_on_the_shape(tmp_path):
         assert run(shape) == unshaped
 
 
-def test_a_re_read_after_a_drop_starts_somewhere_else(tmp_path):
+def test_a_re_read_after_a_drop_starts_somewhere_else(tmp_path: Path):
     """Each drop moves the request's start by 40,503 or 25,033 bytes -- never by one,
     which the block-edge guard could undo by moving one of them back a byte."""
     archive = write_parts(tmp_path, DATA, part_size=len(DATA))
@@ -154,7 +155,7 @@ def test_a_re_read_after_a_drop_starts_somewhere_else(tmp_path):
     assert {abs(b - a) for a, b in itertools.pairwise(starts)} == {25_033, 40_503}
 
 
-def test_a_re_read_at_a_parts_first_byte_asks_for_a_different_length(tmp_path):
+def test_a_re_read_at_a_parts_first_byte_asks_for_a_different_length(tmp_path: Path):
     """A lead cannot reach back past the start of its part, so there the start stays put
     and only the length asked for past the end changes."""
     archive = write_parts(tmp_path, DATA, part_size=100_000)
@@ -177,7 +178,9 @@ def test_a_re_read_at_a_parts_first_byte_asks_for_a_different_length(tmp_path):
     ]
 
 
-def test_a_re_read_crossing_into_the_next_part_asks_it_for_a_different_length(tmp_path):
+def test_a_re_read_crossing_into_the_next_part_asks_it_for_a_different_length(
+    tmp_path: Path,
+):
     """A read that crosses a part boundary is two requests, and the second starts at the
     next part's first byte whatever the shape: it is the end that moves."""
     archive = write_parts(tmp_path, DATA, part_size=100_000)
@@ -200,7 +203,7 @@ def test_a_re_read_crossing_into_the_next_part_asks_it_for_a_different_length(tm
     ]
 
 
-def test_a_lead_never_leaves_its_part_or_adds_a_request(tmp_path):
+def test_a_lead_never_leaves_its_part_or_adds_a_request(tmp_path: Path):
     archive = write_parts(tmp_path, DATA, part_size=100_000)
     for pos in (0, 95_000, 99_000, 100_005, 199_990, 299_500):
         wanted = archive.slices(pos, min(4096, len(DATA) - pos))
@@ -221,7 +224,7 @@ def test_a_lead_never_leaves_its_part_or_adds_a_request(tmp_path):
             assert reader.bytes_fetched == sum(length for _, _, length in reader.asked)
 
 
-def test_a_part_smaller_than_a_request_is_asked_for_whole_every_time(tmp_path):
+def test_a_part_smaller_than_a_request_is_asked_for_whole_every_time(tmp_path: Path):
     """Where shapes stop: a request that already runs from a part's first byte to its
     last cannot move or grow without asking a second part, so it is the same every time.
     In practice only a small last part is like this."""
@@ -235,7 +238,9 @@ def test_a_part_smaller_than_a_request_is_asked_for_whole_every_time(tmp_path):
     assert reader.asked == [(1, 0, 3000)] * 3
 
 
-def test_a_new_reader_starts_at_a_random_shape_unless_given_one(tmp_path, monkeypatch):
+def test_a_new_reader_starts_at_a_random_shape_unless_given_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     archive = write_parts(tmp_path, b"z" * 100, part_size=100)
     drawn = []
     monkeypatch.setattr(
@@ -247,7 +252,7 @@ def test_a_new_reader_starts_at_a_random_shape_unless_given_one(tmp_path, monkey
     assert drawn == [SHAPES]
 
 
-def test_a_drop_moves_to_the_next_shape_with_or_without_its_window(tmp_path):
+def test_a_drop_moves_to_the_next_shape_with_or_without_its_window(tmp_path: Path):
     archive = write_parts(tmp_path, b"z" * 100, part_size=100)
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive), shape=SHAPES - 2)
     handle.drop_cache()

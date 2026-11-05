@@ -9,6 +9,7 @@ offline and fast. They consume real API quota, so keep them small.
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -31,7 +32,7 @@ def dbaudit(*args, expect=0):
     return proc.stdout + proc.stderr
 
 
-def test_full_pass_matches_an_independent_rclone_walk(tmp_path):
+def test_full_pass_matches_an_independent_rclone_walk(tmp_path: Path):
     db = str(tmp_path / "live.db")
     dbaudit("init", "--db", db, "--root", SUBTREE, "--min-free-gb", "1")
     dbaudit("run", "--db", db, "--workers", "4")
@@ -43,7 +44,7 @@ def test_full_pass_matches_an_independent_rclone_walk(tmp_path):
     assert "0 differences" in out, out
 
 
-def test_interrupted_crawl_resumes_to_the_same_totals(tmp_path):
+def test_interrupted_crawl_resumes_to_the_same_totals(tmp_path: Path):
     """Kill a crawl outright, restart it, and land on identical numbers."""
     db = str(tmp_path / "resume.db")
     dbaudit("init", "--db", db, "--root", SUBTREE, "--min-free-gb", "1")
@@ -83,7 +84,7 @@ def test_interrupted_crawl_resumes_to_the_same_totals(tmp_path):
     assert (files, total) == (ref_files, ref_bytes)
 
 
-def test_second_instance_is_refused(tmp_path):
+def test_second_instance_is_refused(tmp_path: Path):
     from dbaudit.lock import InstanceLock
 
     db = str(tmp_path / "lock.db")
@@ -92,7 +93,7 @@ def test_second_instance_is_refused(tmp_path):
         dbaudit("run", "--db", db, expect=3)
 
 
-def test_report_runs_on_real_data(tmp_path):
+def test_report_runs_on_real_data(tmp_path: Path):
     db = str(tmp_path / "report.db")
     dbaudit("init", "--db", db, "--root", SUBTREE, "--min-free-gb", "1")
     dbaudit("run", "--db", db, "--workers", "4")

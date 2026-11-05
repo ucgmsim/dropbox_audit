@@ -18,6 +18,7 @@ import signal
 import sqlite3
 import tarfile
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -45,7 +46,7 @@ SWALLOWED = [
 ]
 
 
-def local_archive(tmp_path, data=None, part_size=4096, name="parts"):
+def local_archive(tmp_path: Path, data=None, part_size=4096, name="parts"):
     """Split a tar into part files and return the directory holding them."""
     source = tmp_path / name
     source.mkdir()
@@ -147,7 +148,7 @@ def has_analysis_indexes(db):
     )
 
 
-def register_dropbox(monkeypatch, db, archive_set, folder="/d"):
+def register_dropbox(monkeypatch: pytest.MonkeyPatch, db, archive_set, folder="/d"):
     monkeypatch.setattr(
         "dbaudit.cli.build_lister", fake_build_lister([dropbox_entries(archive_set)])
     )
@@ -160,7 +161,9 @@ def register_dropbox(monkeypatch, db, archive_set, folder="/d"):
 # ---- the four from the brief -------------------------------------------------
 
 
-def test_register_then_index_a_local_archive(tmp_path, capsys):
+def test_register_then_index_a_local_archive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = local_archive(tmp_path)
     (source / "notes.txt").write_text("a real folder holds other files too")
     db = str(tmp_path / "archives.db")
@@ -200,7 +203,7 @@ def test_register_then_index_a_local_archive(tmp_path, capsys):
     assert event_count(db, archive_id, "rate_limited") == 0
 
 
-def test_an_interrupted_index_resumes(tmp_path):
+def test_an_interrupted_index_resumes(tmp_path: Path):
     """Kill the walk halfway, re-run, and the manifest must be identical."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
@@ -243,7 +246,7 @@ def test_an_interrupted_index_resumes(tmp_path):
     assert store.get("a.tar")["state"] == "complete"
 
 
-def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path):
+def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path: Path):
     """The whole point of segments: four chains must agree with one, member for member."""
     data = build_tar(MEMBERS)
     manifests = {}
@@ -284,7 +287,9 @@ def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path):
     assert manifests[1] == manifests[4]
 
 
-def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path, monkeypatch):
+def test_a_walk_reports_how_many_chains_it_is_walking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """So `archive run` can give the streams of chains that have finished to the next
     archive, rather than wait for this one to end."""
     source = local_archive(tmp_path)
@@ -333,7 +338,7 @@ def test_a_walk_reports_how_many_chains_it_is_walking(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("seed", range(10))
 def test_chains_find_every_member_wherever_the_parts_divide(
-    tmp_path, monkeypatch, seed
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed
 ):
     """Against tarfile's own listing: members from a few bytes to many times a part, parts
     cut anywhere, one chain or many -- each starting where its scan found a header, or
@@ -391,7 +396,7 @@ def test_chains_find_every_member_wherever_the_parts_divide(
         assert got == [(m.offset, m.size) for m in tar]
 
 
-def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path):
+def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path: Path):
     """A scan starting mid-member can land on an inner tar's header. The join must see
     that the chains do not meet, drop that segment's members and re-walk it."""
     inner = build_tar([(f"inner/deep{i:02d}.bin", b"i" * 400) for i in range(6)])
@@ -430,7 +435,7 @@ def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path):
 
 @pytest.mark.unshaped
 def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """SIGINT mid-walk: exit 0, keep what was committed, hand the segment back, and
     put pytest's own SIGINT handler back where it was."""
@@ -524,7 +529,9 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
     assert reads[0] == segment["cursor_offset"]
 
 
-def test_max_batches_commits_exactly_that_many_batches(tmp_path, monkeypatch):
+def test_max_batches_commits_exactly_that_many_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """--max-batches N means N batches, not N plus whatever was in flight when the
     limit was reached."""
     data = build_tar(MEMBERS)
@@ -586,7 +593,9 @@ def test_max_batches_commits_exactly_that_many_batches(tmp_path, monkeypatch):
     assert row["bytes_fetched"] == reads["bytes"]
 
 
-def test_a_stop_between_claim_and_scan_never_starts_the_scan(tmp_path, monkeypatch):
+def test_a_stop_between_claim_and_scan_never_starts_the_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The scan for a chain's first header is deliberately unbounded -- Task 1 measured
     seeds that found nothing within 64 MiB -- so a worker that claimed a segment a moment
     before the stop must hand it straight back rather than begin one.
@@ -643,7 +652,7 @@ def test_a_stop_between_claim_and_scan_never_starts_the_scan(tmp_path, monkeypat
     assert scans["n"] == 0
 
 
-def _deep_second_part(tmp_path):
+def _deep_second_part(tmp_path: Path):
     """Two parts, the second beginning inside a 40 MiB member, so that a scan of it reads
     16 MiB of nothing before the header beyond. Returns the database and where in the
     second part a read counts as scanning: anywhere short of that header's window."""
@@ -676,7 +685,7 @@ def _deep_second_part(tmp_path):
 
 
 def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The scan has no bound of its own, so a stop must reach it between reads -- not wait
     for a header that may lie gigabytes on -- and the walk resumes later all the same."""
@@ -711,7 +720,7 @@ def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(
 
 
 def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Where the chain before crossed into this part is exactly where the join would start
     this chain, so once it has crossed, a scan for that header is requests wasted -- a
@@ -740,7 +749,7 @@ def test_a_chain_starts_where_the_chain_before_it_crossed_and_never_scans(
 
 
 def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     db, scanning = _deep_second_part(tmp_path)
     started, crossed, scans = threading.Event(), threading.Event(), []
@@ -776,7 +785,7 @@ def test_a_scan_under_way_gives_way_once_the_chain_before_crosses(
 
 
 def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The join hands the scanning chain that start on the next run all the same."""
     db, scanning = _deep_second_part(tmp_path)
@@ -816,7 +825,9 @@ def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(
     assert walked.stopped and after == []
 
 
-def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypatch):
+def test_a_chain_that_dies_is_still_charged_for_what_it_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """One bad part must not kill the run -- but the reads it made before it died are
     real, and every other exit path charges them."""
     source = local_archive(tmp_path)
@@ -869,7 +880,9 @@ def test_a_chain_that_dies_is_still_charged_for_what_it_read(tmp_path, monkeypat
     assert row["requests"] == reads["n"] - 1  # every read but the one that raised
 
 
-def test_a_worker_that_blows_up_does_not_look_like_a_clean_stop(tmp_path, monkeypatch):
+def test_a_worker_that_blows_up_does_not_look_like_a_clean_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """On a nohup'd run the exit code is most of what anyone sees, so a chain dying of
     something unexpected must not report the same 0 as Ctrl-C."""
     source = local_archive(tmp_path)
@@ -897,7 +910,7 @@ def test_a_worker_that_blows_up_does_not_look_like_a_clean_stop(tmp_path, monkey
     )
 
 
-def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path):
+def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path: Path):
     """A part lying wholly inside one member has no header of its own: its chain crosses
     at once, committing a cursor and nothing else. Charging that to the budget buys no
     members, which is the opposite of what a smoke test wants -- Task 11 reads
@@ -955,7 +968,7 @@ def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path):
 
 
 def test_a_part_that_changed_before_the_walk_is_stale_and_nothing_is_read(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The stored offsets describe bytes that no longer exist, so the walk must not
     read a single range."""
@@ -988,7 +1001,7 @@ def test_a_part_that_changed_before_the_walk_is_stale_and_nothing_is_read(
 
 
 def test_a_part_that_changes_during_the_walk_is_stale_but_keeps_its_members(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The spec's error table: the walk's results are kept, the index is flagged."""
     source = tmp_path / "parts"
@@ -1019,7 +1032,7 @@ def test_a_part_that_changes_during_the_walk_is_stale_but_keeps_its_members(
 
 
 def test_index_waits_out_a_rate_limited_listing_and_asks_again(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Every listing takes its turn at the limiter: a 429 pauses every request, and then
     the listing is asked again."""
@@ -1050,7 +1063,7 @@ def test_index_waits_out_a_rate_limited_listing_and_asks_again(
 
 
 def test_index_gives_up_on_a_folder_listing_that_keeps_failing(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     source = tmp_path / "parts"
     source.mkdir()
@@ -1065,7 +1078,9 @@ def test_index_gives_up_on_a_folder_listing_that_keeps_failing(
     assert build.calls["n"] == LISTING_ATTEMPTS
 
 
-def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(monkeypatch):
+def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """A 401 means Dropbox stopped accepting a token that may still look fresh here:
     asked again with it, the listing would fail every time."""
     monkeypatch.setattr("dbaudit.cli.LISTING_BACKOFF", 0)
@@ -1102,7 +1117,7 @@ def test_a_listing_drops_a_token_dropbox_refused_before_asking_again(monkeypatch
 # ---- outcomes ----------------------------------------------------------------
 
 
-def test_indexing_a_finished_archive_reads_nothing(tmp_path):
+def test_indexing_a_finished_archive_reads_nothing(tmp_path: Path):
     """Re-running `index` is how you resume, so resuming a finished archive is a no-op."""
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
@@ -1135,7 +1150,9 @@ def test_indexing_a_finished_archive_reads_nothing(tmp_path):
     assert run_starts(db, row["id"]) == 1
 
 
-def test_the_reported_cost_is_the_delta_and_not_a_running_total(tmp_path, monkeypatch):
+def test_the_reported_cost_is_the_delta_and_not_a_running_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """`commit_batch` adds what it is handed, so a chain reports what it has spent
     *since its last report*. Handing over the running total every time compounds it,
     and bytes_fetched / member_bytes is this project's headline number."""
@@ -1195,7 +1212,7 @@ def test_the_reported_cost_is_the_delta_and_not_a_running_total(tmp_path, monkey
     assert row["bytes_fetched"] == reads["bytes"]
 
 
-def test_a_missing_final_part_is_truncated_and_keeps_what_it_found(tmp_path):
+def test_a_missing_final_part_is_truncated_and_keeps_what_it_found(tmp_path: Path):
     source = local_archive(tmp_path)
     for part in sorted(source.iterdir())[8:]:  # the tail of the tar never arrived
         part.unlink()
@@ -1223,7 +1240,9 @@ def test_a_missing_final_part_is_truncated_and_keeps_what_it_found(tmp_path):
 # ---- status and usage --------------------------------------------------------
 
 
-def test_status_shows_every_segment_and_the_efficiency_ratio(tmp_path, capsys):
+def test_status_shows_every_segment_and_the_efficiency_ratio(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
     main(
@@ -1255,7 +1274,9 @@ def test_status_shows_every_segment_and_the_efficiency_ratio(tmp_path, capsys):
     assert "a.tar" in out and "complete" in out
 
 
-def test_usage_errors_exit_2_and_a_held_lock_exits_3(tmp_path, capsys):
+def test_usage_errors_exit_2_and_a_held_lock_exits_3(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
     main(
@@ -1354,7 +1375,7 @@ def _terminator_of(data):
 @pytest.mark.parametrize("nth", [1, 2])
 @pytest.mark.unshaped
 def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
-    tmp_path, monkeypatch, nth
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nth
 ):
     """End to end, through the 8-worker pool, the join and the store: one bad read at the
     terminator -- on whichever fetch it lands, including the one that confirms `complete`
@@ -1396,7 +1417,7 @@ def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
 
 @pytest.mark.unshaped
 def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Every other read of the terminator comes back as junk, so each reading of the
     verdict contradicts the last, more times than REREAD_LIMIT allows: the segment must
@@ -1444,7 +1465,7 @@ def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
 # ---- pax archives are refused, loudly --------------------------------------------------
 
 
-def _pax_archive(tmp_path, members, part_size=4096):
+def _pax_archive(tmp_path: Path, members, part_size=4096):
     """A pax-format tar split into parts: an `x` header before every member, as GNU tar
     --format=posix writes one."""
     buf = io.BytesIO()
@@ -1457,7 +1478,9 @@ def _pax_archive(tmp_path, members, part_size=4096):
     return local_archive(tmp_path, buf.getvalue(), part_size=part_size)
 
 
-def test_index_refuses_a_pax_archive_loudly_and_for_good(tmp_path, capsys):
+def test_index_refuses_a_pax_archive_loudly_and_for_good(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
     main(
@@ -1484,7 +1507,9 @@ def test_index_refuses_a_pax_archive_loudly_and_for_good(tmp_path, capsys):
     assert "pax" in (row["detail"] or "")
 
 
-def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(tmp_path):
+def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(
+    tmp_path: Path,
+):
     """`archive run` shares one stop among every walk: a pax archive must end its own walk
     and no other."""
     source = _pax_archive(tmp_path, MEMBERS)
@@ -1546,7 +1571,9 @@ def test_pax_sighting_stored_before_the_rename_is_still_a_sighting(
     assert cli._PAX_SIGHTING == "UnsupportedArchive: "
 
 
-def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):
+def test_a_pax_archive_is_not_walked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
     main(
@@ -1572,7 +1599,9 @@ def test_a_pax_archive_is_not_walked_again(tmp_path, monkeypatch, capsys):
     assert "is a pax-format archive" in capsys.readouterr().err
 
 
-def test_cat_refuses_an_unsupported_archive(tmp_path, capsys):
+def test_cat_refuses_an_unsupported_archive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
     main(
@@ -1611,7 +1640,9 @@ def test_cat_refuses_an_unsupported_archive(tmp_path, capsys):
     assert not out.exists()
 
 
-def test_a_pax_member_deep_in_a_split_archive_is_still_refused(tmp_path, capsys):
+def test_a_pax_member_deep_in_a_split_archive_is_still_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """tarfile's pax writer adds an `x` header only where it needs one, so the pax member
     can sit in any part, found first by a chain whose start is not yet confirmed. That
     sighting cannot condemn the archive by itself -- it may be a stored tarball -- but
@@ -1668,7 +1699,9 @@ def _gnu_holding_a_pax_tarball():
         return outer, t.getmember("run/results.tar").offset_data
 
 
-def test_a_stored_pax_tarball_does_not_condemn_the_archive_holding_it(tmp_path, capsys):
+def test_a_stored_pax_tarball_does_not_condemn_the_archive_holding_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Archives of run folders hold tarballs. A part boundary inside one starts a chain
     whose cold scan finds the tarball's own headers -- pax ones -- before anything has
     confirmed that chain. It is a chain the join would have corrected, as it corrects
@@ -1698,7 +1731,9 @@ def test_a_stored_pax_tarball_does_not_condemn_the_archive_holding_it(tmp_path, 
     assert _names(db) == ["a.bin", "results.tar", "z.bin"]
 
 
-def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(tmp_path, capsys):
+def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Every chain would meet the format, and each would pay a cold scan first -- on a
     300 GiB part that scan is unbounded. So the first chain to meet pax stops the
     pool: with one worker, no segment after it is ever claimed."""
@@ -1781,7 +1816,7 @@ class _CopiesAHeader:
 
 @pytest.mark.unshaped
 def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """The silent case: member 5's header served where member 20's belongs. Same padded
     size, so the chain rejoins and the walk ends `complete` -- member 5 recorded twice,
@@ -1834,7 +1869,7 @@ def test_a_copied_header_that_rejoins_the_chain_is_caught_and_walked_again(
     assert event_count(db, ArchiveStore(db).get("a.tar")["id"], "audit_repair") == 1
 
 
-def _index_with_appended(tmp_path, appended, *extra):
+def _index_with_appended(tmp_path: Path, appended, *extra):
     """MEMBERS plus one more member named ``appended``, indexed to the end."""
     data = build_tar(MEMBERS + [(appended, b"y" * 705)])
     label = appended.replace("/", "_")
@@ -1864,7 +1899,7 @@ def _requests(db):
 
 
 def test_a_path_truly_in_the_archive_twice_survives_the_audit_for_one_request(
-    tmp_path, capsys
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
     """`tar -r` appends a newer copy under the same path. The audit reads both rows
     again, they agree, and both stay -- for the one fetch that covers both in an archive
@@ -1880,7 +1915,9 @@ def test_a_path_truly_in_the_archive_twice_survives_the_audit_for_one_request(
     assert _requests(twice) - _requests(once) == 1
 
 
-def test_the_audit_reads_at_most_its_limit(tmp_path, monkeypatch, capsys):
+def test_the_audit_reads_at_most_its_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     """An archive of many repeated paths must not buy hours of reads: the audit stops
     at its limit and says so. One-block windows make every row its own request."""
     monkeypatch.setattr("dbaudit.cli.AUDIT_LIMIT", 1)
@@ -1897,7 +1934,7 @@ def test_the_audit_reads_at_most_its_limit(tmp_path, monkeypatch, capsys):
 
 
 def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """A complete walk whose audit could not run is not complete: the archive is left in
     `error`, which the next `index` retries -- straight to the audit, since every chain
@@ -1946,7 +1983,9 @@ def test_an_audit_that_cannot_read_leaves_the_archive_retryable(
     assert ArchiveStore(db).get("a.tar")["state"] == "complete"
 
 
-def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(tmp_path, monkeypatch):
+def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The audit reads every row under a repeated path again -- up to AUDIT_LIMIT, a couple
     of thousand requests -- so a stop must reach it between rows. Stopped, the archive has
     no verdict yet: it is not `error`, and the next run goes straight to the audit."""
@@ -1986,7 +2025,7 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(tmp_path, monkey
 
 @pytest.mark.parametrize("phase", ["walk", "audit", "compression"])
 def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(
-    tmp_path, monkeypatch, phase
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase
 ):
     """A read Dropbox kept answering 429 gives way to a stop. The walk, the audit and the
     compression check each take that as a stop: no verdict yet, and nothing failed."""
@@ -2039,7 +2078,7 @@ def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(
 
 
 def test_a_read_that_gives_way_to_a_stop_still_commits_what_the_walk_confirmed(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """As a stop between reads does: the members already out of the held-back window are
     confirmed, and the next run should not have to read them again."""
@@ -2115,7 +2154,7 @@ class _Tokens:
 
 @pytest.mark.parametrize("phase", ["walk", "audit", "compression"])
 def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(
-    tmp_path, monkeypatch, phase
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase
 ):
     """Through the real reader: once the stop lands, Dropbox answers 429 to everything,
     and only the reader giving way to the stop can end the walk, the audit or the
@@ -2191,7 +2230,9 @@ def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(
     assert not walking.is_alive() and walked["result"].stopped
 
 
-def test_a_pax_verdict_is_still_checked_against_the_folder(tmp_path, monkeypatch):
+def test_a_pax_verdict_is_still_checked_against_the_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """`unsupported` is a verdict too: the folder is listed again before it is recorded,
     so that a part changed during the walk makes the archive stale instead."""
     source = tmp_path / "parts"
@@ -2228,7 +2269,9 @@ class _CountingTokens:
         type(self).dropped += 1
 
 
-def test_index_drops_its_token_after_a_401_on_its_first_listing(tmp_path, monkeypatch):
+def test_index_drops_its_token_after_a_401_on_its_first_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     source = tmp_path / "parts"
     source.mkdir()
     archive_set = write_parts(source, build_tar(MEMBERS), 4096)
@@ -2253,7 +2296,9 @@ def test_index_drops_its_token_after_a_401_on_its_first_listing(tmp_path, monkey
     assert _CountingTokens.dropped == 1
 
 
-def test_a_stopped_walk_does_not_list_its_folder_again(tmp_path, monkeypatch):
+def test_a_stopped_walk_does_not_list_its_folder_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The listing after a walk protects a verdict about to be recorded. A stopped walk
     records none -- the next lists the folder before it begins -- so a stop does not wait
     on that listing through whatever 429s Dropbox is giving."""
@@ -2287,7 +2332,7 @@ def test_a_stopped_walk_does_not_list_its_folder_again(tmp_path, monkeypatch):
 
 
 def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """A path truly in the archive twice, and the audit's own read of one copy comes
     back wrong. That is a disagreement between one read and the index, not a proof the
@@ -2341,7 +2386,7 @@ def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(
 
 @pytest.mark.unshaped
 def test_the_audit_repairs_a_segment_other_than_the_first(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Review 5's K6. A well-formed bad read in segment 1: member 18's header read as
     member 5's (same padded size, so the chain rejoins). The audit finds member 5's path
@@ -2454,7 +2499,7 @@ class _SameJunkEveryTime:
         return _Reader(self.source, archive_set)
 
 
-def _condemned(tmp_path, monkeypatch, part_size=None):
+def _condemned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part_size=None):
     """An archive left `corrupt` by a server that said the same wrong thing every time."""
     data = build_tar(MEMBERS)
     source = local_archive(tmp_path, data, part_size=part_size or len(data))
@@ -2480,7 +2525,7 @@ def _condemned(tmp_path, monkeypatch, part_size=None):
 
 
 def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     db, _liar = _condemned(tmp_path, monkeypatch)
     capsys.readouterr()
@@ -2502,7 +2547,7 @@ def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
 
 
 def test_recheck_walks_again_the_segments_the_verdict_retired(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Split, the verdict lands in a middle segment, and the join retires every segment
     after it as `beyond`. Asking again must walk those too, from fresh scans, and join
@@ -2528,7 +2573,9 @@ def test_recheck_walks_again_the_segments_the_verdict_retired(
     assert event_count(db, archive_id, "repair") - repairs == 2
 
 
-def test_recheck_finds_real_damage_again(tmp_path, capsys):
+def test_recheck_finds_real_damage_again(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """A genuinely damaged archive reads the same way on every walk: asked again, it is
     corrupt again, at the same place, with every member before the damage indexed."""
     data = bytearray(build_tar(MEMBERS))
@@ -2559,7 +2606,9 @@ def test_recheck_finds_real_damage_again(tmp_path, capsys):
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS[:20]]
 
 
-def test_recheck_asks_a_pax_archive_again_and_it_is_still_pax(tmp_path, capsys):
+def test_recheck_asks_a_pax_archive_again_and_it_is_still_pax(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     source = _pax_archive(tmp_path, MEMBERS)
     db = str(tmp_path / "archives.db")
     main(
@@ -2586,7 +2635,9 @@ def test_recheck_asks_a_pax_archive_again_and_it_is_still_pax(tmp_path, capsys):
     assert event_count(db, row["id"], "recheck") == 1
 
 
-def test_recheck_reads_nothing_of_a_complete_archive(tmp_path, monkeypatch, capsys):
+def test_recheck_reads_nothing_of_a_complete_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     source = local_archive(tmp_path)
     db = str(tmp_path / "archives.db")
     main(
@@ -2616,7 +2667,9 @@ def test_recheck_reads_nothing_of_a_complete_archive(tmp_path, monkeypatch, caps
 
 
 @pytest.mark.unshaped
-def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatch):
+def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """One bad fetch holds a stretch of the archive from elsewhere: two wrong headers in a
     row, then member data. The walk reads the verdict again from the fetches that led to
     it and finds the first wrong header -- and the store must never have held a row the
@@ -2670,7 +2723,7 @@ def test_a_derailed_walk_leaves_no_rows_behind_in_the_store(tmp_path, monkeypatc
 
 
 def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """--recheck drops rows to walk them again, so it must not run on parts that changed
     since registration: the archive goes `stale` with its rows kept, as a plain `index`
@@ -2716,7 +2769,7 @@ def _header_claiming(data, header, size):
 
 @pytest.mark.unshaped
 def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Review 6's #2. One bad read in segment 0 sends its chain into a tarball stored in
     the archive, whose real headers it walks for longer than the fetches read again --
@@ -2798,7 +2851,7 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
 
 @pytest.mark.unshaped
 def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Review 7's B2. The stored tarball a bad read sends segment 0 into fills the whole of
     part 1, so the wrong start is handed on twice: segment 0 crosses at one of its
@@ -2893,7 +2946,9 @@ def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
 
 
-def test_recheck_scans_for_no_start_it_already_has(tmp_path, monkeypatch):
+def test_recheck_scans_for_no_start_it_already_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Review 7's B4. The segment where the walk ended keeps the start it had, for the join
     to check against the crossing into it: scanning for it again finds the same header,
     and on v01p0 a part can begin 37 GiB before its first header."""
@@ -2929,7 +2984,9 @@ def test_recheck_scans_for_no_start_it_already_has(tmp_path, monkeypatch):
     assert scans == []
 
 
-def test_recheck_is_refused_for_a_walk_that_only_stopped(tmp_path, capsys):
+def test_recheck_is_refused_for_a_walk_that_only_stopped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Review 6's #3. --recheck asks a verdict again; a walk that merely stopped reached
     none, and `index` alone resumes it. Accepted, it would throw away everything walked
     since -- hours, on a 5 TiB archive."""
@@ -2982,7 +3039,9 @@ def test_recheck_is_refused_for_a_walk_that_only_stopped(tmp_path, capsys):
     assert event_count(db, row["id"], "recheck") == 0
 
 
-def test_recheck_of_real_damage_walks_only_what_it_must(tmp_path, capsys):
+def test_recheck_of_real_damage_walks_only_what_it_must(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """Review 6's #3. Asked again about damage in a middle segment, --recheck walks the
     segment before it and the damaged one, and nothing after: the verdict would only
     retire those segments again, and on v01p0 each is 300 GiB."""
@@ -3020,7 +3079,7 @@ def test_recheck_of_real_damage_walks_only_what_it_must(tmp_path, capsys):
     )
 
 
-def test_the_chain_crossing_into_a_retired_segment_re_arms_it(tmp_path):
+def test_the_chain_crossing_into_a_retired_segment_re_arms_it(tmp_path: Path):
     """A segment retired `beyond` keeps the first header its scan once found. If the chain
     later crosses into it -- after `--recheck` -- at that very offset, it is still not a
     walked segment to join: it is re-armed from the exit and walked."""
@@ -3058,7 +3117,9 @@ RANDOM_MEMBERS = [(f"run/r{i}.bin", random.Random(i).randbytes(3000)) for i in r
 
 
 @pytest.mark.parametrize("kind", ["gzip", "bzip2", "xz", "zstd"])
-def test_a_compressed_file_named_tar_is_unsupported_not_corrupt(tmp_path, capsys, kind):
+def test_a_compressed_file_named_tar_is_unsupported_not_corrupt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], kind
+):
     """Its owner should look for a decompressor, not for damage."""
     data = _compressed(kind, build_tar(RANDOM_MEMBERS))
     assert len(data) > 2048  # past where a tar's first header ends
@@ -3085,7 +3146,7 @@ def test_a_compressed_file_named_tar_is_unsupported_not_corrupt(tmp_path, capsys
     assert f"a.tar is {kind}-compressed, not a tar" in capsys.readouterr().err
 
 
-def test_junk_at_the_start_that_is_no_known_compression_stays_corrupt(tmp_path):
+def test_junk_at_the_start_that_is_no_known_compression_stays_corrupt(tmp_path: Path):
     source = local_archive(tmp_path, b"PK\x03\x04" + b"z" * 5000, part_size=1 << 20)
     db = str(tmp_path / "archives.db")
     main(
@@ -3105,7 +3166,7 @@ def test_junk_at_the_start_that_is_no_known_compression_stays_corrupt(tmp_path):
 
 
 def test_a_compressed_file_too_short_to_hold_a_tar_is_unsupported_not_truncated(
-    tmp_path,
+    tmp_path: Path,
 ):
     data = _compressed("gzip", build_tar(MEMBERS))
     assert len(data) < 1024  # shorter than a terminator: `truncated`
@@ -3128,7 +3189,7 @@ def test_a_compressed_file_too_short_to_hold_a_tar_is_unsupported_not_truncated(
 
 
 def test_index_says_so_when_the_read_that_checks_for_compression_fails(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """That read meets Dropbox's passing failures like any other: the archive is left in
     `error`, to be asked again."""
@@ -3168,7 +3229,7 @@ def test_index_says_so_when_the_read_that_checks_for_compression_fails(
 
 
 def test_a_compression_format_is_named_only_once_two_readings_agree(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """As every verdict stands only once two readings agree: one reading that shows a gzip
     signature at the start of junk does not make it gzip."""
@@ -3202,7 +3263,9 @@ def test_a_compression_format_is_named_only_once_two_readings_agree(
     assert ArchiveStore(db).get("a.tar")["state"] == "corrupt"
 
 
-def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(tmp_path, monkeypatch):
+def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Dropbox cannot answer a range of no bytes with a 206, so such a read would fail
     every time it was asked."""
     source = tmp_path / "parts"
@@ -3239,7 +3302,9 @@ def test_an_empty_tar_is_never_asked_for_a_range_of_no_bytes(tmp_path, monkeypat
     assert 0 not in asked
 
 
-def test_a_compressed_archive_is_never_called_pax(tmp_path, capsys):
+def test_a_compressed_archive_is_never_called_pax(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """`index` again, `report` and `cat` name what the walk found, as the walk did."""
     source = local_archive(
         tmp_path, _compressed("gzip", build_tar(RANDOM_MEMBERS)), part_size=1 << 20
@@ -3284,7 +3349,9 @@ def test_a_compressed_archive_is_never_called_pax(tmp_path, capsys):
     assert "gzip-compressed" in out and err.count("gzip-compressed") == 2
 
 
-def test_status_without_an_archive_summarises_the_database(tmp_path, capsys):
+def test_status_without_an_archive_summarises_the_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """With thousands of archives, one line per state and a line per walk in progress;
     one archive's full status is `--archive`."""
     db = str(tmp_path / "archives.db")

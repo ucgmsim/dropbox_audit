@@ -16,6 +16,7 @@ import tarfile
 import threading
 import time
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -39,7 +40,7 @@ def run(db, audit, *extra):
     return main(["archive", "run", "--db", db, "--audit-db", audit, *extra])
 
 
-def three(tmp_path, monkeypatch):
+def three(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     world = World(tmp_path)
     world.add("/R/a", "one.tar", build_tar(members(5, 1)))
     world.add("/R/b", "two.tar", build_tar(members(30, 2)), part_size=40_000)
@@ -48,7 +49,9 @@ def three(tmp_path, monkeypatch):
     return world, str(tmp_path / "archives.db"), world.audit_db()
 
 
-def test_every_archive_the_listing_names_is_walked(tmp_path, monkeypatch):
+def test_every_archive_the_listing_names_is_walked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit) == 0
     found = rows(db)
@@ -61,7 +64,7 @@ def test_every_archive_the_listing_names_is_walked(tmp_path, monkeypatch):
 
 
 def test_a_dry_run_says_what_it_would_walk_and_reads_nothing(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     _world, db, audit = three(tmp_path, monkeypatch)
 
@@ -76,7 +79,9 @@ def test_a_dry_run_says_what_it_would_walk_and_reads_nothing(
     assert not os.path.exists(db)  # and writes nothing
 
 
-def test_a_second_run_finds_nothing_left_to_walk(tmp_path, monkeypatch, capsys):
+def test_a_second_run_finds_nothing_left_to_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit) == 0
     capsys.readouterr()
@@ -89,7 +94,9 @@ def test_a_second_run_finds_nothing_left_to_walk(tmp_path, monkeypatch, capsys):
     assert "0 archives to walk" in out and "already walked   : 3" in out
 
 
-def test_a_copy_elsewhere_is_walked_once(tmp_path, monkeypatch, capsys):
+def test_a_copy_elsewhere_is_walked_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     world = World(tmp_path)
     data = build_tar(members(4, 9))
     world.add("/R/a", "x.tar", data)
@@ -102,7 +109,7 @@ def test_a_copy_elsewhere_is_walked_once(tmp_path, monkeypatch, capsys):
 
 
 def test_an_archive_gone_from_its_folder_is_recorded_and_the_run_goes_on(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     world.gone.add("/R/a")
@@ -121,7 +128,7 @@ def test_an_archive_gone_from_its_folder_is_recorded_and_the_run_goes_on(
 
 
 def test_a_registered_archive_that_has_gone_is_recorded_under_its_id(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Every part gone, or the whole folder: an event under the archive's id, and its row
     left as it was for a later run to try again."""
@@ -155,7 +162,9 @@ def test_a_registered_archive_that_has_gone_is_recorded_under_its_id(
     ]
 
 
-def test_a_pax_archive_is_refused_and_every_other_walk_goes_on(tmp_path, monkeypatch):
+def test_a_pax_archive_is_refused_and_every_other_walk_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """A pax header stops that archive's walk, never the run: the five behind it are still
     walked."""
     world = World(tmp_path)
@@ -181,7 +190,7 @@ def test_a_pax_archive_is_refused_and_every_other_walk_goes_on(tmp_path, monkeyp
 
 
 def test_a_failed_compression_check_leaves_its_archive_in_error_and_the_run_goes_on(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Gzip files named .tar were 7% of a sample, and the read that recognises one meets
     Dropbox's passing failures like any other read: three must not stop the run as bugs."""
@@ -217,7 +226,7 @@ def test_a_failed_compression_check_leaves_its_archive_in_error_and_the_run_goes
 
 
 def test_an_archive_that_moved_since_registration_is_walked_once_where_it_is_now(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world = World(tmp_path)
     world.add("/R/old", "m.tar", build_tar(members(6, 5)))
@@ -256,7 +265,7 @@ def test_an_archive_that_moved_since_registration_is_walked_once_where_it_is_now
 
 
 def test_an_archive_registered_by_hand_outside_the_listing_is_walked_too(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     world.add("/elsewhere", "extra.tar", build_tar(members(4, 8)))  # not in the listing
@@ -283,7 +292,7 @@ def test_an_archive_registered_by_hand_outside_the_listing_is_walked_too(
 
 
 def test_without_credentials_the_third_archive_stops_the_run(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """The lister hands on a token failure as a failed request. Asking again cannot help,
     so each archive that meets it is a bug, and the third stops the run."""
@@ -308,7 +317,9 @@ def test_without_credentials_the_third_archive_stops_the_run(
     )
 
 
-def test_a_folder_listed_page_by_page_is_read_whole(tmp_path, monkeypatch):
+def test_a_folder_listed_page_by_page_is_read_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     world = World(tmp_path)
     world.add("/R/s", "split.tar", build_tar(members(40, 4)), part_size=60_000)
     world.folders["/R/s"].insert(
@@ -334,7 +345,7 @@ def test_a_folder_listed_page_by_page_is_read_whole(tmp_path, monkeypatch):
 
 
 def test_archives_of_one_name_in_different_folders_are_walked_apart(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world = World(tmp_path)
     world.add("/R/a", "x.tar", build_tar(members(3, 1)))
@@ -349,7 +360,7 @@ def test_archives_of_one_name_in_different_folders_are_walked_apart(
 
 
 def test_parts_that_change_during_the_walk_leave_it_stale_and_the_run_goes_on(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     changed = []
@@ -370,7 +381,7 @@ def test_parts_that_change_during_the_walk_leave_it_stale_and_the_run_goes_on(
 
 
 def test_a_set_of_parts_with_a_gap_at_its_turn_is_refused_and_the_run_goes_on(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     del world.folders["/R/b"][1]  # a part deleted since the listing
@@ -388,7 +399,9 @@ def test_a_set_of_parts_with_a_gap_at_its_turn_is_refused_and_the_run_goes_on(
     assert detail.startswith("/R/b/two.tar: ")
 
 
-def test_an_archive_mid_walk_resumes_and_finishes(tmp_path, monkeypatch, capsys):
+def test_an_archive_mid_walk_resumes_and_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     _world, db, audit = three(tmp_path, monkeypatch)
     assert (
         main(
@@ -422,7 +435,7 @@ def test_an_archive_mid_walk_resumes_and_finishes(tmp_path, monkeypatch, capsys)
 
 
 def test_parts_that_changed_since_registration_are_walked_as_new_content(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     assert (
@@ -444,25 +457,31 @@ def test_parts_that_changed_since_registration_are_walked_as_new_content(
     assert (new["state"], new["n_members"]) == ("complete", 6)
 
 
-def test_a_held_database_refuses_with_status_3(tmp_path, monkeypatch):
+def test_a_held_database_refuses_with_status_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     _world, db, audit = three(tmp_path, monkeypatch)
     with InstanceLock(f"{db}.lock"):
         assert run(db, audit) == 3
 
 
-def test_streams_beyond_their_ceiling_are_a_usage_error(tmp_path, monkeypatch):
+def test_streams_beyond_their_ceiling_are_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit, "--streams", "30", "--max-streams", "24") == 2
     assert run(db, str(tmp_path / "no-such.db")) == 2
 
 
-def test_a_negative_limit_is_a_usage_error(tmp_path, monkeypatch):
+def test_a_negative_limit_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     _world, db, audit = three(tmp_path, monkeypatch)
     assert run(db, audit, "--limit", "-1") == 2
 
 
 def test_a_db_in_a_folder_that_does_not_exist_is_a_usage_error(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Said plainly, not as a traceback from SQLite."""
     _world, db, audit = three(tmp_path, monkeypatch)
@@ -474,7 +493,7 @@ def test_a_db_in_a_folder_that_does_not_exist_is_a_usage_error(
 
 
 def test_a_db_that_is_not_an_archive_database_is_refused_untouched(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The audit database given as --db by mistake gains no tables."""
     _world, _db, audit = three(tmp_path, monkeypatch)
@@ -493,7 +512,7 @@ def test_a_db_that_is_not_an_archive_database_is_refused_untouched(
     assert tables(audit) == before
 
 
-def logged(monkeypatch, text):
+def logged(monkeypatch: pytest.MonkeyPatch, text):
     """An Event set once a `dbaudit` log message holds ``text``: the signal handler logs
     after it sets the stop, so its line means every walk is already winding down."""
     seen = threading.Event()
@@ -508,7 +527,7 @@ def logged(monkeypatch, text):
     return seen
 
 
-def signalling(world, monkeypatch, signum):
+def signalling(world, monkeypatch: pytest.MonkeyPatch, signum):
     """Readers that send ``signum`` on the run's third read, once, and hold that read until
     the main thread has acted on it, so its archive is stopped mid-walk."""
     reads, sent, lock = [0], threading.Event(), threading.Lock()
@@ -536,7 +555,7 @@ def signalling(world, monkeypatch, signum):
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_a_signal_stops_every_walk_and_a_second_run_finishes_them(
-    tmp_path, monkeypatch, signum
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signum
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     sent = signalling(world, monkeypatch, signum)
@@ -555,7 +574,9 @@ def test_a_signal_stops_every_walk_and_a_second_run_finishes_them(
     }
 
 
-def test_a_second_signal_exits_at_once_with_status_1(tmp_path, monkeypatch):
+def test_a_second_signal_exits_at_once_with_status_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The second signal is sent once the first is handled: two at once arrive as one."""
     world, db, audit = three(tmp_path, monkeypatch)
     exits, lock, reads = [], threading.Lock(), [0]
@@ -587,7 +608,7 @@ def test_a_second_signal_exits_at_once_with_status_1(tmp_path, monkeypatch):
 
 
 def test_three_unexpected_failures_stop_the_run_with_status_1(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """Each failure is recorded on its archive; the third stops the run."""
     world = World(tmp_path)
@@ -614,7 +635,7 @@ def test_three_unexpected_failures_stop_the_run_with_status_1(
 
 
 def test_an_archive_in_error_is_tried_once_more_then_left_while_the_rest_finish(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
 
@@ -644,7 +665,9 @@ def test_an_archive_in_error_is_tried_once_more_then_left_while_the_rest_finish(
     }
 
 
-def test_a_split_archive_reads_with_no_more_chains_than_workers(tmp_path, monkeypatch):
+def test_a_split_archive_reads_with_no_more_chains_than_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     world = World(tmp_path)
     world.add("/R/s", "split.tar", build_tar(members(40, 4)), part_size=60_000)
     world.install(monkeypatch)
@@ -676,7 +699,7 @@ def test_a_split_archive_reads_with_no_more_chains_than_workers(tmp_path, monkey
 
 
 def test_a_split_archive_capped_at_its_workers_leaves_streams_for_others(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """One stream and a margin of two: a split archive capped at two chains leaves room
     for a small archive to walk beside it, and does not wait for it to finish first."""
@@ -717,7 +740,7 @@ def test_a_split_archive_capped_at_its_workers_leaves_streams_for_others(
 
 
 def test_content_walked_before_under_another_name_is_not_walked_again(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The listing is older than the folder: what the folder holds now was walked
     elsewhere already."""
@@ -748,7 +771,7 @@ def test_content_walked_before_under_another_name_is_not_walked_again(
 
 
 def test_two_places_that_come_to_hold_the_same_content_walk_it_once(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The listing saw two archives; by their turns one place holds the other's bytes. Both
     jobs meet the same archive, which one walks, not both at once."""
@@ -792,7 +815,7 @@ def test_two_places_that_come_to_hold_the_same_content_walk_it_once(
 
 @pytest.mark.parametrize("how", ["gone", "gap"])
 def test_a_copy_is_walked_when_the_archive_standing_for_it_has_gone_or_lost_a_part(
-    tmp_path, monkeypatch, how
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how
 ):
     """One place stands for each content, and its copies wait. If that place has gone by its
     turn, or lost a part, the content is walked where a copy of it is."""
@@ -821,7 +844,7 @@ def test_a_copy_is_walked_when_the_archive_standing_for_it_has_gone_or_lost_a_pa
 
 
 def test_the_next_archive_starts_while_another_finishes_its_last_chain(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The streams of an archive's finished chains go to the next archive at once, not when
     the whole archive ends."""
@@ -876,7 +899,9 @@ def test_the_next_archive_starts_while_another_finishes_its_last_chain(
     assert order.index(("start", "b.tar")) < order.index(("end", "a.tar"))
 
 
-def test_an_archive_between_rounds_still_counts_as_one_chain(tmp_path, monkeypatch):
+def test_an_archive_between_rounds_still_counts_as_one_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Once its workers have all finished it is still in flight -- joining, auditing,
     listing its folder again -- and uses a stream for that."""
     _world, db, audit = three(tmp_path, monkeypatch)
@@ -893,7 +918,7 @@ def test_an_archive_between_rounds_still_counts_as_one_chain(tmp_path, monkeypat
 
 
 def test_a_run_goes_on_with_a_walk_from_its_cursors_not_from_the_start(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """What the switch rests on: a walk half done in the database goes on from where it
     stopped. A walk from scratch would read the first header again."""
@@ -938,7 +963,9 @@ def test_a_run_goes_on_with_a_walk_from_its_cursors_not_from_the_start(
     assert asked and min(asked) > 0
 
 
-def test_several_archives_in_one_folder_are_each_walked(tmp_path, monkeypatch):
+def test_several_archives_in_one_folder_are_each_walked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The usual shape: one folder holds many archives, plain and split, side by side."""
     world = World(tmp_path)
     shared = tmp_path / "shared"
@@ -969,7 +996,9 @@ def test_several_archives_in_one_folder_are_each_walked(tmp_path, monkeypatch):
     ]
 
 
-def test_every_walk_and_listing_takes_its_turn_at_one_limiter(tmp_path, monkeypatch):
+def test_every_walk_and_listing_takes_its_turn_at_one_limiter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """So one walk's rate-limit response slows every walk: the limiter pauses every
     request it gates."""
     world, db, audit = three(tmp_path, monkeypatch)
@@ -1005,7 +1034,7 @@ def test_the_runs_limiter_starts_at_the_streams_and_may_climb_to_the_ceiling():
 
 
 def test_a_rate_limited_listing_pauses_every_walk_and_is_asked_again(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     world, db, audit = three(tmp_path, monkeypatch)
     world.faults["/R/a"] = [RateLimitedError("too_many_requests", retry_after=0.01)]
@@ -1019,7 +1048,7 @@ def test_a_rate_limited_listing_pauses_every_walk_and_is_asked_again(
 
 
 def test_the_run_drops_its_token_after_a_401_on_an_archives_listing(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The listing at an archive's turn uses the run's one provider, and tells it."""
     dropped = []
@@ -1040,7 +1069,7 @@ def test_the_run_drops_its_token_after_a_401_on_an_archives_listing(
 
 
 def test_a_folder_that_cannot_be_listed_is_left_in_error_and_the_run_goes_on(
-    tmp_path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Failures that outlast the retries: tried once more at the end of the queue, then
     left in error -- not a bug, so the run exits 0."""
@@ -1089,7 +1118,7 @@ def mixed(rng, i, round_):
 
 @pytest.mark.parametrize("round_", range(3))
 def test_many_archives_walked_at_once_give_exactly_the_rows_walked_one_at_a_time(
-    tmp_path, monkeypatch, round_
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, round_
 ):
     """The equivalence check: threads, a shared limiter and one database change nothing
     about what any archive's walk records. Each round has its own mix, and DBAUDIT_SEED

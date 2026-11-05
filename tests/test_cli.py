@@ -8,7 +8,7 @@ from dbaudit.cli import human_bytes, human_duration, main
 from dbaudit.store import Store
 
 
-def seeded_db(tmp_path):
+def seeded_db(tmp_path: Path):
     db = tmp_path / "a.db"
     store = Store(db)
     store.init_schema()
@@ -20,7 +20,7 @@ def seeded_db(tmp_path):
     return db, store
 
 
-def test_status_reports_progress(tmp_path, capsys):
+def test_status_reports_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     db, _ = seeded_db(tmp_path)
     assert main(["status", "--db", str(db)]) == 0
     out = capsys.readouterr().out
@@ -29,7 +29,7 @@ def test_status_reports_progress(tmp_path, capsys):
     assert "/R" in out
 
 
-def test_status_lists_failed_shards(tmp_path, capsys):
+def test_status_lists_failed_shards(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     db, store = seeded_db(tmp_path)
     store.fail_shard(2, "transient failures exhausted")
     main(["status", "--db", str(db)])
@@ -37,7 +37,9 @@ def test_status_lists_failed_shards(tmp_path, capsys):
     assert "/R/b" in out and "transient" in out
 
 
-def test_status_on_uninitialised_db_is_an_error(tmp_path, capsys):
+def test_status_on_uninitialised_db_is_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     assert main(["status", "--db", str(tmp_path / "missing.db")]) == 2
     assert "not initialised" in capsys.readouterr().err
 
@@ -52,7 +54,9 @@ def test_verify_on_a_database_with_no_root_is_an_error(
     assert "not initialised" in capsys.readouterr().err
 
 
-def test_init_refuses_when_disk_too_small(tmp_path, monkeypatch, capsys):
+def test_init_refuses_when_disk_too_small(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     monkeypatch.setattr("dbaudit.cli.free_bytes", lambda p: 1024)
     rc = main(
         ["init", "--db", str(tmp_path / "a.db"), "--root", "/R", "--min-free-gb", "50"]
@@ -61,12 +65,16 @@ def test_init_refuses_when_disk_too_small(tmp_path, monkeypatch, capsys):
     assert "free" in capsys.readouterr().err
 
 
-def test_run_on_uninitialised_db_is_an_error(tmp_path, capsys):
+def test_run_on_uninitialised_db_is_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     assert main(["run", "--db", str(tmp_path / "missing.db")]) == 2
     assert "not initialised" in capsys.readouterr().err
 
 
-def test_run_refuses_when_another_instance_holds_the_lock(tmp_path, capsys):
+def test_run_refuses_when_another_instance_holds_the_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     from dbaudit.lock import InstanceLock
 
     db = tmp_path / "a.db"
@@ -100,7 +108,7 @@ def test_human_duration(value, expected):
 
 
 def test_report_calls_a_crawl_with_failed_shards_incomplete(
-    tmp_path, capsys, monkeypatch
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ):
     """Nothing is pending or running, but /R/b failed: its files are missing."""
     db, store = seeded_db(tmp_path)
@@ -115,7 +123,7 @@ def test_report_calls_a_crawl_with_failed_shards_incomplete(
 
 
 def test_init_says_when_dropbox_cannot_look_up_the_account_just_now(
-    tmp_path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """A 429 or a server error on the account lookup is not a listing that failed."""
 
@@ -162,7 +170,7 @@ COMMANDS = [
 
 
 @pytest.mark.parametrize("command", COMMANDS, ids=" ".join)
-def test_every_command_has_help(command, capsys):
+def test_every_command_has_help(command, capsys: pytest.CaptureFixture[str]):
     assert main([*command, "--help"]) == 0
     assert "Usage: dbaudit " + " ".join(command) in capsys.readouterr().out
 
@@ -356,7 +364,7 @@ BEFORE = [
     "argv,body,expected", BEFORE, ids=[" ".join(argv[:2]) for argv, _, _ in BEFORE]
 )
 def test_each_command_gets_the_arguments_it_got_before(
-    monkeypatch, argv, body, expected
+    monkeypatch: pytest.MonkeyPatch, argv, body, expected
 ):
     got = []
     monkeypatch.setattr(cli, body, lambda args: got.append(args) or 0)
@@ -364,36 +372,38 @@ def test_each_command_gets_the_arguments_it_got_before(
     assert vars(got[0]) == {**expected, "verbose": False}
 
 
-def test_verbose_goes_before_the_command(monkeypatch):
+def test_verbose_goes_before_the_command(monkeypatch: pytest.MonkeyPatch):
     got = []
     monkeypatch.setattr(cli, "cmd_status", lambda args: got.append(args) or 0)
     assert main(["--verbose", "status", "--db", "a.db"]) == 0
     assert got[0].verbose is True
 
 
-def test_a_body_s_exit_code_is_the_command_s(monkeypatch):
+def test_a_body_s_exit_code_is_the_command_s(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(cli, "cmd_status", lambda args: 3)
     assert main(["status", "--db", "a.db"]) == 3
 
 
-def test_a_missing_option_is_a_usage_error(capsys):
+def test_a_missing_option_is_a_usage_error(capsys: pytest.CaptureFixture[str]):
     assert main(["status"]) == 2
     assert "Missing option '--db'" in capsys.readouterr().err
 
 
-def test_a_word_where_a_number_goes_is_a_usage_error(capsys):
+def test_a_word_where_a_number_goes_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str],
+):
     assert main(["report", "--db", "a.db", "--top", "many"]) == 2
     assert "'many' is not a valid int" in capsys.readouterr().err
 
 
-def test_no_command_shows_the_commands(capsys):
+def test_no_command_shows_the_commands(capsys: pytest.CaptureFixture[str]):
     assert main([]) == 2
     shown = capsys.readouterr()
     assert "archive" in shown.out + shown.err
 
 
 @pytest.mark.parametrize("where", [[], ["--folder", "/R", "--local-dir", "d"]])
-def test_register_takes_exactly_one_place(where, capsys):
+def test_register_takes_exactly_one_place(where, capsys: pytest.CaptureFixture[str]):
     assert main(["archive", "register", "--db", "x.db", "--name", "a.tar", *where]) == 2
     assert "exactly one of --folder and --local-dir" in capsys.readouterr().err
 

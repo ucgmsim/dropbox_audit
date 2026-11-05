@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from dbaudit.report import (
     bytes_older_than,
     cold_bytes,
@@ -31,7 +33,7 @@ def mk(name, size, digest, ts="2020-01-01T00:00:00Z", d="/R"):
     }
 
 
-def seed(tmp_path, entries):
+def seed(tmp_path: Path, entries):
     store = Store(tmp_path / "a.db")
     store.init_schema()
     store.set_meta("root", "/R")
@@ -42,7 +44,7 @@ def seed(tmp_path, entries):
     return store
 
 
-def test_duplicates_report_reclaimable_bytes(tmp_path):
+def test_duplicates_report_reclaimable_bytes(tmp_path: Path):
     store = seed(
         tmp_path,
         [mk("a", 100, "a"), mk("b", 100, "a"), mk("c", 100, "a"), mk("d", 7, "b")],
@@ -54,14 +56,14 @@ def test_duplicates_report_reclaimable_bytes(tmp_path):
     assert total_reclaimable_duplicates(store) == 200
 
 
-def test_files_with_no_hash_are_not_treated_as_duplicates(tmp_path):
+def test_files_with_no_hash_are_not_treated_as_duplicates(tmp_path: Path):
     no_hash = dict(mk("x", 5, "a"))
     no_hash.pop("content_hash")
     store = seed(tmp_path, [no_hash, dict(mk("y", 5, "a"), content_hash=None)])
     assert duplicate_report(store, limit=10) == []
 
 
-def test_cold_bytes_buckets_by_year(tmp_path):
+def test_cold_bytes_buckets_by_year(tmp_path: Path):
     store = seed(
         tmp_path,
         [
@@ -73,7 +75,7 @@ def test_cold_bytes_buckets_by_year(tmp_path):
     assert by_year[2015] == 10 and by_year[2026] == 20
 
 
-def test_bytes_older_than(tmp_path):
+def test_bytes_older_than(tmp_path: Path):
     import calendar
 
     store = seed(
@@ -88,7 +90,7 @@ def test_bytes_older_than(tmp_path):
     assert (count, total) == (1, 10)
 
 
-def test_top_dirs_rolls_up_recursively(tmp_path):
+def test_top_dirs_rolls_up_recursively(tmp_path: Path):
     store = seed(
         tmp_path, [mk("x", 5, "a", d="/R/sub"), mk("y", 7, "b", d="/R/sub/deeper")]
     )
@@ -98,7 +100,7 @@ def test_top_dirs_rolls_up_recursively(tmp_path):
     assert top["/R/sub/deeper"] == 7
 
 
-def test_top_dirs_counts_files_recursively(tmp_path):
+def test_top_dirs_counts_files_recursively(tmp_path: Path):
     store = seed(
         tmp_path, [mk("x", 5, "a", d="/R/sub"), mk("y", 7, "b", d="/R/sub/deeper")]
     )
@@ -106,17 +108,17 @@ def test_top_dirs_counts_files_recursively(tmp_path):
     assert counts["/R"] == 2 and counts["/R/sub/deeper"] == 1
 
 
-def test_top_dirs_on_empty_database(tmp_path):
+def test_top_dirs_on_empty_database(tmp_path: Path):
     store = seed(tmp_path, [])
     assert top_dirs(store, limit=10) == []
 
 
-def test_reconcile_reports_residual(tmp_path):
+def test_reconcile_reports_residual(tmp_path: Path):
     store = seed(tmp_path, [mk("a", 100, "a")])
     assert reconcile(store, reported_used_bytes=250) == (100, 250, 150)
 
 
-def test_small_file_hotspots(tmp_path):
+def test_small_file_hotspots(tmp_path: Path):
     entries = [mk(f"f{i}", 1, f"{i:064d}", d="/R/junk") for i in range(10)]
     entries.append(mk("big", 10_000_000, "z", d="/R/ok"))
     store = seed(tmp_path, entries)
@@ -124,7 +126,7 @@ def test_small_file_hotspots(tmp_path):
     assert hits == ["/R/junk"]
 
 
-def test_extension_profile_ranks_by_bytes(tmp_path):
+def test_extension_profile_ranks_by_bytes(tmp_path: Path):
     store = seed(
         tmp_path,
         [
@@ -139,12 +141,12 @@ def test_extension_profile_ranks_by_bytes(tmp_path):
     assert any(r.ext == "(none)" for r in rows)
 
 
-def test_extension_ignores_dotted_names_that_are_not_extensions(tmp_path):
+def test_extension_ignores_dotted_names_that_are_not_extensions(tmp_path: Path):
     store = seed(tmp_path, [mk("run.2024-01-01-backup-archive", 10, "a")])
     assert extension_profile(store)[0].ext == "(none)"
 
 
-def test_top_level_summary_is_per_immediate_child(tmp_path):
+def test_top_level_summary_is_per_immediate_child(tmp_path: Path):
     store = seed(
         tmp_path, [mk("x", 5, "a", d="/R/alice"), mk("y", 7, "b", d="/R/bob/deep")]
     )
@@ -152,7 +154,7 @@ def test_top_level_summary_is_per_immediate_child(tmp_path):
     assert rows == {"/R/alice": 5, "/R/bob": 7}
 
 
-def test_export_csv_writes_every_report(tmp_path):
+def test_export_csv_writes_every_report(tmp_path: Path):
     store = seed(tmp_path, [mk("a", 100, "a"), mk("b", 100, "a")])
     written = export_csv(store, str(tmp_path / "out"))
     assert len(written) == 5
@@ -162,7 +164,7 @@ def test_export_csv_writes_every_report(tmp_path):
     assert "reclaimable" in body and "100" in body
 
 
-def test_top_dirs_survives_rows_appearing_mid_report(tmp_path):
+def test_top_dirs_survives_rows_appearing_mid_report(tmp_path: Path):
     """Reports are run against live crawls, so the snapshot must be self-consistent.
 
     Reading MAX(id) separately from the rows raced with the crawler and crashed with
@@ -178,7 +180,7 @@ def test_top_dirs_survives_rows_appearing_mid_report(tmp_path):
     assert rows["/R/sub"] == 5  # known directories still roll up correctly
 
 
-def test_top_dirs_ignores_parent_ids_beyond_the_snapshot(tmp_path):
+def test_top_dirs_ignores_parent_ids_beyond_the_snapshot(tmp_path: Path):
     store = seed(tmp_path, [mk("x", 5, "a", d="/R/sub")])
     conn = store.connect()
     conn.execute(
@@ -188,7 +190,7 @@ def test_top_dirs_ignores_parent_ids_beyond_the_snapshot(tmp_path):
     assert top_dirs(store, limit=10)  # must not raise
 
 
-def test_cold_figures_go_by_the_files_own_date(tmp_path):
+def test_cold_figures_go_by_the_files_own_date(tmp_path: Path):
     """Dropbox's server_modified can be years newer than the content; it is not used."""
     import calendar
 
@@ -202,7 +204,7 @@ def test_cold_figures_go_by_the_files_own_date(tmp_path):
     assert {r.year: r.bytes for r in cold_bytes(store)} == {2015: 10, 2026: 20}
 
 
-def test_cold_bytes_and_file_types_can_cover_one_subtree(tmp_path):
+def test_cold_bytes_and_file_types_can_cover_one_subtree(tmp_path: Path):
     store = seed(
         tmp_path,
         [

@@ -1,4 +1,5 @@
 import threading
+from pathlib import Path
 
 from dbaudit.api import CursorResetError, RateLimitedError
 from dbaudit.crawler import Crawler
@@ -11,7 +12,7 @@ def limiter():
     return AdaptiveLimiter(rps=1e6, max_concurrency=4, sleep=lambda d: None)
 
 
-def build(tmp_path, lister, workers=2, **kw):
+def build(tmp_path: Path, lister, workers=2, **kw):
     store = Store(tmp_path / "a.db")
     store.init_schema()
     store.set_meta("root", "/R")
@@ -28,7 +29,7 @@ def files_in(store):
     }
 
 
-def test_full_crawl_finds_every_file(tmp_path):
+def test_full_crawl_finds_every_file(tmp_path: Path):
     store, crawler = build(tmp_path, FakeLister(TREE))
     crawler.seed("/R")
     crawler.run()
@@ -36,7 +37,7 @@ def test_full_crawl_finds_every_file(tmp_path):
     assert store.pending_count() == 0 and store.running_count() == 0
 
 
-def test_crawl_without_splitting_finds_every_file(tmp_path):
+def test_crawl_without_splitting_finds_every_file(tmp_path: Path):
     store, crawler = build(tmp_path, FakeLister(TREE), split_depth=0)
     crawler.seed("/R")
     crawler.run()
@@ -44,7 +45,7 @@ def test_crawl_without_splitting_finds_every_file(tmp_path):
     assert store.query("SELECT COUNT(*) FROM shards")[0][0] == 1
 
 
-def test_resume_after_interruption_is_exact(tmp_path):
+def test_resume_after_interruption_is_exact(tmp_path: Path):
     """Stop mid-crawl, restart on the same DB: every file present exactly once."""
     store, crawler = build(tmp_path, FakeLister(TREE, page_size=1), workers=1)
     crawler.seed("/R")
@@ -62,7 +63,7 @@ def test_resume_after_interruption_is_exact(tmp_path):
     assert duplicates == 0
 
 
-def test_resume_preserves_the_cursor_rather_than_restarting(tmp_path):
+def test_resume_preserves_the_cursor_rather_than_restarting(tmp_path: Path):
     store, crawler = build(
         tmp_path, FakeLister(TREE, page_size=1), workers=1, split_depth=0
     )
@@ -73,7 +74,7 @@ def test_resume_preserves_the_cursor_rather_than_restarting(tmp_path):
     assert shard.state == "pending" and shard.cursor is not None and shard.pages == 3
 
 
-def test_starving_queue_splits_shard(tmp_path):
+def test_starving_queue_splits_shard(tmp_path: Path):
     store, crawler = build(tmp_path, FakeLister(TREE), workers=4, split_depth=1)
     crawler.seed("/R")
     crawler.run()
@@ -82,7 +83,7 @@ def test_starving_queue_splits_shard(tmp_path):
     assert files_in(store) == ALL_FILES
 
 
-def test_split_mode_is_persisted_so_resume_stays_consistent(tmp_path):
+def test_split_mode_is_persisted_so_resume_stays_consistent(tmp_path: Path):
     """A cursor from a non-recursive listing must never be resumed as a recursive one."""
     store, crawler = build(
         tmp_path, FakeLister(TREE, page_size=1), workers=1, split_depth=1
@@ -93,7 +94,7 @@ def test_split_mode_is_persisted_so_resume_stays_consistent(tmp_path):
     assert store.get_shard(1).mode == "split"
 
 
-def test_healthy_queue_does_not_keep_splitting(tmp_path):
+def test_healthy_queue_does_not_keep_splitting(tmp_path: Path):
     tree = {"/R": [f"d{i}/" for i in range(20)]}
     tree.update({f"/R/d{i}": ["f.txt"] for i in range(20)})
     store, crawler = build(
@@ -105,7 +106,7 @@ def test_healthy_queue_does_not_keep_splitting(tmp_path):
     assert store.stats()["files"] == 20
 
 
-def test_max_shards_caps_splitting(tmp_path):
+def test_max_shards_caps_splitting(tmp_path: Path):
     store, crawler = build(
         tmp_path, FakeLister(TREE), workers=4, split_depth=3, max_shards=1
     )
@@ -115,7 +116,7 @@ def test_max_shards_caps_splitting(tmp_path):
     assert files_in(store) == ALL_FILES
 
 
-def test_cursor_reset_reseeds_shard(tmp_path):
+def test_cursor_reset_reseeds_shard(tmp_path: Path):
     lister = FakeLister(
         TREE, page_size=1, continue_faults={1: CursorResetError("reset")}
     )
@@ -129,7 +130,7 @@ def test_cursor_reset_reseeds_shard(tmp_path):
     )
 
 
-def test_rate_limit_is_retried_not_fatal(tmp_path):
+def test_rate_limit_is_retried_not_fatal(tmp_path: Path):
     lister = FakeLister(TREE, page_size=1)
     lister.faults["/R"] = RateLimitedError("429", retry_after=0.05)
     store, crawler = build(tmp_path, lister, workers=1)
@@ -142,7 +143,7 @@ def test_rate_limit_is_retried_not_fatal(tmp_path):
     )
 
 
-def test_vanished_path_is_not_an_error(tmp_path):
+def test_vanished_path_is_not_an_error(tmp_path: Path):
     store, crawler = build(tmp_path, FakeLister(TREE), workers=1, split_depth=0)
     crawler.seed("/R")
     store.add_shard("/R/does-not-exist", 2, "recursive")
@@ -154,7 +155,7 @@ def test_vanished_path_is_not_an_error(tmp_path):
     )
 
 
-def test_transient_errors_eventually_fail_the_shard_not_the_run(tmp_path):
+def test_transient_errors_eventually_fail_the_shard_not_the_run(tmp_path: Path):
     from dbaudit.api import TransientError
 
     class AlwaysBroken(FakeLister):
@@ -192,7 +193,7 @@ class StallsAfterOnePage(FakeLister):
         return super().continue_(cursor)
 
 
-def crawl_with_a_failed_shard(tmp_path):
+def crawl_with_a_failed_shard(tmp_path: Path):
     """/R/a fails holding a cursor: with the queue short it is listed one level at a
     time, and the continue after its first page keeps failing."""
     store, crawler = build(
@@ -207,7 +208,7 @@ def crawl_with_a_failed_shard(tmp_path):
     return store
 
 
-def test_a_failed_shard_is_retried_on_the_next_run(tmp_path):
+def test_a_failed_shard_is_retried_on_the_next_run(tmp_path: Path):
     store = crawl_with_a_failed_shard(tmp_path)
     summary = Crawler(store, FakeLister(TREE, page_size=2), limiter(), workers=1).run()
     assert summary.errors == 0
@@ -216,7 +217,7 @@ def test_a_failed_shard_is_retried_on_the_next_run(tmp_path):
     assert store.query("SELECT COUNT(*) FROM shards WHERE state='error'") == [(0,)]
 
 
-def test_a_retried_shard_starts_over_instead_of_resuming_its_cursor(tmp_path):
+def test_a_retried_shard_starts_over_instead_of_resuming_its_cursor(tmp_path: Path):
     """Resuming would repeat the continue that kept failing; starting over lists the
     folder again from its first page."""
     store = crawl_with_a_failed_shard(tmp_path)
@@ -244,7 +245,9 @@ class FullListingsFail(FakeLister):
         return super().list_folder(path, recursive)
 
 
-def test_a_full_listing_that_keeps_failing_is_split_at_its_second_failure(tmp_path):
+def test_a_full_listing_that_keeps_failing_is_split_at_its_second_failure(
+    tmp_path: Path,
+):
     """split_depth=0 asks for full listings everywhere; /R and /R/a fail as one."""
     lister = FullListingsFail(TREE, {"/R", "/R/a"})
     store, crawler = build(
@@ -275,7 +278,7 @@ class FailsOnce(FakeLister):
         return super().list_folder(path, recursive)
 
 
-def test_one_failure_of_a_full_listing_is_retried_not_split(tmp_path):
+def test_one_failure_of_a_full_listing_is_retried_not_split(tmp_path: Path):
     store, crawler = build(
         tmp_path, FailsOnce(TREE, "/R"), workers=1, split_depth=0, backoff_base=0.01
     )
@@ -286,7 +289,7 @@ def test_one_failure_of_a_full_listing_is_retried_not_split(tmp_path):
 
 
 def test_a_full_listing_failing_after_its_first_page_is_split_only_when_retries_run_out(
-    tmp_path,
+    tmp_path: Path,
 ):
     """Splitting drops the pages it holds, so a blip must not do it: only where the shard
     would otherwise fail. The first page holds /R/top.txt; the split lists it again, once."""
@@ -315,7 +318,7 @@ def test_a_full_listing_failing_after_its_first_page_is_split_only_when_retries_
     )
 
 
-def test_a_split_interrupted_mid_listing_resumes_as_a_split(tmp_path):
+def test_a_split_interrupted_mid_listing_resumes_as_a_split(tmp_path: Path):
     """Its cursor is now a one-level cursor; resuming it as a full listing would stop
     queueing the subfolders on its later pages, and whole subtrees would go missing."""
     store, crawler = build(
@@ -341,7 +344,7 @@ def test_a_split_interrupted_mid_listing_resumes_as_a_split(tmp_path):
     assert files_in(store) == ALL_FILES
 
 
-def test_a_failing_full_listing_is_not_split_past_max_shards(tmp_path):
+def test_a_failing_full_listing_is_not_split_past_max_shards(tmp_path: Path):
     store, crawler = build(
         tmp_path,
         FullListingsFail(TREE, {"/R"}),
@@ -356,7 +359,7 @@ def test_a_failing_full_listing_is_not_split_past_max_shards(tmp_path):
     assert store.query("SELECT COUNT(*) FROM shards") == [(1,)]
 
 
-def test_summary_reports_totals(tmp_path):
+def test_summary_reports_totals(tmp_path: Path):
     store, crawler = build(tmp_path, FakeLister(TREE))
     crawler.seed("/R")
     summary = crawler.run()
@@ -365,7 +368,7 @@ def test_summary_reports_totals(tmp_path):
     assert summary.shards_done == store.query("SELECT COUNT(*) FROM shards")[0][0]
 
 
-def test_concurrent_workers_do_not_duplicate_or_lose_files(tmp_path):
+def test_concurrent_workers_do_not_duplicate_or_lose_files(tmp_path: Path):
     tree = {"/R": [f"d{i}/" for i in range(12)]}
     for i in range(12):
         tree[f"/R/d{i}"] = [f"f{j}.txt" for j in range(15)]
@@ -381,7 +384,7 @@ def test_concurrent_workers_do_not_duplicate_or_lose_files(tmp_path):
     assert duplicates == 0
 
 
-def test_splitting_stays_far_below_splitting_everything(tmp_path):
+def test_splitting_stays_far_below_splitting_everything(tmp_path: Path):
     """Self-limiting, and that is the point.
 
     Splitting every directory is rclone's cost model: one API call per directory.
@@ -404,12 +407,12 @@ def test_splitting_stays_far_below_splitting_everything(tmp_path):
     assert store.stats()["files"] == 300
 
 
-def test_queue_target_defaults_to_twice_the_workers(tmp_path):
+def test_queue_target_defaults_to_twice_the_workers(tmp_path: Path):
     _store, crawler = build(tmp_path, FakeLister(TREE), workers=5)
     assert crawler.queue_target == 10
 
 
-def test_a_busy_queue_still_splits_when_it_drains(tmp_path):
+def test_a_busy_queue_still_splits_when_it_drains(tmp_path: Path):
     """Self-arming: the queue target is re-checked on every claim, so a long shard
     cannot leave workers idle."""
     tree = {"/R": [f"d{i}/" for i in range(6)]}
@@ -427,7 +430,7 @@ def test_a_busy_queue_still_splits_when_it_drains(tmp_path):
     assert store.stats()["files"] == 24
 
 
-def test_queue_target_respects_the_depth_bound(tmp_path):
+def test_queue_target_respects_the_depth_bound(tmp_path: Path):
     store, crawler = build(
         tmp_path, FakeLister(TREE), workers=1, split_depth=0, queue_target=10_000
     )
@@ -449,7 +452,7 @@ def wide_tree(children=30, with_subfolder=()):
     return tree
 
 
-def crawl_wide(tmp_path, tree):
+def crawl_wide(tmp_path: Path, tree):
     """split_depth=2 splits /R and /R/wide, never the c-folders; with one worker they are
     listed in order. A full listing of a c-folder takes 3 requests at page_size=1."""
     lister = FakeLister(tree, page_size=1)
@@ -476,7 +479,9 @@ def files_of(tree):
     }
 
 
-def test_once_20_siblings_had_no_subfolders_the_rest_are_listed_one_level(tmp_path):
+def test_once_20_siblings_had_no_subfolders_the_rest_are_listed_one_level(
+    tmp_path: Path,
+):
     tree = wide_tree()
     store, full, one_level = crawl_wide(tmp_path, tree)
     assert full == [f"/R/wide/c{i:02}" for i in range(20)]
@@ -484,7 +489,7 @@ def test_once_20_siblings_had_no_subfolders_the_rest_are_listed_one_level(tmp_pa
     assert files_in(store) == files_of(tree)
 
 
-def test_siblings_with_subfolders_are_all_listed_in_full(tmp_path):
+def test_siblings_with_subfolders_are_all_listed_in_full(tmp_path: Path):
     tree = wide_tree(with_subfolder=range(30))
     store, full, one_level = crawl_wide(tmp_path, tree)
     assert len(full) == 30 and one_level == []
@@ -492,7 +497,7 @@ def test_siblings_with_subfolders_are_all_listed_in_full(tmp_path):
 
 
 def test_more_than_one_in_ten_siblings_with_folders_turns_one_level_listing_off(
-    tmp_path,
+    tmp_path: Path,
 ):
     """c20 and c21 hold folders and leave it on (1 in 21, 2 in 22); c22 makes 3 in 23."""
     tree = wide_tree(with_subfolder={20, 21, 22})
@@ -502,7 +507,9 @@ def test_more_than_one_in_ten_siblings_with_folders_turns_one_level_listing_off(
     assert files_in(store) == files_of(tree)
 
 
-def test_a_listing_resumed_from_a_cursor_does_not_count_as_having_no_folders(tmp_path):
+def test_a_listing_resumed_from_a_cursor_does_not_count_as_having_no_folders(
+    tmp_path: Path,
+):
     """c00's full listing is stopped just after the page showing its folder `sub`
     (pages 1-6 split /R and /R/wide; c00's are 7-11, `sub` on page 10). Resumed in a
     new process, its remaining page shows no folder -- which must not make c00 count

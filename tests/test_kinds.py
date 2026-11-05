@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from dbaudit.kinds import (
@@ -94,7 +96,7 @@ def test_an_unlisted_lf_tarball_is_shared_out_like_the_listed_ones():
     assert shares("vm") == {"vm": 1.0}
 
 
-def test_a_rules_file_gives_its_words(tmp_path):
+def test_a_rules_file_gives_its_words(tmp_path: Path):
     path = tmp_path / "site.toml"
     path.write_text(
         'recorded = ["observed_db"]\nim_folders = ["im_results", "hazard"]\n'
@@ -120,13 +122,13 @@ def test_a_rules_file_gives_its_words(tmp_path):
         ("recorded = [", "TOML"),
     ],
 )
-def test_a_rules_file_that_cannot_be_used_says_why(tmp_path, text, named):
+def test_a_rules_file_that_cannot_be_used_says_why(tmp_path: Path, text, named):
     path = tmp_path / "site.toml"
     path.write_text(text)
     with pytest.raises(KindsError, match=named):
         load_rules(str(path))
 
 
-def test_a_missing_rules_file_is_named(tmp_path):
+def test_a_missing_rules_file_is_named(tmp_path: Path):
     with pytest.raises(KindsError, match="nope.toml"):
         load_rules(str(tmp_path / "nope.toml"))

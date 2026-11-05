@@ -39,7 +39,7 @@ def folder(path):
     }
 
 
-def listing(tmp_path, *entries):
+def listing(tmp_path: Path, *entries):
     store = Store(tmp_path / "audit.db")
     store.init_schema()
     store.set_meta("root", "/R")
@@ -60,7 +60,7 @@ def measured(store, page="/R", min_size=1):
 # ---- folder totals ----------------------------------------------------------
 
 
-def test_folder_totals_cover_the_whole_subtree(tmp_path):
+def test_folder_totals_cover_the_whole_subtree(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/a/x", 5),
@@ -89,7 +89,7 @@ def test_folder_totals_cover_the_whole_subtree(tmp_path):
     assert f.size[at(store, "/R/empty")] == 0
 
 
-def test_dates_are_the_files_own_not_dropboxs(tmp_path):
+def test_dates_are_the_files_own_not_dropboxs(tmp_path: Path):
     store = listing(
         tmp_path,
         file(
@@ -107,7 +107,7 @@ def test_dates_are_the_files_own_not_dropboxs(tmp_path):
     assert f.newest[r] == calendar.timegm((2026, 1, 1, 0, 0, 0, 0, 0, 0))
 
 
-def test_a_date_after_the_listing_is_never_a_folders_newest(tmp_path):
+def test_a_date_after_the_listing_is_never_a_folders_newest(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/a/x", 1, modified="2035-07-30T00:00:00Z"),
@@ -117,20 +117,20 @@ def test_a_date_after_the_listing_is_never_a_folders_newest(tmp_path):
     assert newest == calendar.timegm((2026, 1, 1, 0, 0, 0, 0, 0, 0))
 
 
-def test_the_page_is_its_root_and_everything_below_it(tmp_path):
+def test_the_page_is_its_root_and_everything_below_it(tmp_path: Path):
     store = listing(tmp_path, file("/R/a/b/y", 7), file("/R/c/z", 11))
     f = measured(store, page="/R/a")
     assert f.on_page[at(store, "/R/a")] and f.on_page[at(store, "/R/a/b")]
     assert not f.on_page[at(store, "/R")] and not f.on_page[at(store, "/R/c")]
 
 
-def test_folders_are_found_without_regard_to_case(tmp_path):
+def test_folders_are_found_without_regard_to_case(tmp_path: Path):
     store = listing(tmp_path, file("/R/Mixed/x", 1))
     assert tree.find_dir(store, "/r/mixed/") == (at(store, "/R/Mixed"), "/R/Mixed")
     assert tree.find_dir(store, "/R/missing") is None
 
 
-def test_the_listing_time_is_when_a_pass_finished_or_else_began(tmp_path):
+def test_the_listing_time_is_when_a_pass_finished_or_else_began(tmp_path: Path):
     store = listing(tmp_path)
     store.set_meta("created_at", 1000.0)
     assert tree.crawl_time(store) == (1000.0, False)
@@ -141,7 +141,7 @@ def test_the_listing_time_is_when_a_pass_finished_or_else_began(tmp_path):
 # ---- duplicates -------------------------------------------------------------
 
 
-def test_files_in_folders_newer_than_the_snapshot_are_left_out(tmp_path):
+def test_files_in_folders_newer_than_the_snapshot_are_left_out(tmp_path: Path):
     """A page can be made while a crawl is still writing: rows that arrive mid-read
     reference folders the snapshot never saw."""
     store = listing(tmp_path, file("/R/a/x", 5, "X"))
@@ -154,7 +154,7 @@ def test_files_in_folders_newer_than_the_snapshot_are_left_out(tmp_path):
     assert f.size[at(store, "/R")] == 5 and f.held[at(store, "/R/a")] == 0
 
 
-def test_a_copy_elsewhere_counts_in_both_folders_and_not_their_parent(tmp_path):
+def test_a_copy_elsewhere_counts_in_both_folders_and_not_their_parent(tmp_path: Path):
     store = listing(
         tmp_path, file("/R/P/A/x/f", 100, "X"), file("/R/P/B/x/g", 100, "X")
     )
@@ -164,25 +164,25 @@ def test_a_copy_elsewhere_counts_in_both_folders_and_not_their_parent(tmp_path):
     assert f.held[at(store, "/R/P")] == 0 and f.held[at(store, "/R")] == 0
 
 
-def test_two_copies_in_one_folder_count_nowhere(tmp_path):
+def test_two_copies_in_one_folder_count_nowhere(tmp_path: Path):
     store = listing(tmp_path, file("/R/P/A/f", 100, "X"), file("/R/P/A/g", 100, "X"))
     f = measured(store)
     assert f.held[at(store, "/R/P/A")] == 0 and f.held[at(store, "/R/P")] == 0
 
 
-def test_a_copy_in_a_subfolder_counts_only_there(tmp_path):
+def test_a_copy_in_a_subfolder_counts_only_there(tmp_path: Path):
     store = listing(tmp_path, file("/R/A/f", 100, "X"), file("/R/A/sub/g", 100, "X"))
     f = measured(store)
     assert f.held[at(store, "/R/A/sub")] == 100 and f.held[at(store, "/R/A")] == 0
 
 
-def test_empty_files_are_never_duplicates(tmp_path):
+def test_empty_files_are_never_duplicates(tmp_path: Path):
     store = listing(tmp_path, file("/R/A/f", 0, "E"), file("/R/B/g", 0, "E"))
     f = measured(store)
     assert f.held[at(store, "/R/A")] == 0 and not any(f.copies) and f.reclaimable == 0
 
 
-def test_copies_are_counted_for_files_that_can_get_a_row(tmp_path):
+def test_copies_are_counted_for_files_that_can_get_a_row(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/a", 100, "X"),
@@ -195,7 +195,7 @@ def test_copies_are_counted_for_files_that_can_get_a_row(tmp_path):
     assert sorted(c for c in f.copies if c) == [3, 3, 3]
 
 
-def test_reclaimable_on_the_whole_listing_matches_the_report(tmp_path):
+def test_reclaimable_on_the_whole_listing_matches_the_report(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/A/f", 100, "X"),
@@ -210,7 +210,7 @@ def test_reclaimable_on_the_whole_listing_matches_the_report(tmp_path):
     )
 
 
-def test_on_a_subtree_page_a_copy_outside_frees_every_copy_inside(tmp_path):
+def test_on_a_subtree_page_a_copy_outside_frees_every_copy_inside(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/A/f", 100, "X"),
@@ -221,7 +221,7 @@ def test_on_a_subtree_page_a_copy_outside_frees_every_copy_inside(tmp_path):
     assert measured(store, page="/R/A").reclaimable == 100 + 7
 
 
-def test_copy_counts_stay_compact_at_any_min_size(tmp_path):
+def test_copy_counts_stay_compact_at_any_min_size(tmp_path: Path):
     """A count is kept for every duplicated file the page could show; at a small
     --min-size that is most of the listing, so it must cost bytes per file, not objects."""
     import tracemalloc
@@ -242,7 +242,7 @@ def test_copy_counts_stay_compact_at_any_min_size(tmp_path):
 # ---- layout -----------------------------------------------------------------
 
 
-def sample(tmp_path):
+def sample(tmp_path: Path):
     return listing(
         tmp_path,
         file("/R/big/f1", 50),
@@ -260,7 +260,7 @@ def shape(row):
     return (row.kind, label, row.size, [shape(c) for c in row.children])
 
 
-def test_small_entries_fold_into_one_row_per_folder(tmp_path):
+def test_small_entries_fold_into_one_row_per_folder(tmp_path: Path):
     store = sample(tmp_path)
     page = tree.layout(store, measured(store), 10, 1000)
     assert shape(page.root) == (
@@ -281,7 +281,7 @@ def test_small_entries_fold_into_one_row_per_folder(tmp_path):
     assert page.rows == 8 and page.threshold == 10
 
 
-def test_fold_rows_and_shown_rows_add_up_to_each_folder(tmp_path):
+def test_fold_rows_and_shown_rows_add_up_to_each_folder(tmp_path: Path):
     store = sample(tmp_path)
     page = tree.layout(store, measured(store), 10, 1000)
 
@@ -296,7 +296,7 @@ def test_fold_rows_and_shown_rows_add_up_to_each_folder(tmp_path):
     check(page.root)
 
 
-def test_a_larger_threshold_folds_more(tmp_path):
+def test_a_larger_threshold_folds_more(tmp_path: Path):
     store = sample(tmp_path)
     page = tree.layout(store, measured(store), 25, 1000)
     assert [shape(c)[:3] for c in page.root.children] == [
@@ -305,14 +305,14 @@ def test_a_larger_threshold_folds_more(tmp_path):
     ]
 
 
-def test_a_subtree_page_starts_at_that_folder(tmp_path):
+def test_a_subtree_page_starts_at_that_folder(tmp_path: Path):
     store = sample(tmp_path)
     page = tree.layout(store, measured(store, page="/R/big"), 10, 1000)
     assert (page.root.name, page.root.path, page.root.size) == ("big", "big", 84)
     assert [c.path for c in page.root.children] == ["big/f1", "big/f2", "big"]
 
 
-def test_too_many_rows_doubles_the_threshold(tmp_path):
+def test_too_many_rows_doubles_the_threshold(tmp_path: Path):
     store = sample(tmp_path)
     page = tree.layout(store, measured(store), 10, 5)
     assert (page.threshold, page.rows) == (40, 5)
@@ -322,14 +322,14 @@ def test_too_many_rows_doubles_the_threshold(tmp_path):
     ]
 
 
-def test_file_rows_carry_their_copy_count(tmp_path):
+def test_file_rows_carry_their_copy_count(tmp_path: Path):
     store = listing(tmp_path, file("/R/a/f", 50, "X"), file("/R/b/g", 50, "X"))
     page = tree.layout(store, measured(store, min_size=10), 10, 1000)
     rows = [c for folder in page.root.children for c in folder.children]
     assert [(r.name, r.copies) for r in rows] == [("f", 2), ("g", 2)]
 
 
-def test_layout_holds_only_as_many_files_as_the_page_can_show(tmp_path):
+def test_layout_holds_only_as_many_files_as_the_page_can_show(tmp_path: Path):
     """Memory follows --max-rows, not --min-size: while the threshold is chosen no more
     than max_rows + 1 files are held, and names are read only for the files shown."""
     import tracemalloc
@@ -352,7 +352,7 @@ def chosen(store, threshold=1, page="/R"):
     return tree.tables(store, f, tree.layout(store, f, threshold, 1000))
 
 
-def test_listed_folders_never_overlap(tmp_path):
+def test_listed_folders_never_overlap(tmp_path: Path):
     store = listing(
         tmp_path,
         # D holds 15 bytes held elsewhere: X outside A, Y elsewhere in A. A holds
@@ -369,7 +369,7 @@ def test_listed_folders_never_overlap(tmp_path):
     assert [e.path for e in lists["cold"]] == ["C"]
 
 
-def test_the_tiny_rule(tmp_path, monkeypatch):
+def test_the_tiny_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(tree, "TINY_FILES", 3)
     monkeypatch.setattr(tree, "TINY_MEAN", 10)
     store = listing(
@@ -389,7 +389,7 @@ def test_the_tiny_rule(tmp_path, monkeypatch):
     assert rows == {"T": True, "U": False, "V": False}
 
 
-def test_the_counterpart_is_where_the_other_copies_mostly_are(tmp_path):
+def test_the_counterpart_is_where_the_other_copies_mostly_are(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/P/A/f", 30, "X"),
@@ -401,7 +401,7 @@ def test_the_counterpart_is_where_the_other_copies_mostly_are(tmp_path):
     assert (entry.place, entry.place_share) == ("P/B", 0.75)
 
 
-def test_the_counterpart_is_never_shallower_than_two_below_the_root(tmp_path):
+def test_the_counterpart_is_never_shallower_than_two_below_the_root(tmp_path: Path):
     store = listing(
         tmp_path, file("/R/S/sub/f", 30, "X"), file("/R/T/deep/x/f", 30, "X")
     )
@@ -409,7 +409,9 @@ def test_the_counterpart_is_never_shallower_than_two_below_the_root(tmp_path):
     assert (entry.place, entry.place_share) == ("T/deep", 1.0)
 
 
-def test_a_folded_folder_links_to_its_nearest_row(tmp_path, monkeypatch):
+def test_a_folded_folder_links_to_its_nearest_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setattr(tree, "TINY_FILES", 3)
     monkeypatch.setattr(
         tree, "TINY_MEAN", 10
@@ -480,7 +482,7 @@ def test_bars_fill_in_eighths():
     assert tree.bar(1 / tree.BAR_WIDTH + 3 / 8 / tree.BAR_WIDTH) == "█▍"
 
 
-def test_names_are_escaped(tmp_path):
+def test_names_are_escaped(tmp_path: Path):
     store = listing(tmp_path, file('/R/a<b&"c/a<b&"c', 5))
     text = page_text(store)
     assert 'a<b&"c' not in text
@@ -490,7 +492,7 @@ def test_names_are_escaped(tmp_path):
     )
 
 
-def test_the_page_holds_together(tmp_path):
+def test_the_page_holds_together(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/A/f", 100, "X"),
@@ -512,32 +514,32 @@ def test_the_page_holds_together(tmp_path):
     ]
 
 
-def test_an_incomplete_listing_says_so(tmp_path):
+def test_an_incomplete_listing_says_so(tmp_path: Path):
     store = listing(tmp_path, file("/R/A/f", 5))
     assert "The listing is incomplete" not in page_text(store)
     store.add_shard("/R/later", 2)
     assert "The listing is incomplete: 1 pending" in page_text(store)
 
 
-def test_a_raised_threshold_is_stated(tmp_path):
+def test_a_raised_threshold_is_stated(tmp_path: Path):
     store = sample(tmp_path)
     assert "entries under 40B are folded" in page_text(store, min_size=10, max_rows=5)
     assert "are folded.</div>" not in page_text(store, min_size=10)
 
 
-def test_names_beyond_ascii_come_through_intact(tmp_path):
+def test_names_beyond_ascii_come_through_intact(tmp_path: Path):
     store = listing(tmp_path, file("/R/Ngā kōrero/日本 é.txt", 5))
     text = page_text(store)
     assert ">Ngā kōrero</span>" in text and 'data-path="Ngā kōrero/日本 é.txt"' in text
 
 
-def test_a_page_of_empty_files_divides_by_nothing(tmp_path):
+def test_a_page_of_empty_files_divides_by_nothing(tmp_path: Path):
     store = listing(tmp_path, file("/R/a/x", 0), file("/R/b/y", 0))
     text = page_text(store, min_size=0)
     assert Outline(text).open == 0 and '<span class="pct">0.0%</span>' in text
 
 
-def test_an_empty_listing_is_a_page_of_zeros(tmp_path):
+def test_an_empty_listing_is_a_page_of_zeros(tmp_path: Path):
     store = Store(tmp_path / "audit.db")
     store.init_schema()
     store.set_meta("root", "/R")
@@ -545,7 +547,9 @@ def test_an_empty_listing_is_a_page_of_zeros(tmp_path):
     assert outline.open == 0 and "d0" in outline.ids
 
 
-def test_a_crawl_writing_while_the_page_is_built_cannot_reach_it(tmp_path, monkeypatch):
+def test_a_crawl_writing_while_the_page_is_built_cannot_reach_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Every query reads one snapshot. Read separately, a big file committed after
     measuring lands in a folder measured as small, which has no row to hold it."""
     store = listing(tmp_path, file("/R/a/x", 5), file("/R/b/y", 50))
@@ -565,7 +569,9 @@ def test_a_crawl_writing_while_the_page_is_built_cannot_reach_it(tmp_path, monke
 # ---- the command ------------------------------------------------------------
 
 
-def test_the_command_writes_the_page_and_says_so(tmp_path, capsys):
+def test_the_command_writes_the_page_and_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     from dbaudit.cli import main
 
     sample(tmp_path)
@@ -589,7 +595,9 @@ def test_the_command_writes_the_page_and_says_so(tmp_path, capsys):
     assert not list(tmp_path.glob(".tree-*"))
 
 
-def test_the_command_refuses_a_missing_database_or_folder(tmp_path, capsys):
+def test_the_command_refuses_a_missing_database_or_folder(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     from dbaudit.cli import main
 
     out = tmp_path / "tree.html"
@@ -634,14 +642,16 @@ def test_sizes_are_read_in_binary_units():
     ] == [1 << 30, 100 << 20, 512 << 10, 2048, 1536, 7]
 
 
-def test_a_size_that_cannot_be_read_is_refused(capsys):
+def test_a_size_that_cannot_be_read_is_refused(capsys: pytest.CaptureFixture[str]):
     from dbaudit.cli import main
 
     assert main(["tree", "--db", "a.db", "--out", "t.html", "--min-size", "1GB"]) == 2
     assert "is not a size" in capsys.readouterr().err
 
 
-def test_the_command_will_not_overwrite_the_database_or_write_nowhere(tmp_path, capsys):
+def test_the_command_will_not_overwrite_the_database_or_write_nowhere(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     from dbaudit.cli import main
 
     sample(tmp_path)
@@ -653,7 +663,9 @@ def test_the_command_will_not_overwrite_the_database_or_write_nowhere(tmp_path, 
     assert tree.find_dir(Store(db), "/R/big") is not None  # the database is untouched
 
 
-def test_the_command_will_not_write_over_the_database_by_another_name(tmp_path, capsys):
+def test_the_command_will_not_write_over_the_database_by_another_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     """On a case-insensitive disk AUDIT.DB is audit.db. A hard link is likewise one file
     under two names, and the command must see through either."""
     from dbaudit.cli import main
@@ -665,7 +677,7 @@ def test_the_command_will_not_write_over_the_database_by_another_name(tmp_path, 
     assert "names the database itself" in capsys.readouterr().err
 
 
-def test_the_page_gets_the_permissions_the_umask_allows(tmp_path):
+def test_the_page_gets_the_permissions_the_umask_allows(tmp_path: Path):
     """The page is full of real folder names: under umask 077 it must stay private."""
     from dbaudit.cli import main
 
@@ -687,7 +699,7 @@ def page_html(store, page="/R", **kw):
     return out.getvalue()
 
 
-def test_each_folder_row_gets_the_largest_kind_below_it(tmp_path):
+def test_each_folder_row_gets_the_largest_kind_below_it(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/a/vp3dfile.p", 100),
@@ -713,7 +725,7 @@ def test_each_folder_row_gets_the_largest_kind_below_it(tmp_path):
     assert t.total() == 505
 
 
-def test_a_folder_mostly_of_one_kind_wears_its_badge(tmp_path):
+def test_a_folder_mostly_of_one_kind_wears_its_badge(tmp_path: Path):
     store = listing(
         tmp_path,
         file("/R/a/vp3dfile.p", 300),
@@ -729,14 +741,14 @@ def test_a_folder_mostly_of_one_kind_wears_its_badge(tmp_path):
     assert "badge kind" not in m[: m.index("</summary>")]
 
 
-def test_the_page_has_two_kinds_tables_and_says_how_to_read_them(tmp_path):
+def test_the_page_has_two_kinds_tables_and_says_how_to_read_them(tmp_path: Path):
     store = listing(tmp_path, file("/R/a/vp3dfile.p", 300))
     html = page_html(store)
     assert "Where the bytes are, by kind" in html and "Bytes by kind and year" in html
     assert "velocity models" in html and "kind badge" in html
 
 
-def test_a_tarballs_members_count_toward_its_folder_by_kind(tmp_path):
+def test_a_tarballs_members_count_toward_its_folder_by_kind(tmp_path: Path):
     store = listing(tmp_path, file("/R/t/a.tar", 1000, "A"))
     index = index_file(
         tmp_path,
@@ -749,7 +761,7 @@ def test_a_tarballs_members_count_toward_its_folder_by_kind(tmp_path):
     assert '<span class="badge kind">vm 100%</span>' in t[: t.index("</summary>")]
 
 
-def test_a_subtree_page_counts_kinds_below_it_only(tmp_path):
+def test_a_subtree_page_counts_kinds_below_it_only(tmp_path: Path):
     store = listing(tmp_path, file("/R/a/vp3dfile.p", 300), file("/R/b/x.srf", 700))
     _page, summary, _ = tree.build(store, "/R/a", 1, 1000, "audit.db")
     assert summary.kinds.total() == 300
@@ -762,7 +774,9 @@ def test_a_subtree_page_counts_kinds_below_it_only(tmp_path):
         (["--archive-db", "AUDIT"], "holds no archive index"),
     ],
 )
-def test_the_tree_command_refuses_what_kinds_cannot_use(tmp_path, capsys, extra, says):
+def test_the_tree_command_refuses_what_kinds_cannot_use(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra, says
+):
     from dbaudit.cli import main
 
     store = listing(tmp_path, file("/R/a/x", 1))
@@ -774,7 +788,7 @@ def test_the_tree_command_refuses_what_kinds_cannot_use(tmp_path, capsys, extra,
     assert says in capsys.readouterr().err and not (tmp_path / "t.html").exists()
 
 
-def test_a_page_says_whether_it_looked_inside_the_tarballs(tmp_path):
+def test_a_page_says_whether_it_looked_inside_the_tarballs(tmp_path: Path):
     store = listing(tmp_path, file("/R/t/faultsz03_bb.tar", 1000, "A"))
     judged = page_html(store)
     assert "give --archive-db to look inside them" in judged

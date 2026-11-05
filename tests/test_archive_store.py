@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from dbaudit.archive.parts import Part
@@ -37,13 +39,13 @@ def member(offset, name="f.bin", size=10):
     )
 
 
-def new_store(tmp_path):
+def new_store(tmp_path: Path):
     store = ArchiveStore(tmp_path / "archives.db")
     store.init_schema()
     return store
 
 
-def registered(tmp_path, count=2):
+def registered(tmp_path: Path, count=2):
     """A store with one archive, its parts and its segments. Returns the first segment id."""
     store = new_store(tmp_path)
     archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts(count))
@@ -56,14 +58,14 @@ def seg(store, archive_id, segment_id):
     return next(s for s in store.segments(archive_id) if s["id"] == segment_id)
 
 
-def test_registering_twice_is_the_same_archive(tmp_path):
+def test_registering_twice_is_the_same_archive(tmp_path: Path):
     store = new_store(tmp_path)
     first = store.register("a.tar", "tar", "/d", "dropbox", parts())
     second = store.register("a.tar", "tar", "/d", "dropbox", parts())
     assert first == second
 
 
-def test_re_registering_moved_parts_updates_their_paths(tmp_path):
+def test_re_registering_moved_parts_updates_their_paths(tmp_path: Path):
     """The parts of v01p0_incomplete moved folders; the index must follow them."""
     store = new_store(tmp_path)
     archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
@@ -74,14 +76,14 @@ def test_re_registering_moved_parts_updates_their_paths(tmp_path):
     assert store.parts_of(archive_id)[0].path_display.startswith("/new")
 
 
-def test_different_content_is_a_different_archive(tmp_path):
+def test_different_content_is_a_different_archive(tmp_path: Path):
     store = new_store(tmp_path)
     first = store.register("a.tar", "tar", "/d", "dropbox", parts())
     second = store.register("a.tar", "tar", "/d", "dropbox", parts(content="cd"))
     assert first != second
 
 
-def test_a_batch_writes_members_and_the_cursor_together(tmp_path):
+def test_a_batch_writes_members_and_the_cursor_together(tmp_path: Path):
     store, archive_id, segment_id = registered(tmp_path)
     store.commit_batch(
         archive_id,
@@ -96,7 +98,7 @@ def test_a_batch_writes_members_and_the_cursor_together(tmp_path):
     assert store.get("a.tar")["requests"] == 3
 
 
-def test_a_failed_batch_leaves_neither_rows_nor_cursor(tmp_path):
+def test_a_failed_batch_leaves_neither_rows_nor_cursor(tmp_path: Path):
     store, archive_id, segment_id = registered(tmp_path)
     bad = Member(1024, 1536, "not-an-int", "0", 0, 0, "", "", "run", "b.bin", "")
     with pytest.raises(ValueError):
@@ -105,14 +107,14 @@ def test_a_failed_batch_leaves_neither_rows_nor_cursor(tmp_path):
     assert store.segments(archive_id)[0]["cursor_offset"] is None
 
 
-def test_replaying_a_batch_does_not_duplicate(tmp_path):
+def test_replaying_a_batch_does_not_duplicate(tmp_path: Path):
     store, archive_id, segment_id = registered(tmp_path)
     store.commit_batch(archive_id, segment_id, [member(0), member(1024)], 2048)
     store.commit_batch(archive_id, segment_id, [member(0), member(1024)], 2048)
     assert store.stats(archive_id)["n_members"] == 2
 
 
-def test_finishing_records_the_outcome(tmp_path):
+def test_finishing_records_the_outcome(tmp_path: Path):
     store, archive_id, segment_id = registered(tmp_path)
     store.commit_batch(archive_id, segment_id, [member(0)], 1024)
     store.finish(archive_id, WalkResult("complete", 1024, 1, ""))
@@ -121,14 +123,14 @@ def test_finishing_records_the_outcome(tmp_path):
     assert row["finished_at"] is not None
 
 
-def test_find_members_returns_every_match(tmp_path):
+def test_find_members_returns_every_match(tmp_path: Path):
     """A tar may hold the same path twice; cat must not guess between them."""
     store, archive_id, segment_id = registered(tmp_path)
     store.commit_batch(archive_id, segment_id, [member(0), member(4096)], 8192)
     assert len(store.find_members(archive_id, "run/f.bin")) == 2
 
 
-def test_seeding_creates_one_segment_per_part(tmp_path):
+def test_seeding_creates_one_segment_per_part(tmp_path: Path):
     store, archive_id, _ = registered(tmp_path, count=3)
     segments = store.segments(archive_id)
     assert [s["scan_from"] for s in segments] == [0, 100, 200]
@@ -138,7 +140,7 @@ def test_seeding_creates_one_segment_per_part(tmp_path):
     assert segments[1]["first_header"] is None and segments[1]["joined"] == 0
 
 
-def test_claiming_a_segment_is_exclusive(tmp_path):
+def test_claiming_a_segment_is_exclusive(tmp_path: Path):
     store, archive_id, _ = registered(tmp_path)
     first = store.claim_segment(archive_id, "w1")
     second = store.claim_segment(archive_id, "w2")
@@ -149,7 +151,7 @@ def test_claiming_a_segment_is_exclusive(tmp_path):
     assert store.claim_segment(archive_id, "w3") is None
 
 
-def test_repairing_a_segment_drops_only_its_own_members(tmp_path):
+def test_repairing_a_segment_drops_only_its_own_members(tmp_path: Path):
     """A segment whose start was wrong must leave nothing behind when it is re-walked."""
     store, archive_id, _ = registered(tmp_path)
     segments = store.segments(archive_id)
@@ -165,7 +167,7 @@ def test_repairing_a_segment_drops_only_its_own_members(tmp_path):
 # ---- Tests added by task-6-rulings.md (T6-3, T6-5, T6-8, T6-9, T6-10, T6-11, T6-13, T6-16) ----
 
 
-def test_replacing_a_part_marks_the_old_archive_stale(tmp_path):
+def test_replacing_a_part_marks_the_old_archive_stale(tmp_path: Path):
     """Same name, same folder, different content: the old index of that path is stale.
 
     A same-named archive in a *different* folder is a different archive
@@ -194,7 +196,7 @@ def test_replacing_a_part_marks_the_old_archive_stale(tmp_path):
     assert elsewhere_row["state"] != "stale"
 
 
-def test_resetting_a_segment_drops_its_span_and_rearms_it(tmp_path):
+def test_resetting_a_segment_drops_its_span_and_rearms_it(tmp_path: Path):
     """A segment whose start was wrong is reset: dropped rows, new start, re-armed,
     its own member count zeroed, and the archive's confirmed frontier raised to
     match the corrected start (T6-8, T6-12)."""
@@ -216,7 +218,7 @@ def test_resetting_a_segment_drops_its_span_and_rearms_it(tmp_path):
     assert store.get("a.tar")["cursor_offset"] == 4608
 
 
-def test_retiring_a_segment_drops_its_span_and_marks_it_beyond(tmp_path):
+def test_retiring_a_segment_drops_its_span_and_marks_it_beyond(tmp_path: Path):
     """A segment lying entirely past where the chain ended has nothing to contribute."""
     store, archive_id, _ = registered(tmp_path)
     segments = store.segments(archive_id)
@@ -231,7 +233,7 @@ def test_retiring_a_segment_drops_its_span_and_marks_it_beyond(tmp_path):
     assert row["state"] == "beyond" and row["members"] == 0 and row["joined"] == 0
 
 
-def test_retiring_a_segment_clears_a_scan_failure_that_is_no_longer_one(tmp_path):
+def test_retiring_a_segment_clears_a_scan_failure_that_is_no_longer_one(tmp_path: Path):
     """`beyond` is the normal case, not a fault: a tar's terminator is usually not in
     its last part, so a trailing segment legitimately has no header of its own. Its scan
     failed while its fate was still unknown; once the join proves it was never on the
@@ -255,7 +257,7 @@ def test_retiring_a_segment_clears_a_scan_failure_that_is_no_longer_one(tmp_path
     assert row["detail"] == "crossed at 4608"
 
 
-def test_releasing_a_segment_still_charges_what_it_read(tmp_path):
+def test_releasing_a_segment_still_charges_what_it_read(tmp_path: Path):
     """Symmetric with finish_segment and fail_segment, and for the same reason: reads
     that land after the last committed batch -- the batch a `--max-batches` stop refuses
     -- are charged to nothing otherwise. An interrupted run is the normal workflow here,
@@ -276,7 +278,7 @@ def test_releasing_a_segment_still_charges_what_it_read(tmp_path):
     assert seg(store, archive_id, claimed["id"])["state"] == "pending"
 
 
-def test_releasing_a_segment_returns_it_to_pending_with_cursor_intact(tmp_path):
+def test_releasing_a_segment_returns_it_to_pending_with_cursor_intact(tmp_path: Path):
     """A walk stopped early (Ctrl-C, --max-batches) must resume, not rescan."""
     store, archive_id, _ = registered(tmp_path)
     claimed = store.claim_segment(archive_id, "w1")
@@ -290,7 +292,7 @@ def test_releasing_a_segment_returns_it_to_pending_with_cursor_intact(tmp_path):
     assert again["id"] == claimed["id"]
 
 
-def test_start_walk_reclaims_walking_and_error_segments(tmp_path):
+def test_start_walk_reclaims_walking_and_error_segments(tmp_path: Path):
     """A killed run's segments must come back, or `index` can never finish."""
     store, archive_id, _ = registered(tmp_path)
     walking = store.claim_segment(archive_id, "w1")
@@ -311,7 +313,7 @@ def test_start_walk_reclaims_walking_and_error_segments(tmp_path):
     assert store.claim_segment(archive_id, "w5") is None
 
 
-def test_finish_segment_and_fail_segment_add_their_cost_to_the_archive(tmp_path):
+def test_finish_segment_and_fail_segment_add_their_cost_to_the_archive(tmp_path: Path):
     """Reads made after the last batch must still count toward bytes_fetched."""
     store, archive_id, segment_id = registered(tmp_path)
     other = store.segments(archive_id)[1]["id"]
@@ -326,7 +328,7 @@ def test_finish_segment_and_fail_segment_add_their_cost_to_the_archive(tmp_path)
     assert row["bytes_fetched"] == 3072
 
 
-def test_seeding_twice_does_not_duplicate_or_disturb_a_walking_segment(tmp_path):
+def test_seeding_twice_does_not_duplicate_or_disturb_a_walking_segment(tmp_path: Path):
     """Re-registering an archive must never disturb a walk already in progress."""
     store, archive_id, _ = registered(tmp_path)
     claimed = store.claim_segment(archive_id, "w1")
@@ -340,7 +342,7 @@ def test_seeding_twice_does_not_duplicate_or_disturb_a_walking_segment(tmp_path)
     assert row["state"] == "walking" and row["cursor_offset"] == 512
 
 
-def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path):
+def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path: Path):
     """One finished segment, one mid-cursor, one untouched."""
     store, archive_id, _ = registered(tmp_path, count=3)
     segments = store.segments(archive_id)
@@ -361,7 +363,7 @@ def test_stats_reports_covered_and_confirmed_for_a_half_walked_archive(tmp_path)
 
 
 def test_a_segment_ended_from_a_start_not_yet_confirmed_covers_only_what_it_walked(
-    tmp_path,
+    tmp_path: Path,
 ):
     """A scan can find a false start, walk a few headers and end `corrupt`: the join will
     walk its part again from the exit before it. Until a segment's start is joined to the
@@ -378,7 +380,9 @@ def test_a_segment_ended_from_a_start_not_yet_confirmed_covers_only_what_it_walk
 # ---- Tests added by fix round 1 (task review Important findings 1 & 2, plus minor gaps) ----
 
 
-def test_start_walk_returns_the_confirmed_frontier_and_logs_a_run_start_event(tmp_path):
+def test_start_walk_returns_the_confirmed_frontier_and_logs_a_run_start_event(
+    tmp_path: Path,
+):
     """Both start_walk's return value and its run_start event were untested: deleting
     the log_event call, or returning None instead of cursor_offset, left the suite
     green. `run_start_covered` is `covered` (segment progress), which is a different
@@ -401,7 +405,7 @@ def test_start_walk_returns_the_confirmed_frontier_and_logs_a_run_start_event(tm
     )  # seg1's own covered contribution: 140 - 100
 
 
-def test_a_stale_archive_stays_stale_across_batches_and_finishing(tmp_path):
+def test_a_stale_archive_stays_stale_across_batches_and_finishing(tmp_path: Path):
     """Task review Finding 1: `mark_stale`'s flag must survive the very next worker
     batch, a `start_walk` reclaim, and `finish` -- otherwise nothing ever reads it as
     a trust signal, and the spec's "kept but flagged" promise for a stale archive is
@@ -420,7 +424,7 @@ def test_a_stale_archive_stays_stale_across_batches_and_finishing(tmp_path):
     assert store.get("a.tar")["state"] == "stale"
 
 
-def test_a_finished_stale_archive_keeps_its_stale_reason(tmp_path):
+def test_a_finished_stale_archive_keeps_its_stale_reason(tmp_path: Path):
     """Ruling amendment to Finding 1: a flag the next write silently erases is not
     a flag, and the same argument applies to the reason behind it -- so `finish`
     must guard `detail` the same way it guards `state`. The walk's own outcome is
@@ -435,7 +439,7 @@ def test_a_finished_stale_archive_keeps_its_stale_reason(tmp_path):
     assert row["detail"] == "fingerprint mismatch"
 
 
-def test_a_stale_archive_stays_stale_across_fail(tmp_path):
+def test_a_stale_archive_stays_stale_across_fail(tmp_path: Path):
     """Out-of-scope finding from the re-review: `fail` had the same unguarded
     `state='error'` as `commit_batch`/`start_walk`/`finish` before their fix.
     Reachable path this closes: stale -> fail -> 'error' -> a later `index` run
@@ -452,7 +456,9 @@ def test_a_stale_archive_stays_stale_across_fail(tmp_path):
     assert row["error"] == "Dropbox request failed: 503"
 
 
-def test_a_stale_archive_found_to_be_pax_keeps_its_stale_flag_and_reason(tmp_path):
+def test_a_stale_archive_found_to_be_pax_keeps_its_stale_flag_and_reason(
+    tmp_path: Path,
+):
     """Both can land in one run: `_run_index` re-fingerprints the parts after the walk
     and marks the archive stale before it records the pax refusal. The stale flag and
     its reason are guarded here as `finish` guards them. The refusal is not lost: it
@@ -480,7 +486,7 @@ def test_a_stale_archive_found_to_be_pax_keeps_its_stale_flag_and_reason(tmp_pat
     ]
 
 
-def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
+def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path: Path):
     """The other half of Finding 1: register's ON CONFLICT branch never touched
     state, so an archive marked stale stayed stale forever even once the live parts
     hashed back to its identity again."""
@@ -496,7 +502,7 @@ def test_reregistering_the_same_parts_clears_a_stale_flag(tmp_path):
     assert row["state"] == "registered" and row["detail"] is None
 
 
-def test_reregistering_lifts_unsupported(tmp_path):
+def test_reregistering_lifts_unsupported(tmp_path: Path):
     """`unsupported` is terminal for `index`, but it must not be terminal for good: if it
     was ever reached wrongly, registering the parts again is the way back. A real pax
     archive loses nothing by it -- the next walk meets the pax header again."""
@@ -512,7 +518,7 @@ def test_reregistering_lifts_unsupported(tmp_path):
     assert row["state"] == "registered" and row["detail"] is None
 
 
-def test_replaying_a_batch_does_not_inflate_the_segment_member_count(tmp_path):
+def test_replaying_a_batch_does_not_inflate_the_segment_member_count(tmp_path: Path):
     """Task review Finding 2: `members=members+len(...)` double-counts a replay,
     even though the design guarantees replays ("a restart re-walks exactly that
     batch"). Recomputing over the segment's span is what actually stays exact."""
@@ -523,7 +529,7 @@ def test_replaying_a_batch_does_not_inflate_the_segment_member_count(tmp_path):
     assert seg(store, archive_id, segment_id)["members"] == 2
 
 
-def _ended_in_segment_2(tmp_path):
+def _ended_in_segment_2(tmp_path: Path):
     """Five segments: 0 crossed into 1, 1 crossed into 2, 2 ended `corrupt`, 3 retired
     `beyond` by the join, 4 with rows and `joined` left from an earlier run. The archive
     carries 2's verdict."""
@@ -551,7 +557,7 @@ def _ended_in_segment_2(tmp_path):
     return store, archive_id
 
 
-def test_recheck_walks_again_from_the_segment_before_the_verdict(tmp_path):
+def test_recheck_walks_again_from_the_segment_before_the_verdict(tmp_path: Path):
     """The segment where the walk ended was handed its start by the crossing out of the
     one before; a derailed chain can cross at a wrong header that re-reading agrees with.
     So the chain is walked again from that earlier segment's own confirmed start; the
@@ -616,7 +622,7 @@ def _walked_again_to_the_same_verdict(store, archive_id):
 
 
 def test_a_recheck_that_reaches_the_same_verdict_steps_one_segment_further_back(
-    tmp_path,
+    tmp_path: Path,
 ):
     """Review 7's B2. Walked again from segment 1's start, the chain ends where it did --
     which says nothing about segment 1's start itself: a stored tarball that fills a
@@ -658,7 +664,7 @@ def test_a_recheck_that_reaches_the_same_verdict_steps_one_segment_further_back(
 
 
 def test_a_recheck_that_reaches_another_verdict_starts_again_from_the_segment_before_it(
-    tmp_path,
+    tmp_path: Path,
 ):
     """The step back is for a verdict that came back the same. One that changed -- here, the
     chain now ends in segment 2 somewhere else -- is asked again from segment 1, as a
@@ -679,7 +685,7 @@ def test_a_recheck_that_reaches_another_verdict_starts_again_from_the_segment_be
     assert (again["idx"], ending["idx"]) == (1, 2)
 
 
-def test_a_recheck_of_segment_0_walks_it_again_from_offset_0(tmp_path):
+def test_a_recheck_of_segment_0_walks_it_again_from_offset_0(tmp_path: Path):
     store, archive_id, _ = registered(tmp_path, count=2)
     segments = store.segments(archive_id)
     store.commit_batch(archive_id, segments[0]["id"], [member(0)], 60)
@@ -696,7 +702,7 @@ def test_a_recheck_of_segment_0_walks_it_again_from_offset_0(tmp_path):
 
 
 def test_crossing_into_a_retired_segment_puts_everything_retired_after_it_back(
-    tmp_path,
+    tmp_path: Path,
 ):
     """After a recheck the chain may cross where the old verdict said it ended: the
     segment it crosses into is re-armed from its exit, and every one retired after it is
@@ -713,7 +719,7 @@ def test_crossing_into_a_retired_segment_puts_everything_retired_after_it_back(
     assert all(r["first_header"] is None and r["joined"] == 0 for r in rows[2:])
 
 
-def test_recheck_leaves_a_stale_archive_to_register(tmp_path):
+def test_recheck_leaves_a_stale_archive_to_register(tmp_path: Path):
     """Only `register` lifts `stale`: the parts changed, and walking them again under the
     old registration would mix bytes from two different archives into one index."""
     store, archive_id = _ended_in_segment_2(tmp_path)
@@ -730,7 +736,7 @@ def test_recheck_leaves_a_stale_archive_to_register(tmp_path):
     ]
 
 
-def test_the_events_of_one_archive_are_found_by_an_index(tmp_path):
+def test_the_events_of_one_archive_are_found_by_an_index(tmp_path: Path):
     """stats() reads an archive's run starts as each walk ends: across thousands of
     archives a scan of every event each time adds up."""
     store = new_store(tmp_path)
