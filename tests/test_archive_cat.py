@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from dbaudit.archive.parts import ArchiveSet
-from dbaudit.archive.reader import LocalRangeReader, ShortReadError
+from dbaudit.archive.reader import ConcatFile, LocalRangeReader, ShortReadError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import Member, WalkResult
 from dbaudit.auth import AuthError, TokenProvider
@@ -2784,7 +2784,7 @@ def test_cat_refuses_a_stream_that_comes_up_short_of_the_member(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     def short(
-        concat: object,
+        concat: ConcatFile,
         member: sqlite3.Row,
         total: int,
         follows: sqlite3.Row | str | None,
@@ -2803,21 +2803,18 @@ def test_cat_refuses_a_stream_that_comes_up_short_of_the_member(
 
 
 def test_cat_out_that_cannot_be_moved_into_place_exits_2_and_leaves_no_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
-    def refuse(src: str, dst: str) -> None:
-        raise OSError("Invalid cross-device link")
-
+    """A file cannot replace a directory, so the real `os.replace` refuses."""
     db = setup_archive(tmp_path)
-    monkeypatch.setattr("dbaudit.cli.os.replace", refuse)
-    out = tmp_path / "small.txt"
+    out = tmp_path / "taken"
+    out.mkdir()
     capsys.readouterr()
     assert cat_small(db, "--out", str(out)) == 2
-    assert (
-        f"error: could not write --out {str(out)!r}: Invalid cross-device link"
-        in capsys.readouterr().err
-    )
-    assert not out.exists() and not list(tmp_path.glob(".cat-*"))
+    err = capsys.readouterr().err
+    assert f"error: could not write --out {str(out)!r}: " in err
+    assert "Is a directory" in err
+    assert out.is_dir() and not list(tmp_path.glob(".cat-*"))
 
 
 def test_cat_survives_a_temp_file_it_cannot_remove(

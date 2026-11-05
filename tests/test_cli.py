@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TextIO
 
 import pytest
 
@@ -18,9 +19,11 @@ from dbaudit.archive.reader import WINDOW_MAX, WINDOW_MIN
 from dbaudit.auth import AuthError, TokenProvider
 from dbaudit.cli import human_bytes, human_duration, main
 from dbaudit.store import Store
+from dbaudit.tree import Page as TreePage
+from dbaudit.tree import Summary
 from dbaudit.verify import VerifyResult, verify_subtree
 from tests.fakes import TREE, FakeLister
-from tests.listing_fakes import file, listing
+from tests.listing_fakes import LISTED, archive, archive_index, file, listing
 
 
 def seeded_db(tmp_path: Path):
@@ -477,7 +480,7 @@ class ListerFor:
 
     def __call__(
         self, remote: str, tokens: TokenProvider | None = None
-    ) -> tuple[object, FakeLister]:
+    ) -> tuple[StubTokens, FakeLister]:
         self.remotes.append(remote)
         return StubTokens({}), self.lister
 
@@ -492,6 +495,21 @@ def initialised(tmp_path: Path, remote: str = "dropbox") -> str:
     store.add_shard("/R", depth=0)
     store.close()
     return db
+
+
+def free_terabyte(path: str) -> int:
+    """A `free_bytes` that finds a terabyte free."""
+    return 1 << 40
+
+
+def free_two_gib(path: str) -> int:
+    """A `free_bytes` that finds 2 GiB free."""
+    return 2 * 1024**3
+
+
+def never_a_dir(path: str) -> bool:
+    """An `os.path.isdir` that finds no folder anywhere."""
+    return False
 
 
 def index_count(store: Store) -> int:
@@ -543,7 +561,7 @@ def test_free_bytes_stops_at_the_top_of_the_tree(
         measured.append(path)
         return SimpleNamespace(f_bavail=1, f_frsize=512)
 
-    monkeypatch.setattr("dbaudit.cli.os.path.isdir", lambda path: False)
+    monkeypatch.setattr("dbaudit.cli.os.path.isdir", never_a_dir)
     monkeypatch.setattr("dbaudit.cli.os.statvfs", statvfs)
     assert cli.free_bytes("/TeamSpace/proj00001/a.db") == 512
     assert measured == ["/"]
@@ -590,11 +608,11 @@ def test_init_seeds_the_root_shard(
         "email": "user@example.org",
         "team": {"name": "TeamSpace"},
     }
-    monkeypatch.setattr("dbaudit.cli.free_bytes", lambda path: 1 << 40)
+    monkeypatch.setattr("dbaudit.cli.free_bytes", free_terabyte)
 
     def build(
         remote: str, tokens: TokenProvider | None = None
-    ) -> tuple[object, FakeLister]:
+    ) -> tuple[StubTokens, FakeLister]:
         return StubTokens(account), FakeLister(TREE)
 
     monkeypatch.setattr("dbaudit.cli.build_lister", build)
@@ -625,10 +643,10 @@ def test_init_reports_an_auth_error_and_makes_no_database(
 ):
     def build(
         remote: str, tokens: TokenProvider | None = None
-    ) -> tuple[object, FakeLister]:
+    ) -> tuple[StubTokens, FakeLister]:
         raise AuthError("rclone has no remote called TeamSpace")
 
-    monkeypatch.setattr("dbaudit.cli.free_bytes", lambda path: 1 << 40)
+    monkeypatch.setattr("dbaudit.cli.free_bytes", free_terabyte)
     monkeypatch.setattr("dbaudit.cli.build_lister", build)
     db = tmp_path / "a.db"
     assert main(["init", "--db", str(db), "--root", "/R"]) == 2
@@ -640,7 +658,7 @@ def test_init_fails_cleanly_when_the_root_cannot_be_listed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     lister = FakeLister(TREE, faults={"/R": RuntimeError("connection reset")})
-    monkeypatch.setattr("dbaudit.cli.free_bytes", lambda path: 1 << 40)
+    monkeypatch.setattr("dbaudit.cli.free_bytes", free_terabyte)
     monkeypatch.setattr("dbaudit.cli.build_lister", ListerFor(lister))
     db = tmp_path / "a.db"
     assert main(["init", "--db", str(db), "--root", "/R"]) == 2
@@ -654,7 +672,7 @@ def test_init_fails_cleanly_when_the_root_cannot_be_listed(
 def test_init_names_the_free_space_it_needs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
-    monkeypatch.setattr("dbaudit.cli.free_bytes", lambda path: 2 * 1024**3)
+    monkeypatch.setattr("dbaudit.cli.free_bytes", free_two_gib)
     assert (
         main(
             ["init", "--db", str(tmp_path / "a.db"), "--root", "/R"]
@@ -716,7 +734,7 @@ def test_run_stops_when_the_credentials_fail(
 ):
     def build(
         remote: str, tokens: TokenProvider | None = None
-    ) -> tuple[object, FakeLister]:
+    ) -> tuple[StubTokens, FakeLister]:
         raise AuthError("the refresh token was revoked")
 
     db = initialised(tmp_path)
@@ -862,6 +880,7 @@ def test_the_progress_reporter_logs_counts_then_rate_and_eta(
     reader = FlakyStore(db)
     with caplog.at_level(logging.INFO, logger="dbaudit"):
         cli._progress_reporter(reader, stop, 30.0)
+    reader.close()
     lines = [r.getMessage() for r in caplog.records if r.name == "dbaudit"]
     assert lines == [
         "shards 1/2 done (0 error) | 100 files, 2 dirs, 2.0 KiB",
@@ -882,10 +901,12 @@ def test_the_progress_reporter_reports_no_eta_while_nothing_is_done(
 
         return bump
 
+    reader = Store(db)
     stop = Ticks([files(10), files(50)])
     monkeypatch.setattr(cli, "time", Clock(0.0, 1.0, 2.0))
     with caplog.at_level(logging.INFO, logger="dbaudit"):
-        cli._progress_reporter(Store(db), stop, 30.0)
+        cli._progress_reporter(reader, stop, 30.0)
+    reader.close()
     last = [r.getMessage() for r in caplog.records if r.name == "dbaudit"][-1]
     assert last == "shards 0/2 done (0 error) | 50 files, 0 dirs, 0 B | 40 files/s"
     writer.close()
@@ -1150,8 +1171,6 @@ def test_index_builds_the_indexes(tmp_path: Path, caplog: pytest.LogCaptureFixtu
 def test_tree_reads_the_archive_index_when_given_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
-    from tests.listing_fakes import LISTED, archive, archive_index
-
     store = listing(tmp_path, file("/R/t/a.tar", 700, "A"))
     index = archive_index(
         tmp_path,
@@ -1177,7 +1196,7 @@ def test_tree_reads_the_archive_index_when_given_one(
 def test_a_failed_render_leaves_no_half_written_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    def render(out: object, page: object, summary: object, chosen: object) -> None:
+    def render(out: TextIO, page: TreePage, summary: Summary, chosen: dict) -> None:
         raise OSError("disk full")
 
     store = crawled(tmp_path)

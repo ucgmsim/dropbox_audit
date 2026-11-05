@@ -3538,7 +3538,7 @@ def test_index_marks_an_archive_error_when_a_part_is_gone_from_its_folder(
 
 
 def landmine_reader(
-    row: object,
+    row: sqlite3.Row,
     archive_set: ArchiveSet,
     tokens: TokenProvider | None = None,
     limiter: AdaptiveLimiter | None = None,
@@ -3557,7 +3557,7 @@ def test_a_folder_that_cannot_be_listed_after_the_walk_does_not_undo_the_walk(
     )
 
     def reader_for(
-        row: object,
+        row: sqlite3.Row,
         archive_set: ArchiveSet,
         tokens: TokenProvider | None = None,
         limiter: AdaptiveLimiter | None = None,
