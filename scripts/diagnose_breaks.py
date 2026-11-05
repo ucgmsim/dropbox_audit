@@ -471,6 +471,13 @@ def main() -> int:
                 )
                 heals.append(res.end_offset)
                 at = res.end_offset
+            if res is None:
+                # The first attempt raised UnsettledReadError and left the loop before
+                # any walk returned: report the hole as unwalked, not a crash.
+                print(
+                    "  => the walk could not start: reads would not settle", flush=True
+                )
+                continue
             ok = res.state == "crossed" and res.end_offset == alive
             print(
                 f"  => {res.state} at {res.end_offset:,}; recovered {len(members):,} members"
