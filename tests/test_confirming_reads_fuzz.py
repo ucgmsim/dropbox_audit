@@ -24,6 +24,7 @@ import io
 import os
 import random
 import tarfile
+from collections.abc import Callable
 
 import pytest
 
@@ -44,11 +45,13 @@ pytestmark = pytest.mark.skipif(
 class _Server:
     """Parts held in memory, answered through ``fault(part, offset, length, true)``."""
 
-    def __init__(self, parts, fault):
+    def __init__(
+        self, parts: list[bytes], fault: Callable[[int, int, int, bytes], bytes]
+    ):
         self.parts, self.fault = parts, fault
         self.requests = self.bytes_fetched = 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
         true = self.parts[part_idx][offset : offset + length]
         assert len(true) == length
         self.requests += 1
@@ -56,7 +59,7 @@ class _Server:
         return self.fault(part_idx, offset, length, true)
 
 
-def _members(rng, filler=0):
+def _members(rng: random.Random, filler: int = 0):
     members = [("run/filler.bin", b"f" * filler)] if filler else []
     for i in range(rng.randint(5, 30)):
         roll = rng.random()
@@ -85,7 +88,7 @@ def _members(rng, filler=0):
     return members + [("run/zz.bin", b"z" * MIN_PART)]
 
 
-def _split(rng, data, whole):
+def _split(rng: random.Random, data: bytes, whole: bool):
     """One part, or several of MIN_PART or more."""
     size = len(data) if whole else rng.randint(MIN_PART, 4 * MIN_PART)
     if 0 < len(data) % size < MIN_PART:
@@ -107,7 +110,7 @@ def _split(rng, data, whole):
 
 
 @pytest.mark.parametrize("seed", range(TRIALS))
-def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
+def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed: int):
     rng = random.Random(seed)
     kind = rng.choice(["request", "class", "block"])
     block = rng.choice([1 << 16, 1 << 20]) if kind == "block" else None
@@ -128,7 +131,7 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
     at = rng.choice(infos).offset
     state = {"bad": None}
 
-    def request(part_idx, offset, length, true):
+    def request(part_idx: int, offset: int, length: int, true: bytes) -> bytes:
         start = archive.parts[part_idx].offset + offset
         if state["bad"] is None and start <= at < start + length:
             state["bad"] = (part_idx, offset, length)
@@ -138,11 +141,11 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
         cut = at - start
         return true[:cut] + donor[: length - cut] + true[cut + 512 :]
 
-    def shifted(part_idx, offset, length, back):
+    def shifted(part_idx: int, offset: int, length: int, back: int) -> bytes:
         source = max(offset - back, 0)
         return chunks[part_idx][source : source + length]
 
-    def klass(part_idx, offset, length, true):
+    def klass(part_idx: int, offset: int, length: int, true: bytes) -> bytes:
         start = archive.parts[part_idx].offset + offset
         if state["bad"] is None and start <= at < start + length:
             # Not the class of a part's first byte, where every request near it starts
@@ -152,7 +155,8 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
             return true
         return shifted(part_idx, offset, length, back)
 
-    def edge(part_idx, offset, length, true):
+    def edge(part_idx: int, offset: int, length: int, true: bytes) -> bytes:
+        assert block is not None
         if offset % block != block - 1:
             return true
         return shifted(part_idx, offset, length, block - 1)
@@ -162,7 +166,7 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
         plain = [m for m in infos if m.offset_data - m.offset == 512 and m.offset != at]
         size_at = next(m.size for m in infos if m.offset == at)
 
-        def lands(m):
+        def lands(m: tarfile.TarInfo):
             landing = at + 512 + -(-m.size // 512) * 512
             return (
                 landing in headers
@@ -189,7 +193,7 @@ def test_a_walk_is_never_fooled_by_a_bad_request_shape(seed):
         the fill throws bytes away was never read, so the fault waits for the next request
         to cover the header."""
 
-        def _fill(self, pos, need):
+        def _fill(self, pos: int, need: int):
             super()._fill(pos, need)
             start, end = self.cached()
             if state.pop("answered", False):

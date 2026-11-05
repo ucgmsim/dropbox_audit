@@ -90,7 +90,7 @@ def test_run_refuses_when_another_instance_holds_the_lock(
     "value,expected",
     [(0, "0 B"), (1536, "1.5 KiB"), (250 * 1024**4, "250.0 TiB")],
 )
-def test_human_bytes(value, expected):
+def test_human_bytes(value: int, expected: str):
     assert human_bytes(value) == expected
 
 
@@ -103,7 +103,7 @@ def test_human_bytes(value, expected):
         (float("inf"), "unknown"),
     ],
 )
-def test_human_duration(value, expected):
+def test_human_duration(value: float, expected: str):
     assert human_duration(value) == expected
 
 
@@ -114,7 +114,7 @@ def test_report_calls_a_crawl_with_failed_shards_incomplete(
     db, store = seeded_db(tmp_path)
     store.fail_shard(2, "transient failures exhausted")
 
-    def offline(remote):
+    def offline(remote: str):
         raise RuntimeError("no network in tests")
 
     monkeypatch.setattr("dbaudit.cli._space_usage", offline)
@@ -170,7 +170,9 @@ COMMANDS = [
 
 
 @pytest.mark.parametrize("command", COMMANDS, ids=" ".join)
-def test_every_command_has_help(command, capsys: pytest.CaptureFixture[str]):
+def test_every_command_has_help(
+    command: tuple[str, ...], capsys: pytest.CaptureFixture[str]
+):
     assert main([*command, "--help"]) == 0
     assert "Usage: dbaudit " + " ".join(command) in capsys.readouterr().out
 
@@ -364,7 +366,7 @@ BEFORE = [
     "argv,body,expected", BEFORE, ids=[" ".join(argv[:2]) for argv, _, _ in BEFORE]
 )
 def test_each_command_gets_the_arguments_it_got_before(
-    monkeypatch: pytest.MonkeyPatch, argv, body, expected
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], body: str, expected: dict
 ):
     got = []
     monkeypatch.setattr(cli, body, lambda args: got.append(args) or 0)
@@ -403,7 +405,9 @@ def test_no_command_shows_the_commands(capsys: pytest.CaptureFixture[str]):
 
 
 @pytest.mark.parametrize("where", [[], ["--folder", "/R", "--local-dir", "d"]])
-def test_register_takes_exactly_one_place(where, capsys: pytest.CaptureFixture[str]):
+def test_register_takes_exactly_one_place(
+    where: list[str], capsys: pytest.CaptureFixture[str]
+):
     assert main(["archive", "register", "--db", "x.db", "--name", "a.tar", *where]) == 2
     assert "exactly one of --folder and --local-dir" in capsys.readouterr().err
 

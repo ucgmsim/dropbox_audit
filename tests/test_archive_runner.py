@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 import pytest
 
@@ -12,19 +13,19 @@ from dbaudit.archive.runner import Done, Job, Runner
 class Limiter:
     """The two things the scheduler reads from an AdaptiveLimiter."""
 
-    def __init__(self, concurrency):
+    def __init__(self, concurrency: int):
         self.concurrency = concurrency
         self.granted_total = 0
 
 
-def jobs(*sizes, chains=1):
+def jobs(*sizes: int, chains: int = 1) -> list[Job]:
     return [
         Job(key=f"k{i}", label=f"a{i}.tar", size=size, chains=chains)
         for i, size in enumerate(sizes)
     ]
 
 
-def run(walk, todo, concurrency=4, **kw):
+def run(walk: Callable[[Job], Done], todo: list[Job], concurrency: int = 4, **kw):
     return Runner(walk, Limiter(concurrency), threading.Event(), **kw).run(todo)
 
 
@@ -45,7 +46,7 @@ def test_archives_start_until_their_chains_reach_the_streams_plus_the_margin():
     lock, flying, most = threading.Lock(), [0], [0]
     full, release = threading.Event(), threading.Event()
 
-    def walk(job):
+    def walk(job: Job):
         with lock:
             flying[0] += job.chains
             most[0] = max(most[0], flying[0])
@@ -78,7 +79,7 @@ def test_more_archives_start_as_the_limiter_earns_streams():
     limiter, seen = Limiter(1), []
     gate = threading.Event()
 
-    def walk(job):
+    def walk(job: Job):
         seen.append(job.label)
         if job.label == "a0.tar":
             limiter.concurrency = 3  # the limiter earned two more streams
@@ -95,7 +96,7 @@ def test_more_archives_start_as_the_limiter_earns_streams():
 def test_an_archive_that_ends_in_error_is_tried_once_more_at_the_end():
     tries = {}
 
-    def walk(job):
+    def walk(job: Job):
         tries[job.label] = tries.get(job.label, 0) + 1
         if job.label == "a0.tar":
             return Done("error")  # twice: stays in error
@@ -111,7 +112,7 @@ def test_an_archive_that_ends_in_error_is_tried_once_more_at_the_end():
 def test_the_third_unexpected_failure_stops_the_run():
     recorded = []
 
-    def walk(job):
+    def walk(job: Job):
         if job.size >= 70:
             raise RuntimeError(f"bug in {job.label}")
         return Done("complete")
@@ -139,7 +140,7 @@ def test_a_walk_that_dies_of_more_than_an_exception_still_reports_back():
     for it for ever."""
     walking = []
 
-    def walk(job):
+    def walk(job: Job):
         walking.append(threading.current_thread())
         raise SystemExit(1)
 
@@ -158,7 +159,7 @@ def test_an_archive_tried_again_counts_as_its_estimate_until_its_walk_reports():
     """Its last walk ended reporting one chain; the second begins wanting its estimate."""
     seen = []
 
-    def walk(job):
+    def walk(job: Job):
         seen.append(job.chains)
         job.chains = 1  # as a walk reports while its chains finish
         return Done("error" if len(seen) == 1 else "complete")
@@ -181,7 +182,7 @@ def test_a_walk_that_reports_a_bug_counts_as_one_and_is_not_retried():
 def test_a_limit_caps_the_archives_started_but_not_their_second_tries():
     tries = []
 
-    def walk(job):
+    def walk(job: Job):
         tries.append(job.label)
         return Done("error" if len(tries) == 1 else "complete")
 
@@ -197,10 +198,12 @@ def test_a_limit_holds_even_when_the_streams_would_start_more_at_once():
     assert report.started == 2 and report.outcomes == {"complete": 2}
 
 
-def test_a_stop_starts_nothing_new_and_lets_the_walks_in_flight_finish(caplog):
+def test_a_stop_starts_nothing_new_and_lets_the_walks_in_flight_finish(
+    caplog: pytest.LogCaptureFixture,
+):
     stop, times = threading.Event(), iter(range(0, 10_000, 100))
 
-    def walk(job):
+    def walk(job: Job):
         stop.set()
         return Done("stopped")
 
@@ -218,11 +221,13 @@ def test_a_stop_starts_nothing_new_and_lets_the_walks_in_flight_finish(caplog):
     )  # stopped: not done, not left
 
 
-def test_progress_is_logged_with_the_streams_and_the_request_rate(caplog):
+def test_progress_is_logged_with_the_streams_and_the_request_rate(
+    caplog: pytest.LogCaptureFixture,
+):
     limiter = Limiter(3)
     times = iter(range(0, 10_000, 100))
 
-    def walk(job):
+    def walk(job: Job):
         limiter.granted_total += 50
         return Done("complete", members=7, requests=50)
 
@@ -242,13 +247,13 @@ def test_progress_is_logged_with_the_streams_and_the_request_rate(caplog):
 
 
 def test_each_archive_logs_its_time_and_the_etas_divide_what_is_left_by_the_pace(
-    caplog,
+    caplog: pytest.LogCaptureFixture,
 ):
     """One archive an hour, 3 TiB an hour: with two archives and 3 TiB left, the ETAs are
     two hours by count and one by size."""
     now = [0.0]
 
-    def walk(job):
+    def walk(job: Job):
         now[0] += 3600
         return Done("complete", members=7, requests=50)
 
@@ -268,12 +273,14 @@ def test_each_archive_logs_its_time_and_the_etas_divide_what_is_left_by_the_pace
     assert "eta 2h 0m by count, 1h 0m by size" in first
 
 
-def test_only_archives_walked_count_towards_what_is_done(caplog):
+def test_only_archives_walked_count_towards_what_is_done(
+    caplog: pytest.LogCaptureFixture,
+):
     """An archive that had gone, had lost a part, or held content walked before was never
     walked here: its size is neither done nor left, and the pace leaves it out."""
     now, ends = [0.0], iter(["gone", "refused", "done", "complete"])
 
-    def walk(job):
+    def walk(job: Job):
         now[0] += 60
         return Done(next(ends))
 
@@ -292,11 +299,13 @@ def test_only_archives_walked_count_towards_what_is_done(caplog):
     assert "4 done, 0 in flight, 0 queued | 1.0 TiB of 1.0 TiB" in last
 
 
-def test_a_stale_walk_counts_as_walked_and_one_that_ends_in_error_does_not(caplog):
+def test_a_stale_walk_counts_as_walked_and_one_that_ends_in_error_does_not(
+    caplog: pytest.LogCaptureFixture,
+):
     """Stale: walked through, though its parts changed. Error, twice: left for the next run."""
     now, ends = [0.0], iter(["stale", "error", "error"])
 
-    def walk(job):
+    def walk(job: Job):
         now[0] += 60
         return Done(next(ends))
 

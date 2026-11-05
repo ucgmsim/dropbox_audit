@@ -59,7 +59,9 @@ CASES = [  # (folder, name, rules, kind): name rules first, in order, then folde
 
 
 @pytest.mark.parametrize("folder,name,rules,kind", CASES)
-def test_a_file_gets_the_kind_its_folder_and_name_say(folder, name, rules, kind):
+def test_a_file_gets_the_kind_its_folder_and_name_say(
+    folder: str, name: str, rules: dict, kind: str
+):
     assert Rules(**rules).classify(folder, name) == kind
 
 
@@ -75,7 +77,9 @@ def test_a_file_gets_the_kind_its_folder_and_name_say(folder, name, rules, kind)
         ("/r/a", "data.tar", "unknown_archive"),
     ],
 )
-def test_a_tarball_nobody_listed_is_judged_by_its_name(folder, name, kind):
+def test_a_tarball_nobody_listed_is_judged_by_its_name(
+    folder: str, name: str, kind: str
+):
     assert by_archive_name(folder, name) == kind
 
 
@@ -122,7 +126,9 @@ def test_a_rules_file_gives_its_words(tmp_path: Path):
         ("recorded = [", "TOML"),
     ],
 )
-def test_a_rules_file_that_cannot_be_used_says_why(tmp_path: Path, text, named):
+def test_a_rules_file_that_cannot_be_used_says_why(
+    tmp_path: Path, text: str, named: str
+):
     path = tmp_path / "site.toml"
     path.write_text(text)
     with pytest.raises(KindsError, match=named):

@@ -4,7 +4,9 @@ folder-by-folder fake of Dropbox for `archive run`."""
 import hashlib
 import io
 import random
+import sqlite3
 import tarfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -12,15 +14,16 @@ import pytest
 from dbaudit.api import Page, PathNotFoundError
 from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import LocalRangeReader
+from dbaudit.auth import TokenProvider
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.store import Store
 
 
-def suffix(index):
+def suffix(index: int) -> str:
     return chr(ord("a") + index // 26) + chr(ord("a") + index % 26)
 
 
-def build_tar(members, format=tarfile.GNU_FORMAT):
+def build_tar(members: Sequence[tuple], format: int = tarfile.GNU_FORMAT) -> bytes:
     """members: (name, payload) or (name, payload, attrs) tuples. Returns tar bytes."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:", format=format) as tf:
@@ -40,7 +43,9 @@ def build_tar(members, format=tarfile.GNU_FORMAT):
     return buf.getvalue()
 
 
-def write_parts(directory, data, part_size, base="a.tar"):
+def write_parts(
+    directory: str | Path, data: bytes, part_size: int, base: str = "a.tar"
+) -> ArchiveSet:
     """Split `data` into part files on disk and return an ArchiveSet over them."""
     directory = Path(directory)
     entries = []
@@ -70,7 +75,9 @@ class World:
         self.page_size = None  # entries per listing page; None lists a folder in one
         self.made = 0
 
-    def add(self, folder, name, data, part_size=None):
+    def add(
+        self, folder: str, name: str, data: bytes, part_size: int | None = None
+    ) -> Path:
         self.made += 1
         directory = self.tmp_path / "local" / str(self.made)
         directory.mkdir(parents=True)
@@ -97,7 +104,7 @@ class World:
             )
         return directory
 
-    def audit_db(self):
+    def audit_db(self) -> str:
         store = Store(self.tmp_path / "audit.db")
         store.init_schema()
         store.set_meta("root", "/R")
@@ -114,14 +121,14 @@ class World:
         world = self
 
         class Lister:
-            def list_folder(self, path, recursive=False):
+            def list_folder(self, path: str, recursive: bool = False) -> Page:
                 if world.faults.get(path):
                     raise world.faults[path].pop(0)
                 if path in world.gone:
                     raise PathNotFoundError(f"path/not_found: {path}")
                 return self.continue_(f"{path}|0")
 
-            def continue_(self, cursor):
+            def continue_(self, cursor: str) -> Page:
                 path, start = cursor.rsplit("|", 1)
                 entries = world.folders.get(path, [])
                 end = (
@@ -150,12 +157,18 @@ class World:
             ),
         )
 
-    def reader(self, row, archive_set, tokens=None, limiter=None):
+    def reader(
+        self,
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ) -> LocalRangeReader:
         """`_reader_for`, reading the parts from the archive's folder on local disk."""
         return LocalRangeReader(self.local[row["folder"]], archive_set)
 
 
-def members(n, seed=0):
+def members(n: int, seed: int = 0) -> list[tuple[str, bytes]]:
     rng = random.Random(seed)
     return [
         (f"run/m{i:03d}.bin", rng.randbytes(rng.choice([10, 700, 5000, 70_000])))

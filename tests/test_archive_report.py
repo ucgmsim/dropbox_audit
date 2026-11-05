@@ -11,8 +11,10 @@ completeness warning).
 """
 
 import csv
+import sqlite3
 import tarfile
 import time as time_mod
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -53,7 +55,11 @@ def indexed(tmp_path: Path):
 
 
 def build_and_index(
-    tmp_path: Path, members, part_size=8192, name="a.tar", db_name="archives.db"
+    tmp_path: Path,
+    members: list[tuple],
+    part_size: int = 8192,
+    name: str = "a.tar",
+    db_name: str = "archives.db",
 ):
     """Like `indexed`, but with a caller-supplied member list."""
     source = tmp_path / "parts"
@@ -599,7 +605,7 @@ def test_summary_and_write_csv_stream_members_instead_of_materialising_them(
     real_connect = store.connect
 
     class _CursorSpy:
-        def __init__(self, cursor):
+        def __init__(self, cursor: sqlite3.Cursor):
             self._cursor = cursor
 
         def fetchall(self):
@@ -610,17 +616,17 @@ def test_summary_and_write_csv_stream_members_instead_of_materialising_them(
         def __iter__(self):
             return iter(self._cursor)
 
-        def __getattr__(self, name):
+        def __getattr__(self, name: str):
             return getattr(self._cursor, name)
 
     class _ConnectionSpy:
-        def __init__(self, conn):
+        def __init__(self, conn: sqlite3.Connection):
             self._conn = conn
 
-        def execute(self, sql, params=()):
+        def execute(self, sql: str, params: Sequence[object] = ()):
             return _CursorSpy(self._conn.execute(sql, params))
 
-        def __getattr__(self, name):
+        def __getattr__(self, name: str):
             return getattr(self._conn, name)
 
     monkeypatch.setattr(store, "connect", lambda: _ConnectionSpy(real_connect()))

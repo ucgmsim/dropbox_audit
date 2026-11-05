@@ -7,7 +7,7 @@ from dbaudit.archive.candidates import find_candidates
 from dbaudit.store import Store
 
 
-def file(path, size, content=None):
+def file(path: str, size: int, content: str | None = None) -> dict:
     """A file as Dropbox lists it. Files with the same `content` are copies."""
     return {
         ".tag": "file",
@@ -22,7 +22,7 @@ def file(path, size, content=None):
     }
 
 
-def folder(path):
+def folder(path: str) -> dict:
     return {
         ".tag": "folder",
         "id": f"id:{path}",

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import LEAD_STEP, SHAPES, ConcatFile, LocalRangeReader
 from tests.archive_fakes import write_parts
 
@@ -84,16 +85,16 @@ DATA = random.Random(7).randbytes(300_000)
 class _Recording(LocalRangeReader):
     """Records every request as (part, offset within the part, length)."""
 
-    def __init__(self, directory, archive):
+    def __init__(self, directory: str | Path, archive: ArchiveSet):
         super().__init__(directory, archive)
         self.asked = []
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
         self.asked.append((part_idx, offset, length))
         return super().read_range(part_idx, offset, length)
 
 
-def _replay(handle):
+def _replay(handle: ConcatFile):
     """Reads, drops and window-keeping drops across three parts; what each read saw."""
     seen = []
     for step in [
@@ -121,7 +122,7 @@ def test_what_a_read_returns_does_not_depend_on_the_shape(tmp_path: Path):
     every shape: only the requests change."""
     archive = write_parts(tmp_path, DATA, part_size=100_000)
 
-    def run(shape):
+    def run(shape: int | None):
         return _replay(
             ConcatFile(
                 archive,

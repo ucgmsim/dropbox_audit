@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.store import ArchiveStore
+from dbaudit.auth import TokenProvider
 from dbaudit.cli import main
+from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import World, build_tar, members, write_parts
 
@@ -22,28 +25,28 @@ def three(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return world, world.audit_db()
 
 
-def run(db, audit, *extra):
+def run(db: str, audit: str, *extra: str) -> int:
     return main(["archive", "run", "--db", db, "--audit-db", audit, *extra])
 
 
-def db_import(target, source):
+def db_import(target: str, source: str) -> int:
     return main(["archive", "import", "--db", target, "--from", source])
 
 
-def forget(db, name, folder):
+def forget(db: str, name: str, folder: str) -> int:
     return main(
         ["archive", "forget", "--db", db, "--archive", name, "--folder", folder]
     )
 
 
-def archives(db):
+def archives(db: str):
     return {
         r["folder"]: r
         for r in ArchiveStore(db).connect().execute("SELECT * FROM archives")
     }
 
 
-def manifest(db):
+def manifest(db: str):
     """Each archive's row, parts, segments, members and events -- all but the import's
     own event -- keyed by its content rather than its id."""
     conn = ArchiveStore(db).connect()
@@ -180,7 +183,7 @@ def test_import_replaces_an_archive_of_the_same_content_and_everything_it_held(
     assert (row["state"], row["n_members"]) == ("complete", 30)
     conn = ArchiveStore(target).connect()
 
-    def count(sql, *args):
+    def count(sql: str, *args: object):
         return conn.execute(sql, args).fetchone()[0]
 
     assert count("SELECT COUNT(*) FROM members WHERE archive_id=?", row["id"]) == 30
@@ -243,7 +246,7 @@ def test_an_imported_mid_walk_archive_finishes_with_the_members_a_fresh_walk_rec
     assert run(target, audit) == 0
     assert run(fresh, audit) == 0
 
-    def members_of(db):
+    def members_of(db: str):
         conn = ArchiveStore(db).connect()
         return {
             r["set_hash"]: [
@@ -308,7 +311,7 @@ def test_import_refuses_databases_whose_tables_differ(
 
 @pytest.mark.parametrize("which", ["missing", "same", "not an archive database"])
 def test_import_from_nothing_or_itself_or_into_another_kind_is_a_usage_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
 ):
     _world, audit = three(tmp_path, monkeypatch)
     target = str(tmp_path / "target.db")
@@ -366,7 +369,12 @@ def test_forget_drops_an_archive_so_the_next_run_walks_it_from_scratch(
 
     read = set()
 
-    def watched(row, archive_set, tokens=None, limiter=None):
+    def watched(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         read.add(row["folder"])
         return world.reader(row, archive_set)
 
@@ -394,7 +402,7 @@ def test_forget_refuses_an_archive_that_is_not_there_and_a_held_database(
 
 @pytest.mark.parametrize("imported", ["newer", "older"])
 def test_import_leaves_only_the_latest_content_of_one_name_in_one_folder(
-    tmp_path: Path, imported
+    tmp_path: Path, imported: str
 ):
     """As register does: of the archives of one name in one folder, the latest registered
     is what the folder holds, and other content there is stale -- whichever database held

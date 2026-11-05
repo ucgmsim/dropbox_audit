@@ -2,6 +2,7 @@ import calendar
 import hashlib
 import os
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,12 @@ from dbaudit.kinds import (
     YEAR,
     KindsError,
     Rules,
+    WalkRow,
     archive_index,
     tally,
     walk,
 )
+from dbaudit.store import Store
 from tests.listing_fakes import LISTED, archive, dir_of, file, listing
 from tests.listing_fakes import archive_index as index_file
 
@@ -27,11 +30,16 @@ T = {y: calendar.timegm((y, 1, 1, 0, 0, 0)) for y in range(2019, 2027)}
 _RULES = Rules()
 
 
-def rows(store, rules=_RULES, index=None, under=None):
+def rows(
+    store: Store,
+    rules: Rules = _RULES,
+    index: str | None = None,
+    under: str | None = None,
+):
     return sorted(walk(store, rules, archive_index(index) if index else None, under))
 
 
-def by_kind(found):
+def by_kind(found: Iterable[WalkRow]):
     out = {}
     for _, kind, size, how, _ in found:
         out[kind, how] = out.get((kind, how), 0) + size
@@ -107,7 +115,7 @@ def test_each_part_and_copy_of_a_tarball_shares_out_its_own_bytes(tmp_path: Path
     ],
 )
 def test_a_listing_is_trusted_when_finished_or_at_least_half_the_archive(
-    tmp_path: Path, state, listed, how
+    tmp_path: Path, state: str, listed: int, how: str
 ):
     store = listing(
         tmp_path,

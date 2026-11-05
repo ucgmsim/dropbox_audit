@@ -20,7 +20,7 @@ import pytest
 from dbaudit.archive import reader
 
 
-def pytest_addoption(parser):
+def pytest_addoption(parser: pytest.Parser):
     parser.addoption(
         "--unshaped",
         action="store_true",
@@ -29,7 +29,7 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(autouse=True)
-def _shapes(request):
+def _shapes(request: pytest.FixtureRequest):
     # A patch of its own: a test that calls monkeypatch.undo() must not undo this too.
     with pytest.MonkeyPatch.context() as patch:
         seed = f"{os.environ.get('DBAUDIT_SEED', '')}/{request.node.nodeid}"

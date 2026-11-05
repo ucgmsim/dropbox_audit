@@ -12,22 +12,34 @@ from dbaudit.api import (
 
 
 class FakeResp:
-    def __init__(self, status, body=None, headers=None):
+    def __init__(
+        self,
+        status: int,
+        body: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.status_code = status
         self._body = body if body is not None else {}
         self.headers = headers or {}
+        self.content = b""
         self.text = str(self._body)
 
-    def json(self):
+    def json(self) -> dict:
         return self._body
 
 
 class FakeSession:
-    def __init__(self, resps):
+    def __init__(self, resps: list[FakeResp]):
         self.resps = list(resps)
-        self.calls = []
+        self.calls: list[tuple[str, str | None]] = []
 
-    def post(self, url, headers=None, data=None, timeout=None):
+    def post(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        data: str | None = None,
+        timeout: float | None = None,
+    ) -> FakeResp:
         self.calls.append((url, data))
         return self.resps.pop(0)
 
@@ -37,7 +49,7 @@ class FakeTokens:
         return {"Authorization": "Bearer x", "Content-Type": "application/json"}
 
 
-def lister(resps):
+def lister(resps: list[FakeResp]) -> HttpLister:
     return HttpLister(FakeTokens(), session=FakeSession(resps))
 
 
@@ -56,11 +68,15 @@ def test_list_folder_returns_page():
 
 
 def test_list_folder_sends_expected_body():
-    lst = lister([FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})])
+    session = FakeSession(
+        [FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})]
+    )
+    lst = HttpLister(FakeTokens(), session=session)
     lst.list_folder("/TeamSpace", recursive=True)
     import json
 
-    url, data = lst.session.calls[0]
+    url, data = session.calls[0]
+    assert data is not None
     body = json.loads(data)
     assert url.endswith("/files/list_folder")
     assert body["path"] == "/TeamSpace"
@@ -71,10 +87,14 @@ def test_list_folder_sends_expected_body():
 
 
 def test_continue_uses_the_continue_endpoint():
-    lst = lister([FakeResp(200, {"entries": [], "cursor": "c2", "has_more": False})])
+    session = FakeSession(
+        [FakeResp(200, {"entries": [], "cursor": "c2", "has_more": False})]
+    )
+    lst = HttpLister(FakeTokens(), session=session)
     lst.continue_("cursor-1")
-    url, data = lst.session.calls[0]
+    url, data = session.calls[0]
     assert url.endswith("/files/list_folder/continue")
+    assert data is not None
     assert "cursor-1" in data
 
 
@@ -148,14 +168,14 @@ def test_a_listing_asks_for_no_deleted_entries():
     ask for entries that are already gone."""
     import json
 
-    lst = HttpLister(
-        FakeTokens(),
-        session=FakeSession(
-            [FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})]
-        ),
+    session = FakeSession(
+        [FakeResp(200, {"entries": [], "cursor": "c", "has_more": False})]
     )
+    lst = HttpLister(FakeTokens(), session=session)
     lst.list_folder("/x", recursive=True)
-    assert json.loads(lst.session.calls[0][1])["include_deleted"] is False
+    body = session.calls[0][1]
+    assert body is not None
+    assert json.loads(body)["include_deleted"] is False
 
 
 def test_missing_has_more_defaults_to_false():

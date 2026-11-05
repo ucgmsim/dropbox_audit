@@ -14,7 +14,13 @@ from dbaudit.api import Page, PathNotFoundError
 class FakeLister:
     """``tree`` maps a directory path to child names; a trailing '/' marks a directory."""
 
-    def __init__(self, tree, page_size=2, faults=None, continue_faults=None):
+    def __init__(
+        self,
+        tree: dict[str, list[str]],
+        page_size: int = 2,
+        faults: dict[str, Exception] | None = None,
+        continue_faults: dict[int, Exception] | None = None,
+    ):
         self.tree = tree
         self.page_size = page_size
         self.faults = dict(faults or {})  # path -> exception, for list_folder
@@ -22,7 +28,7 @@ class FakeLister:
         self.calls = []
         self._continue_calls = 0
 
-    def _walk(self, root, recursive):
+    def _walk(self, root: str, recursive: bool) -> list[dict]:
         out, queue = [], [root]
         if recursive:
             # The real API returns the folder itself as the first entry of a
@@ -70,7 +76,7 @@ class FakeLister:
                     )
         return out
 
-    def _page(self, root, recursive, offset):
+    def _page(self, root: str, recursive: bool, offset: int) -> Page:
         items = self._walk(root, recursive)
         chunk = items[offset : offset + self.page_size]
         nxt = min(offset + self.page_size, len(items))
@@ -80,7 +86,7 @@ class FakeLister:
             entries=chunk, cursor=f"{root}|{int(recursive)}|{nxt}", has_more=has_more
         )
 
-    def list_folder(self, path, recursive):
+    def list_folder(self, path: str, recursive: bool) -> Page:
         self.calls.append(("list", path, recursive))
         if path in self.faults:
             raise self.faults.pop(path)
@@ -88,7 +94,7 @@ class FakeLister:
             raise PathNotFoundError(f"no such folder: {path}")
         return self._page(path, recursive, 0)
 
-    def continue_(self, cursor):
+    def continue_(self, cursor: str) -> Page:
         self.calls.append(("cont", cursor, None))
         self._continue_calls += 1
         if self._continue_calls in self.continue_faults:

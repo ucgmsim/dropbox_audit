@@ -22,7 +22,7 @@ SUBTREE = os.environ.get("DBAUDIT_LIVE_ROOT", "/TeamSpace/proj00001")
 PYTHON = sys.executable
 
 
-def dbaudit(*args, expect=0):
+def dbaudit(*args: str, expect: int = 0) -> str:
     proc = subprocess.run(
         [PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True, check=False
     )

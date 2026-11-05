@@ -80,7 +80,10 @@ def test_set_hash_survives_a_move_but_not_a_content_change():
         (("a.tar.02", "a.tar.03"), "01"),
     ],
 )
-def test_a_set_missing_its_first_part_is_refused_and_the_part_named(names, missing):
+def test_a_set_missing_its_first_part_is_refused_and_the_part_named(
+    names: tuple[str, ...],
+    missing: str,
+):
     """Only gaps *between* parts used to be caught, so with the first part gone the
     second quietly became part 0 -- and `index` then called the archive corrupt at
     offset 0, blaming the data for a missing file, a verdict it refuses to revisit.
@@ -98,6 +101,6 @@ def test_a_set_missing_its_first_part_is_refused_and_the_part_named(names, missi
         ("a.tar.aa",),
     ],
 )
-def test_a_sequence_may_start_where_split_starts_it(names):
+def test_a_sequence_may_start_where_split_starts_it(names: tuple[str, ...]):
     s = ArchiveSet.from_entries(entries(*((n, 1) for n in names)), "a.tar")
     assert [p.name for p in s.parts] == list(names)

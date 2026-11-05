@@ -19,7 +19,7 @@ FILE = {
 NESTED = dict(FILE, id="id:2", name="c.bin", size=7, path_display="/R/sub/c.bin")
 
 
-def seed(tmp_path: Path, entries):
+def seed(tmp_path: Path, entries: list[dict]):
     store = Store(tmp_path / "a.db")
     store.init_schema()
     store.set_meta("root", "/R")

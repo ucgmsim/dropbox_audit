@@ -15,7 +15,13 @@ from tests.listing_fakes import archive_index as index_file
 LISTED = calendar.timegm((2026, 10, 1, 0, 0, 0, 0, 0, 0))
 
 
-def file(path, size, content=None, modified="2026-01-01T00:00:00Z", uploaded=None):
+def file(
+    path: str,
+    size: int,
+    content: str | None = None,
+    modified: str = "2026-01-01T00:00:00Z",
+    uploaded: str | None = None,
+) -> dict:
     """A file as Dropbox lists it. Files with the same `content` are copies."""
     return {
         ".tag": "file",
@@ -30,7 +36,7 @@ def file(path, size, content=None, modified="2026-01-01T00:00:00Z", uploaded=Non
     }
 
 
-def folder(path):
+def folder(path: str) -> dict:
     return {
         ".tag": "folder",
         "id": f"id:{path}",
@@ -49,11 +55,13 @@ def listing(tmp_path: Path, *entries):
     return store
 
 
-def at(store, path):
-    return tree.find_dir(store, path)[0]
+def at(store: Store, path: str) -> int:
+    found = tree.find_dir(store, path)
+    assert found is not None
+    return found[0]
 
 
-def measured(store, page="/R", min_size=1):
+def measured(store: Store, page: str = "/R", min_size: int = 1):
     return tree.measure(store, LISTED, min_size, at(store, page))
 
 
@@ -254,7 +262,7 @@ def sample(tmp_path: Path):
     )
 
 
-def shape(row):
+def shape(row: tree.Row):
     """(kind, name or entries, size, children) for every row, to compare layouts whole."""
     label = row.entries if row.kind == "fold" else row.name
     return (row.kind, label, row.size, [shape(c) for c in row.children])
@@ -285,7 +293,7 @@ def test_fold_rows_and_shown_rows_add_up_to_each_folder(tmp_path: Path):
     store = sample(tmp_path)
     page = tree.layout(store, measured(store), 10, 1000)
 
-    def check(row):
+    def check(row: tree.Row):
         assert sum(c.size for c in row.children) == row.size
         assert sum(c.files for c in row.children) == row.files
         assert sum(c.folders + (c.kind == "dir") for c in row.children) == row.folders
@@ -347,7 +355,7 @@ def test_layout_holds_only_as_many_files_as_the_page_can_show(tmp_path: Path):
 # ---- tables -----------------------------------------------------------------
 
 
-def chosen(store, threshold=1, page="/R"):
+def chosen(store: Store, threshold: int = 1, page: str = "/R"):
     f = measured(store, page=page)
     return tree.tables(store, f, tree.layout(store, f, threshold, 1000))
 
@@ -433,26 +441,27 @@ def test_a_folded_folder_links_to_its_nearest_row(
 class Outline(HTMLParser):
     """What a page is made of: nesting, ids, in-page links, section headings."""
 
-    def __init__(self, text):
+    def __init__(self, text: str):
         super().__init__()
         self.open = self.deepest = 0
         self.ids, self.links, self.headings = set(), [], []
         self._heading = None
         self.feed(text)
 
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        found = dict(attrs)
         if tag == "details":
             self.open += 1
             self.deepest = max(self.deepest, self.open)
-        if "id" in attrs:
-            self.ids.add(attrs["id"])
-        if tag == "a" and attrs.get("href", "").startswith("#"):
-            self.links.append(attrs["href"][1:])
+        if "id" in found:
+            self.ids.add(found["id"])
+        href = found.get("href") or ""
+        if tag == "a" and href.startswith("#"):
+            self.links.append(href[1:])
         if tag == "h2":
             self._heading = ""
 
-    def handle_endtag(self, tag):
+    def handle_endtag(self, tag: str):
         if tag == "details":
             self.open -= 1
             assert self.open >= 0, "a </details> without its <details>"
@@ -460,12 +469,12 @@ class Outline(HTMLParser):
             self.headings.append(self._heading)
             self._heading = None
 
-    def handle_data(self, data):
+    def handle_data(self, data: str):
         if self._heading is not None:
             self._heading += data
 
 
-def page_text(store, page="/R", min_size=1, max_rows=1000):
+def page_text(store: Store, page: str = "/R", min_size: int = 1, max_rows: int = 1000):
     out = io.StringIO()
     tree.render(out, *tree.build(store, page, min_size, max_rows, "audit.db"))
     return out.getvalue()
@@ -693,7 +702,7 @@ def test_the_page_gets_the_permissions_the_umask_allows(tmp_path: Path):
     assert oct(out.stat().st_mode & 0o777) == oct(0o600)
 
 
-def page_html(store, page="/R", **kw):
+def page_html(store: Store, page: str = "/R", **kw):
     out = io.StringIO()
     tree.render(out, *tree.build(store, page, 1, 1000, "audit.db", **kw))
     return out.getvalue()
@@ -775,7 +784,7 @@ def test_a_subtree_page_counts_kinds_below_it_only(tmp_path: Path):
     ],
 )
 def test_the_tree_command_refuses_what_kinds_cannot_use(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra, says
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra: list[str], says: str
 ):
     from dbaudit.cli import main
 

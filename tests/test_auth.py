@@ -104,7 +104,7 @@ def test_unparseable_config_raises_actionable_error():
 def test_root_namespace_id_is_fetched_once():
     calls = []
 
-    def account(tok):
+    def account(tok: str):
         calls.append(tok)
         return {"root_info": {"root_namespace_id": "42"}}
 
@@ -246,7 +246,7 @@ def test_invalidate_forces_a_reread_of_the_token():
 
 
 class _Answer:
-    def __init__(self, status):
+    def __init__(self, status: int):
         self.status_code, self.text = status, "{}"
 
     def json(self):
@@ -255,7 +255,7 @@ class _Answer:
 
 @pytest.mark.parametrize("status", [429, 500, 503])
 def test_an_account_lookup_dropbox_cannot_answer_now_is_not_dead_credentials(
-    monkeypatch: pytest.MonkeyPatch, status
+    monkeypatch: pytest.MonkeyPatch, status: int
 ):
     """A rate limit or a server error at the start of a run says nothing about the token:
     called dead credentials, it stopped the run within seconds."""

@@ -32,7 +32,7 @@ NAME = "FaultSZ03_Source.tar"
 PYTHON = sys.executable
 
 
-def dbaudit(*args, expect=0):
+def dbaudit(*args: str, expect: int = 0) -> str:
     proc = subprocess.run(
         [PYTHON, "-m", "dbaudit", *args], capture_output=True, text=True, check=False
     )
@@ -41,7 +41,7 @@ def dbaudit(*args, expect=0):
 
 
 @pytest.fixture(scope="module")
-def live(tmp_path_factory):
+def live(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, Path]:
     """Register the archive and fetch one local copy, once."""
     root = tmp_path_factory.mktemp("live")
     db = str(root / "archives.db")
@@ -53,7 +53,7 @@ def live(tmp_path_factory):
     return db, local
 
 
-def test_a_real_archive_matches_a_downloaded_copy(live):
+def test_a_real_archive_matches_a_downloaded_copy(live: tuple[str, Path]):
     db, local = live
     dbaudit("archive", "index", "--db", db, "--archive", NAME)
     assert "complete" in dbaudit("archive", "status", "--db", db)
@@ -82,7 +82,7 @@ def test_a_real_archive_matches_a_downloaded_copy(live):
     assert got == expected
 
 
-def test_our_content_hash_is_the_one_dropbox_computed(live):
+def test_our_content_hash_is_the_one_dropbox_computed(live: tuple[str, Path]):
     """The only non-circular check of `_local_hash`.
 
     A local archive and a Dropbox one are meant to share an identity, so that
@@ -111,7 +111,9 @@ def test_our_content_hash_is_the_one_dropbox_computed(live):
     )
 
 
-def test_cat_extracts_a_member_matching_the_downloaded_copy(live, tmp_path: Path):
+def test_cat_extracts_a_member_matching_the_downloaded_copy(
+    live: tuple[str, Path], tmp_path: Path
+):
     """Task 8 step 4 in miniature: retrieve one real member from Dropbox by offset,
     and check it byte for byte against the same member pulled from the copy already
     downloaded for this module with `tarfile`. Costs one or two `files/download`
@@ -155,5 +157,7 @@ def test_cat_extracts_a_member_matching_the_downloaded_copy(live, tmp_path: Path
     )
 
     with tarfile.open(local, mode="r:") as reference:
-        expected = reference.extractfile(member_path).read()
+        extracted = reference.extractfile(member_path)
+        assert extracted is not None
+        expected = extracted.read()
     assert expected == out.read_bytes()

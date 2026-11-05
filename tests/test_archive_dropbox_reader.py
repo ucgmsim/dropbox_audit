@@ -18,26 +18,38 @@ from tests.archive_fakes import build_tar
 
 
 class FakeResponse:
-    def __init__(self, status_code, content=b"", headers=None, body=None):
+    def __init__(
+        self,
+        status_code: int,
+        content: bytes = b"",
+        headers: dict[str, str] | None = None,
+        body: dict | None = None,
+    ):
         self.status_code = status_code
         self.content = content
         self.headers = headers or {}
         self._body = body if body is not None else {}
 
-    def json(self):
+    def json(self) -> dict:
         return self._body
 
     @property
-    def text(self):
+    def text(self) -> str:
         return json.dumps(self._body)
 
 
 class FakeSession:
-    def __init__(self, *responses):
+    def __init__(self, *responses: FakeResponse | Exception):
         self.responses = list(responses)
-        self.calls = []
+        self.calls: list[tuple[str, dict[str, str]]] = []
 
-    def post(self, url, headers=None, timeout=None):
+    def post(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+        data: str | None = None,
+    ) -> FakeResponse:
         self.calls.append((url, headers))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -71,7 +83,11 @@ class CountingLimiter(AdaptiveLimiter):
         super().on_success()
 
 
-def make(*responses, retries=5, limiter=None):
+def make(
+    *responses: FakeResponse | Exception,
+    retries: int = 5,
+    limiter: AdaptiveLimiter | None = None,
+):
     archive = ArchiveSet.from_entries(
         [
             {
@@ -97,7 +113,9 @@ def make(*responses, retries=5, limiter=None):
     return reader, session
 
 
-def ok(offset, length, total=4096, payload=None):
+def ok(
+    offset: int, length: int, total: int = 4096, payload: bytes | None = None
+) -> FakeResponse:
     return FakeResponse(
         206,
         payload or b"\x00" * length,
@@ -204,7 +222,13 @@ def test_a_read_gives_way_to_its_callers_stop_while_dropbox_pushes_back():
     reader, _ = make()
 
     class Storm(FakeSession):
-        def post(self, url, headers=None, timeout=None):
+        def post(
+            self,
+            url: str,
+            headers: dict[str, str],
+            timeout: float,
+            data: str | None = None,
+        ) -> FakeResponse:
             if len(self.calls) == 2:
                 stop.append(True)  # a signal lands mid-storm
             return super().post(url, headers, timeout)
@@ -227,11 +251,17 @@ class DropboxLikeSession:
     2026-10-15, and the same every time it was asked.
     """
 
-    def __init__(self, data):
+    def __init__(self, data: bytes):
         self.data = data
-        self.ranges = []
+        self.ranges: list[tuple[int, int]] = []
 
-    def post(self, url, headers=None, timeout=None):
+    def post(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+        data: str | None = None,
+    ) -> FakeResponse:
         first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
         self.ranges.append((first, last))
         start = first - first % BLOCK if first % BLOCK == BLOCK - 1 else first
@@ -242,7 +272,7 @@ class DropboxLikeSession:
         )
 
 
-def dropbox_like(data):
+def dropbox_like(data: bytes):
     archive = ArchiveSet.from_entries(
         [
             {

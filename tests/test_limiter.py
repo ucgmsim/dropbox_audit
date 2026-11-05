@@ -16,7 +16,7 @@ class FakeClock:
     def now(self):
         return self.t
 
-    def sleep(self, d):
+    def sleep(self, d: float):
         self.slept.append(d)
         self.t += d
 
@@ -127,7 +127,7 @@ def test_concurrency_cap_is_enforced_across_threads():
     assert peak <= 3
 
 
-def saturate(clock, lim, seconds):
+def saturate(clock: FakeClock, lim: AdaptiveLimiter, seconds: float):
     """Requests back to back for `seconds`: as many as the rate allows."""
     end = clock.t + seconds
     while clock.t < end:
@@ -252,7 +252,7 @@ def test_the_limiter_counts_every_request_it_lets_through():
     assert lim.granted_total == 5
 
 
-def test_every_change_in_concurrency_is_logged(caplog):
+def test_every_change_in_concurrency_is_logged(caplog: pytest.LogCaptureFixture):
     clock, lim = make(max_concurrency=24, start_concurrency=12, recover_after=300)
     with caplog.at_level(logging.INFO, logger="dbaudit.limiter"):
         clock.t += 301

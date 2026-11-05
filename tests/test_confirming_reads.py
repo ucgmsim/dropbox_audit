@@ -9,17 +9,23 @@ confirmed. Each test here fails under `pytest --unshaped`, which asks as dbaudit
 
 import io
 import random
+import sqlite3
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 from dbaudit import cli
 from dbaudit.archive import tarwalk
+from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import ConcatFile, LocalRangeReader
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import walk
+from dbaudit.auth import TokenProvider
 from dbaudit.cli import main
+from dbaudit.limiter import AdaptiveLimiter
 from tests.archive_fakes import build_tar, write_parts
 
 #: Members this big are jumped over, so no request made before one reaches past it.
@@ -41,26 +47,43 @@ class _BadShape:
     keeps every earlier request clear of ``at`` -- a window and 64 KiB past where it
     starts -- or the lie lands where nothing reads it."""
 
-    def __init__(self, directory, at, wrong, first=None, armed=lambda: True):
+    def __init__(
+        self,
+        directory: Path,
+        at: int,
+        wrong: bytes,
+        first: bytes | None = None,
+        armed: Callable[[], bool] = lambda: True,
+    ):
         self.directory, self.at, self.wrong, self.first = directory, at, wrong, first
         self.armed = armed
-        self.shape = None  # the request it gets wrong: (part, offset, length)
+        self.shape: tuple[int, int, int] | None = (
+            None  # the request it gets wrong: (part, offset, length)
+        )
         self.lied = 0  # how many times that request was asked
 
-    def reader(self, archive):
+    def reader(self, archive: ArchiveSet):
         server = self
 
         class _Reader(LocalRangeReader):
-            def read_range(self, part_idx, offset, length):
+            def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
                 data = super().read_range(part_idx, offset, length)
                 return server.answer(self.archive, part_idx, offset, length, data)
 
         return _Reader(self.directory, archive)
 
-    def reader_for(self, row, archive_set, tokens=None, limiter=None):
+    def reader_for(
+        self,
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ):
         return self.reader(archive_set)
 
-    def answer(self, archive, part_idx, offset, length, data):
+    def answer(
+        self, archive: ArchiveSet, part_idx: int, offset: int, length: int, data: bytes
+    ) -> bytes:
         start = archive.parts[part_idx].offset + offset
         if not start <= self.at < start + length:
             return data
@@ -77,7 +100,7 @@ class _BadShape:
         return data[:cut] + fill[: length - cut] + data[cut + len(fill) :]
 
 
-def _offsets(data):
+def _offsets(data: bytes):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
         return {m.name: m.offset for m in tar}
 
@@ -92,7 +115,7 @@ def _jumped():
     return members, data, _offsets(data)
 
 
-def _walk(tmp_path: Path, data, server):
+def _walk(tmp_path: Path, data: bytes, server: _BadShape):
     archive = write_parts(tmp_path, data, part_size=len(data))
     rows = {}
     result = walk(
@@ -103,7 +126,7 @@ def _walk(tmp_path: Path, data, server):
     return result, [f"{rows[k].dir}/{rows[k].name}" for k in sorted(rows)]
 
 
-def _indexed(tmp_path: Path, data):
+def _indexed(tmp_path: Path, data: bytes):
     source = tmp_path / "parts"
     source.mkdir()
     write_parts(source, data, part_size=len(data))
@@ -123,7 +146,7 @@ def _indexed(tmp_path: Path, data):
     return db, source
 
 
-def _paths(db):
+def _paths(db: str):
     store = ArchiveStore(db)
     return [
         f"{r['dir']}/{r['name']}"
@@ -134,7 +157,7 @@ def _paths(db):
     ]
 
 
-def _while(module, name, flag):
+def _while(module: ModuleType, name: str, flag: list[str]):
     """``module.name`` wrapped so that ``flag`` is non-empty while it runs."""
     original = getattr(module, name)
 
@@ -218,8 +241,9 @@ def test_the_audits_second_read_does_not_repeat_its_first(
     )
     read = []
 
-    def read_member(concat, offset):
+    def read_member(concat: ConcatFile, offset: int):
         member = tarwalk.read_member(concat, offset)
+        assert member is not None
         read.append((offset, member.name))
         return member
 
@@ -267,7 +291,7 @@ def test_a_tie_break_is_not_won_by_one_bad_request(
     assert server.lied == 1, "a tie-break vote asked the bad request again"
 
 
-def _pax(name):
+def _pax(name: str):
     """An extended header and the member it applies to: 1,536 bytes of pax, as a stored
     pax tarball would carry them."""
     buf = io.BytesIO()
@@ -319,7 +343,7 @@ def test_a_garbled_long_name_is_not_confirmed_by_one_bad_request(
     data = build_tar(members, format=tarfile.GNU_FORMAT)
     name_block = 512 + BIG + 512  # the long name's data, after its own header
 
-    def garbled(tag):
+    def garbled(tag: bytes):
         return (b"run/garbled-%s/" % tag).ljust(512, b"\0")
 
     settling = []

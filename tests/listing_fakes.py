@@ -15,7 +15,12 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
-def file(path, size, content=None, modified="2026-01-01T00:00:00Z"):
+def file(
+    path: str,
+    size: int,
+    content: str | None = None,
+    modified: str = "2026-01-01T00:00:00Z",
+) -> dict:
     """A file as Dropbox lists it. Files with the same `content` are copies."""
     return {
         ".tag": "file",
@@ -30,7 +35,7 @@ def file(path, size, content=None, modified="2026-01-01T00:00:00Z"):
     }
 
 
-def folder(path):
+def folder(path: str) -> dict:
     return {
         ".tag": "folder",
         "id": f"id:{path}",
@@ -39,7 +44,7 @@ def folder(path):
     }
 
 
-def listing(tmp_path: Path, *entries, finished=True) -> Store:
+def listing(tmp_path: Path, *entries: dict, finished: bool = True) -> Store:
     """An audit database of `entries` under the root /R, its crawl finished at LISTED."""
     store = Store(tmp_path / "audit.db")
     store.init_schema()
@@ -52,13 +57,19 @@ def listing(tmp_path: Path, *entries, finished=True) -> Store:
     return store
 
 
-def dir_of(store, path) -> int:
+def dir_of(store: Store, path: str) -> int:
     return store.query("SELECT id FROM dirs WHERE path_lower = ?", (path.lower(),))[0][
         0
     ]
 
 
-def archive(name, folder, parts, members, state="complete") -> dict:
+def archive(
+    name: str,
+    folder: str,
+    parts: list[tuple[str, int, str]],
+    members: list[tuple],
+    state: str = "complete",
+) -> dict:
     """An archive as the index holds it. `parts` holds (name, size, content) and `members`
     (dir, name, size, mtime), with a fifth item for a type other than a regular file."""
     return {
@@ -70,7 +81,7 @@ def archive(name, folder, parts, members, state="complete") -> dict:
     }
 
 
-def archive_index(tmp_path: Path, *archives, name="archives.db") -> str:
+def archive_index(tmp_path: Path, *archives: dict, name: str = "archives.db") -> str:
     """An archive index database holding `archives`, flushed and closed."""
     path = str(tmp_path / name)
     store = ArchiveStore(path)

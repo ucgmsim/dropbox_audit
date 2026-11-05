@@ -15,7 +15,9 @@ from dbaudit.report import (
 from dbaudit.store import Store
 
 
-def mk(name, size, digest, ts="2020-01-01T00:00:00Z", d="/R"):
+def mk(
+    name: str, size: int, digest: str, ts: str = "2020-01-01T00:00:00Z", d: str = "/R"
+) -> dict:
     import hashlib
 
     content_hash = hashlib.sha256(digest.encode()).hexdigest()
@@ -33,7 +35,7 @@ def mk(name, size, digest, ts="2020-01-01T00:00:00Z", d="/R"):
     }
 
 
-def seed(tmp_path: Path, entries):
+def seed(tmp_path: Path, entries: list[dict]):
     store = Store(tmp_path / "a.db")
     store.init_schema()
     store.set_meta("root", "/R")

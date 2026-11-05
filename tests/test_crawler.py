@@ -1,7 +1,8 @@
 import threading
+from collections.abc import Collection
 from pathlib import Path
 
-from dbaudit.api import CursorResetError, RateLimitedError
+from dbaudit.api import CursorResetError, Lister, Page, RateLimitedError
 from dbaudit.crawler import Crawler
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.store import Store
@@ -12,14 +13,14 @@ def limiter():
     return AdaptiveLimiter(rps=1e6, max_concurrency=4, sleep=lambda d: None)
 
 
-def build(tmp_path: Path, lister, workers=2, **kw):
+def build(tmp_path: Path, lister: Lister, workers: int = 2, **kw):
     store = Store(tmp_path / "a.db")
     store.init_schema()
     store.set_meta("root", "/R")
     return store, Crawler(store, lister, limiter(), workers=workers, **kw)
 
 
-def files_in(store):
+def files_in(store: Store):
     return {
         row[0]
         for row in store.query(
@@ -159,7 +160,7 @@ def test_transient_errors_eventually_fail_the_shard_not_the_run(tmp_path: Path):
     from dbaudit.api import TransientError
 
     class AlwaysBroken(FakeLister):
-        def list_folder(self, path, recursive):
+        def list_folder(self, path: str, recursive: bool) -> Page:
             raise TransientError("nope")
 
     store, crawler = build(
@@ -180,11 +181,11 @@ class StallsAfterOnePage(FakeLister):
     """What Dropbox did on a 13.8M-file folder in October 2026: the first page of a
     listing came back, then every continue timed out."""
 
-    def __init__(self, tree, stalled, **kw):
+    def __init__(self, tree: dict[str, list[str]], stalled: str, **kw):
         super().__init__(tree, **kw)
         self.stalled = stalled
 
-    def continue_(self, cursor):
+    def continue_(self, cursor: str) -> Page:
         if cursor.startswith(self.stalled + "|"):
             from dbaudit.api import TransientError
 
@@ -232,11 +233,11 @@ class FullListingsFail(FakeLister):
     HTTP 500 after about 180 s, whatever page size was asked for, while one level of the
     same folder came back in about a second."""
 
-    def __init__(self, tree, failing, **kw):
+    def __init__(self, tree: dict[str, list[str]], failing: set[str], **kw):
         super().__init__(tree, **kw)
         self.failing = set(failing)
 
-    def list_folder(self, path, recursive):
+    def list_folder(self, path: str, recursive: bool) -> Page:
         if recursive and path in self.failing:
             from dbaudit.api import TransientError
 
@@ -265,11 +266,11 @@ def test_a_full_listing_that_keeps_failing_is_split_at_its_second_failure(
 class FailsOnce(FakeLister):
     """A momentary failure: the first full listing of `path` fails, then all is well."""
 
-    def __init__(self, tree, path, **kw):
+    def __init__(self, tree: dict[str, list[str]], path: str, **kw):
         super().__init__(tree, **kw)
         self.path, self.failed = path, False
 
-    def list_folder(self, path, recursive):
+    def list_folder(self, path: str, recursive: bool) -> Page:
         if recursive and path == self.path and not self.failed:
             from dbaudit.api import TransientError
 
@@ -440,7 +441,9 @@ def test_queue_target_respects_the_depth_bound(tmp_path: Path):
     assert files_in(store) == ALL_FILES
 
 
-def wide_tree(children=30, with_subfolder=()):
+def wide_tree(
+    children: int = 30, with_subfolder: Collection[int] = ()
+) -> dict[str, list[str]]:
     """/R/wide holds subfolders c00, c01, ..., each with two files; the ones numbered in
     `with_subfolder` also hold a folder `sub` with one file."""
     tree = {"/R": ["wide/"], "/R/wide": [f"c{i:02}/" for i in range(children)]}
@@ -452,7 +455,7 @@ def wide_tree(children=30, with_subfolder=()):
     return tree
 
 
-def crawl_wide(tmp_path: Path, tree):
+def crawl_wide(tmp_path: Path, tree: dict[str, list[str]]):
     """split_depth=2 splits /R and /R/wide, never the c-folders; with one worker they are
     listed in order. A full listing of a c-folder takes 3 requests at page_size=1."""
     lister = FakeLister(tree, page_size=1)
@@ -470,7 +473,7 @@ def crawl_wide(tmp_path: Path, tree):
     return store, full, one_level
 
 
-def files_of(tree):
+def files_of(tree: dict[str, list[str]]):
     return {
         f"{path}/{name}"
         for path, names in tree.items()

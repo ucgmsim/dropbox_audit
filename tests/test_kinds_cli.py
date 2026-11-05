@@ -140,7 +140,7 @@ def test_kinds_covers_only_the_subtree(
     ],
 )
 def test_kinds_refuses_what_it_cannot_use(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra, says
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra: list[str], says: str
 ):
     db, _ = sample(tmp_path)
     (tmp_path / "f.txt").write_text("x")
@@ -159,7 +159,7 @@ def test_kinds_on_an_uninitialised_database_is_an_error(
 
 
 def offline(monkeypatch: pytest.MonkeyPatch):
-    def no_network(remote):
+    def no_network(remote: str):
         raise RuntimeError("no network in tests")
 
     monkeypatch.setattr("dbaudit.cli._space_usage", no_network)

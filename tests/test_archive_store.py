@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import Member, WalkResult
 
 
-def parts(count=2, content="ab"):
+def parts(count: int = 2, content: str = "ab"):
     return [
         Part(
             idx=i,
@@ -23,7 +24,7 @@ def parts(count=2, content="ab"):
     ]
 
 
-def member(offset, name="f.bin", size=10):
+def member(offset: int, name: str = "f.bin", size: int = 10):
     return Member(
         hdr_offset=offset,
         data_offset=offset + 512,
@@ -45,7 +46,7 @@ def new_store(tmp_path: Path):
     return store
 
 
-def registered(tmp_path: Path, count=2):
+def registered(tmp_path: Path, count: int = 2):
     """A store with one archive, its parts and its segments. Returns the first segment id."""
     store = new_store(tmp_path)
     archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts(count))
@@ -53,7 +54,7 @@ def registered(tmp_path: Path, count=2):
     return store, archive_id, store.segments(archive_id)[0]["id"]
 
 
-def seg(store, archive_id, segment_id):
+def seg(store: ArchiveStore, archive_id: int, segment_id: int):
     """The current row for one segment, found by id rather than assumed list position."""
     return next(s for s in store.segments(archive_id) if s["id"] == segment_id)
 
@@ -69,9 +70,7 @@ def test_re_registering_moved_parts_updates_their_paths(tmp_path: Path):
     """The parts of v01p0_incomplete moved folders; the index must follow them."""
     store = new_store(tmp_path)
     archive_id = store.register("a.tar", "tar", "/d", "dropbox", parts())
-    moved = [
-        Part(**{**p.__dict__, "path_display": f"/new{p.path_display}"}) for p in parts()
-    ]
+    moved = [replace(p, path_display=f"/new{p.path_display}") for p in parts()]
     assert store.register("a.tar", "tar", "/new/d", "dropbox", moved) == archive_id
     assert store.parts_of(archive_id)[0].path_display.startswith("/new")
 
@@ -100,7 +99,19 @@ def test_a_batch_writes_members_and_the_cursor_together(tmp_path: Path):
 
 def test_a_failed_batch_leaves_neither_rows_nor_cursor(tmp_path: Path):
     store, archive_id, segment_id = registered(tmp_path)
-    bad = Member(1024, 1536, "not-an-int", "0", 0, 0, "", "", "run", "b.bin", "")
+    bad = Member(
+        1024,
+        1536,
+        "not-an-int",  # ty: ignore[invalid-argument-type]  # a size SQLite rejects, to fail the batch
+        "0",
+        0,
+        0,
+        "",
+        "",
+        "run",
+        "b.bin",
+        "",
+    )
     with pytest.raises(ValueError):
         store.commit_batch(archive_id, segment_id, [member(0), bad], 2048)
     assert store.stats(archive_id)["n_members"] == 0
@@ -607,7 +618,7 @@ def test_recheck_walks_again_from_the_segment_before_the_verdict(tmp_path: Path)
     assert "corrupt" in event["detail"] and "junk at 280" in event["detail"]
 
 
-def _walked_again_to_the_same_verdict(store, archive_id):
+def _walked_again_to_the_same_verdict(store: ArchiveStore, archive_id: int):
     """What walking segments 1 and 2 of `_ended_in_segment_2` again, from the same starts,
     leaves: the same crossing, the same rows, the same `corrupt` at 280."""
     segments = store.segments(archive_id)
