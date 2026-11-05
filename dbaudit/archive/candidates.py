@@ -27,6 +27,26 @@ COMPRESSED = re.compile(
 
 @dataclass(frozen=True)
 class Candidate:
+    """One archive the audit database knows of: a whole file or a set of parts.
+
+    Parameters
+    ----------
+    folder : str
+        The Dropbox folder holding it.
+    name : str
+        The archive's base name, such as ``x.tar``.
+    size : int
+        Total size in bytes.
+    n_parts : int
+        How many files make it up.
+    set_hash : str
+        Identity of its content; empty for a refused set.
+    status : str
+        ``ok``, ``copy`` (the same content as an earlier candidate) or ``refused``.
+    detail : str
+        Why it was refused, or what it copies; empty otherwise.
+    """
+
     folder: str
     name: str
     size: int
@@ -38,13 +58,37 @@ class Candidate:
 
 @dataclass(frozen=True)
 class Listing:
+    """Every candidate found, and the files skipped for not being candidates.
+
+    Parameters
+    ----------
+    candidates : list of Candidate
+        Largest first.
+    compressed : tuple of int
+        ``(files, bytes)`` skipped because their names say they are compressed.
+    other : tuple of int
+        ``(files, bytes)`` named like ``x.tar.<something>`` that are neither a part nor
+        compressed.
+    """
+
     candidates: list  # Candidate, largest first
     compressed: tuple  # (files, bytes) skipped by their compressed names
     other: tuple  # (files, bytes) named like `x.tar.<something>` that are neither
 
 
 def find_candidates(audit_db: str | Path) -> Listing:
-    """Every candidate in the audit database at ``audit_db``, largest first."""
+    """Every candidate in the audit database at ``audit_db``, largest first.
+
+    Parameters
+    ----------
+    audit_db : str or Path
+        The audit database; opened read-only.
+
+    Returns
+    -------
+    Listing
+        The candidates and the counts of files skipped.
+    """
     # As a URI, so that a ?, # or % in the path is escaped rather than read as syntax.
     audit = sqlite3.connect(Path(audit_db).resolve().as_uri() + "?mode=ro", uri=True)
     try:
@@ -54,6 +98,18 @@ def find_candidates(audit_db: str | Path) -> Listing:
 
 
 def _find(audit: sqlite3.Connection) -> Listing:
+    """Build the listing from an open audit database.
+
+    Parameters
+    ----------
+    audit : sqlite3.Connection
+        A read-only connection to the audit database.
+
+    Returns
+    -------
+    Listing
+        The candidates, largest first, and the counts of files skipped.
+    """
     found, compressed, other = {}, [0, 0], [0, 0]
     for dir_id, folder, name, size in audit.execute(
         "SELECT f.dir_id, d.path_display, f.name, f.size FROM files f "

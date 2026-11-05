@@ -20,6 +20,28 @@ class ArchiveSetError(ValueError):
 
 @dataclass(frozen=True)
 class Part:
+    """One file of an archive set.
+
+    Parameters
+    ----------
+    idx : int
+        Position in the set, from 0.
+    name : str
+        File name.
+    size : int
+        Size in bytes.
+    offset : int
+        Where this part starts in the whole archive, in bytes.
+    path_display : str
+        The part's Dropbox path.
+    dbx_id : str
+        Dropbox's file id.
+    rev : str
+        Dropbox's revision.
+    content_hash : str
+        Dropbox's content hash, in hex.
+    """
+
     idx: int
     name: str
     size: int
@@ -31,6 +53,18 @@ class Part:
 
 
 def _suffix_value(suffix: str) -> int:
+    """Read a part suffix as a number.
+
+    Parameters
+    ----------
+    suffix : str
+        Digits, or lowercase letters counted from ``a`` as ``split`` names them.
+
+    Returns
+    -------
+    int
+        The suffix's value, from 0.
+    """
     if suffix.isdigit():
         return int(suffix)
     value = 0
@@ -40,6 +74,22 @@ def _suffix_value(suffix: str) -> int:
 
 
 def _suffix_text(value: int, width: int, numeric: bool) -> str:
+    """Write a number as a part suffix; the inverse of ``_suffix_value``.
+
+    Parameters
+    ----------
+    value : int
+        The number.
+    width : int
+        Number of characters in the suffix.
+    numeric : bool
+        Digits if true, letters from ``a`` if false.
+
+    Returns
+    -------
+    str
+        The suffix.
+    """
     if numeric:
         return str(value).zfill(width)
     out = []
@@ -50,11 +100,26 @@ def _suffix_text(value: int, width: int, numeric: bool) -> str:
 
 
 class ArchiveSet:
-    def __init__(self, parts: list[Part]):
+    """An archive as an ordered, gapless run of parts, addressed by byte offset.
+
+    Parameters
+    ----------
+    parts : list of Part
+        The parts in order, each starting where the one before ends.
+    """
+
+    def __init__(self, parts: list[Part]):  # noqa: D107
         self.parts = parts
 
     @property
     def total_size(self) -> int:
+        """The sum of the parts' sizes, in bytes.
+
+        Returns
+        -------
+        int
+            Bytes.
+        """
         return sum(p.size for p in self.parts)
 
     @classmethod
@@ -64,6 +129,24 @@ class ArchiveSet:
         ``base_name`` is the archive's own name, e.g. ``v01p0_incomplete.tar``. Parts are
         matched against it rather than guessed, because a plain ``FaultSZ03_Source.tar``
         would otherwise parse as a part with the suffix ``tar``.
+
+        Parameters
+        ----------
+        entries : list of dict
+            One per file, with ``name``, ``size`` and optionally ``path_display``,
+            ``id``, ``rev`` and ``content_hash``.
+        base_name : str
+            The archive's name.
+
+        Returns
+        -------
+        ArchiveSet
+            The parts in order.
+
+        Raises
+        ------
+        ArchiveSetError
+            The entries are not one whole file or a complete, uniformly named set.
         """
         if not entries:
             raise ArchiveSetError(f"no files given for {base_name!r}")
@@ -127,6 +210,22 @@ class ArchiveSet:
 
     @staticmethod
     def _part(idx: int, entry: dict, offset: int) -> Part:
+        """Make a Part from one entry.
+
+        Parameters
+        ----------
+        idx : int
+            The part's position in the set.
+        entry : dict
+            The entry, as given to ``from_entries``.
+        offset : int
+            Where the part starts in the whole archive, in bytes.
+
+        Returns
+        -------
+        Part
+            The part.
+        """
         return Part(
             idx=idx,
             name=entry["name"],
@@ -139,6 +238,23 @@ class ArchiveSet:
         )
 
     def locate(self, offset: int) -> tuple[int, int]:
+        """Find the part holding an offset.
+
+        Parameters
+        ----------
+        offset : int
+            A byte offset in the whole archive.
+
+        Returns
+        -------
+        tuple of int
+            ``(part index, offset within that part)``.
+
+        Raises
+        ------
+        ArchiveSetError
+            The offset is outside the archive.
+        """
         if offset < 0 or offset >= self.total_size:
             raise ArchiveSetError(
                 f"offset {offset} outside archive of {self.total_size}"
@@ -149,7 +265,20 @@ class ArchiveSet:
         raise ArchiveSetError(f"offset {offset} outside archive of {self.total_size}")
 
     def slices(self, offset: int, length: int) -> list[tuple[int, int, int]]:
-        """Split a read into (part index, offset within part, length) pieces."""
+        """Split a read into (part index, offset within part, length) pieces.
+
+        Parameters
+        ----------
+        offset : int
+            Where the read starts in the whole archive, in bytes.
+        length : int
+            How many bytes; cut short at the end of the archive.
+
+        Returns
+        -------
+        list of tuple of int
+            One ``(part index, offset within part, length)`` per part touched.
+        """
         length = min(length, max(self.total_size - offset, 0))
         out = []
         while length > 0:
@@ -161,7 +290,13 @@ class ArchiveSet:
         return out
 
     def set_hash(self) -> str:
-        """Identity: the ordered part content hashes. Moving the parts does not change it."""
+        """Identity: the ordered part content hashes. Moving the parts does not change it.
+
+        Returns
+        -------
+        str
+            A SHA-256 hex digest over each part's content hash and size.
+        """
         digest = hashlib.sha256()
         for part in self.parts:
             digest.update(f"{part.content_hash}:{part.size}\n".encode())

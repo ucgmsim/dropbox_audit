@@ -28,6 +28,16 @@ def _parse_rfc3339(text: str) -> dt.datetime:
     """Parse rclone's expiry stamps, which carry nanosecond precision.
 
     ``datetime.fromisoformat`` accepts at most microseconds, so trim the tail.
+
+    Parameters
+    ----------
+    text : str
+        An RFC 3339 timestamp, with ``Z`` or an offset; one without is taken as UTC.
+
+    Returns
+    -------
+    datetime.datetime
+        The time, timezone-aware.
     """
     s = text.strip()
     if s.endswith("Z"):
@@ -40,6 +50,18 @@ def _parse_rfc3339(text: str) -> dt.datetime:
 
 
 def _rclone_config_dump() -> str:
+    """Read rclone's configuration as JSON.
+
+    Returns
+    -------
+    str
+        The output of ``rclone config dump``.
+
+    Raises
+    ------
+    AuthError
+        rclone is missing or failed, for instance on an encrypted config.
+    """
     try:
         proc = subprocess.run(
             ["rclone", "config", "dump"],
@@ -58,7 +80,13 @@ def _rclone_config_dump() -> str:
 
 
 def _rclone_force_refresh(remote: str) -> None:
-    """Make rclone perform a token refresh and write it back to its config."""
+    """Make rclone perform a token refresh and write it back to its config.
+
+    Parameters
+    ----------
+    remote : str
+        The rclone remote's name.
+    """
     subprocess.run(
         ["rclone", "about", f"{remote}:", "--json"],
         capture_output=True,
@@ -69,6 +97,25 @@ def _rclone_force_refresh(remote: str) -> None:
 
 
 def _fetch_account(access_token: str) -> dict:
+    """Ask Dropbox who the token belongs to.
+
+    Parameters
+    ----------
+    access_token : str
+        A bearer token.
+
+    Returns
+    -------
+    dict
+        The account, as ``users/get_current_account`` returns it.
+
+    Raises
+    ------
+    AuthError
+        Dropbox rejected the token.
+    RuntimeError
+        Dropbox could not answer just now (429 or 5xx); ask again later.
+    """
     import requests
 
     resp = requests.post(
@@ -94,9 +141,26 @@ class TokenProvider:
     """Supplies request headers for the Dropbox API, refreshing as needed.
 
     Thread-safe: every crawler worker calls :meth:`headers` on the hot path.
+
+    Parameters
+    ----------
+    remote : str
+        The rclone remote to take credentials from.
+    refresh_margin : int
+        Seconds before expiry at which the token is refreshed.
+    refresh_cooldown : float
+        Seconds to wait between asking rclone to refresh.
+    _dump_fn : callable, optional
+        Returns rclone's config dump as text; for tests.
+    _refresh_fn : callable, optional
+        Makes rclone refresh the token; for tests.
+    _account_fn : callable, optional
+        Takes an access token and returns the account; for tests.
+    _clock : callable, optional
+        Returns the time in seconds; for tests.
     """
 
-    def __init__(
+    def __init__(  # noqa: D107
         self,
         remote: str = "dropbox",
         refresh_margin: int = 600,
@@ -122,6 +186,18 @@ class TokenProvider:
     # ---- internals -----------------------------------------------------
 
     def _read_token(self) -> dict:
+        """Read the remote's OAuth token from rclone's config.
+
+        Returns
+        -------
+        dict
+            The token, with at least ``access_token``.
+
+        Raises
+        ------
+        AuthError
+            The config cannot be parsed, or lacks the remote or its token.
+        """
         raw = self._dump_fn()
         try:
             config = json.loads(raw)
@@ -145,6 +221,18 @@ class TokenProvider:
         return token
 
     def _seconds_until_expiry(self, token: dict) -> float:
+        """Time left on a token.
+
+        Parameters
+        ----------
+        token : dict
+            The token, with an optional ``expiry`` stamp.
+
+        Returns
+        -------
+        float
+            Seconds until it expires; infinite if it never does, negative infinity if the stamp is unreadable.
+        """
         expiry = token.get("expiry")
         if not expiry:
             return float("inf")  # non-expiring legacy token
@@ -154,6 +242,18 @@ class TokenProvider:
             return float("-inf")  # unparseable: treat as expired so we refresh
 
     def _current_token(self) -> dict:
+        """Return the token to use now, refreshed through rclone when it is near expiry.
+
+        Returns
+        -------
+        dict
+            The token.
+
+        Raises
+        ------
+        AuthError
+            The token is expired and rclone would not refresh it.
+        """
         now = self._clock()
         if self._token is not None:
             ttl = self._seconds_until_expiry(self._token)
@@ -195,16 +295,42 @@ class TokenProvider:
             self._last_refresh_attempt = float("-inf")
 
     def access_token(self) -> str:
+        """Return the current access token.
+
+        Returns
+        -------
+        str
+            A bearer token, refreshed if it was about to expire.
+        """
         with self._lock:
             return self._current_token()["access_token"]
 
     def account(self) -> dict:
+        """Return the account the token belongs to, fetched once.
+
+        Returns
+        -------
+        dict
+            The account, as ``users/get_current_account`` returns it.
+        """
         with self._lock:
             if self._account is None:
                 self._account = self._account_fn(self._current_token()["access_token"])
             return self._account
 
     def root_namespace_id(self) -> str:
+        """Return the id of the team space root.
+
+        Returns
+        -------
+        str
+            The namespace id that anchors paths at the team space.
+
+        Raises
+        ------
+        AuthError
+            The account has none, so it is not a team account.
+        """
         root_info = self.account().get("root_info") or {}
         namespace_id = root_info.get("root_namespace_id")
         if not namespace_id:
@@ -218,6 +344,11 @@ class TokenProvider:
 
         Without ``Dropbox-API-Path-Root`` the API resolves paths against the member's
         home folder, where ``/TeamSpace`` does not exist. This mirrors what rclone does.
+
+        Returns
+        -------
+        dict of str to str
+            The Authorization, Content-Type and Dropbox-API-Path-Root headers.
         """
         token = self.access_token()
         return {

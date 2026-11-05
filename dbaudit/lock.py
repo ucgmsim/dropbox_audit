@@ -16,11 +16,34 @@ class LockHeldError(RuntimeError):
 
 
 class InstanceLock:
-    def __init__(self, path: str | os.PathLike[str]):
+    """An exclusive, advisory lock on a file, held while the ``with`` block runs.
+
+    The file then holds ``pid@hostname`` of the holder, so a refused process can say
+    who has it.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        The lock file. Created if it does not exist.
+    """
+
+    def __init__(self, path: str | os.PathLike[str]):  # noqa: D107
         self.path = str(path)
         self._fh = None
 
     def __enter__(self):
+        """Take the lock without waiting and record the holder in the file.
+
+        Returns
+        -------
+        InstanceLock
+            This lock.
+
+        Raises
+        ------
+        LockHeldError
+            Another process holds the lock; the message names it.
+        """
         self._fh = open(self.path, "a+")
         try:
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -37,6 +60,18 @@ class InstanceLock:
         return self
 
     def __exit__(self, *exc):
+        """Release the lock.
+
+        Parameters
+        ----------
+        *exc : object
+            The exception type, value and traceback, if the block raised; unused.
+
+        Returns
+        -------
+        bool
+            Always False, so an exception from the block propagates.
+        """
         if self._fh is not None:
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
             self._fh.close()

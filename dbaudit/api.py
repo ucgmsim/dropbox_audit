@@ -33,6 +33,18 @@ REQUEST_TIMEOUT = 60
 
 @dataclass(frozen=True)
 class Page:
+    """One page of a listing.
+
+    Parameters
+    ----------
+    entries : list of dict
+        The entries, as Dropbox returned them.
+    cursor : str, optional
+        Where to resume from; None if the reply carried none.
+    has_more : bool
+        Whether another page follows.
+    """
+
     entries: list[dict] = field(default_factory=list)
     cursor: str | None = None
     has_more: bool = False
@@ -43,9 +55,17 @@ class ApiError(RuntimeError):
 
 
 class RateLimitedError(ApiError):
-    """429. Honour ``retry_after`` exactly; observed values reach 300 seconds."""
+    """429. Honour ``retry_after`` exactly; observed values reach 300 seconds.
 
-    def __init__(self, message: str, retry_after: float = DEFAULT_RETRY_AFTER):
+    Parameters
+    ----------
+    message : str
+        What happened.
+    retry_after : float
+        Seconds to wait, as Dropbox asked.
+    """
+
+    def __init__(self, message: str, retry_after: float = DEFAULT_RETRY_AFTER):  # noqa: D107
         super().__init__(message)
         self.retry_after = float(retry_after)
 
@@ -70,15 +90,25 @@ class HttpResponse(Protocol):
     """The part of an HTTP response the clients read."""
 
     @property
-    def status_code(self) -> int: ...
+    def status_code(self) -> int:
+        """The HTTP status code."""
 
     @property
-    def headers(self) -> Mapping[str, str]: ...
+    def headers(self) -> Mapping[str, str]:
+        """The response headers."""
 
     @property
-    def content(self) -> bytes: ...
+    def content(self) -> bytes:
+        """The response body, as bytes."""
 
-    def json(self) -> Any: ...
+    def json(self) -> Any:
+        """Parse the body as JSON.
+
+        Returns
+        -------
+        Any
+            The decoded value; JSON has no narrower type.
+        """
 
 
 class HttpSession(Protocol):
@@ -91,24 +121,91 @@ class HttpSession(Protocol):
         headers: dict[str, str],
         timeout: float,
         data: str | None = None,
-    ) -> HttpResponse: ...
+    ) -> HttpResponse:
+        """Send a POST request.
+
+        Parameters
+        ----------
+        url : str
+            The address.
+        headers : dict of str to str
+            The request headers.
+        timeout : float
+            Seconds to wait for the reply.
+        data : str, optional
+            The request body.
+
+        Returns
+        -------
+        HttpResponse
+            The reply.
+        """
 
 
 class HeaderSource(Protocol):
     """Whatever supplies the headers of an API request, such as a token provider."""
 
-    def headers(self) -> dict[str, str]: ...
+    def headers(self) -> dict[str, str]:
+        """Make the headers for one API request.
+
+        Returns
+        -------
+        dict of str to str
+            Header names and values.
+        """
 
 
 class Lister(Protocol):
     """The seam that keeps the crawler testable without a network."""
 
-    def list_folder(self, path: str, recursive: bool) -> Page: ...
+    def list_folder(self, path: str, recursive: bool) -> Page:
+        """List a folder.
 
-    def continue_(self, cursor: str) -> Page: ...
+        Parameters
+        ----------
+        path : str
+            The Dropbox folder.
+        recursive : bool
+            Whether to list the whole subtree.
+
+        Returns
+        -------
+        Page
+            The first page.
+        """
+
+    def continue_(self, cursor: str) -> Page:
+        """Fetch the page after a cursor.
+
+        Parameters
+        ----------
+        cursor : str
+            From the previous page.
+
+        Returns
+        -------
+        Page
+            The next page.
+        """
 
 
 def _classify(status: int, body: dict, headers: Mapping[str, str]) -> ApiError:
+    """Turn a failed reply into the error the crawler knows how to act on.
+
+    Parameters
+    ----------
+    status : int
+        The HTTP status code.
+    body : dict
+        The decoded JSON body, or ``{"raw": ...}`` when it was not JSON.
+    headers : Mapping of str to str
+        The response headers.
+
+    Returns
+    -------
+    ApiError
+        The error, to be raised by the caller.
+    """
     if status == 429:
         retry_after = None
         error = body.get("error") if isinstance(body, dict) else None
@@ -145,9 +242,17 @@ def _classify(status: int, body: dict, headers: Mapping[str, str]) -> ApiError:
 
 
 class HttpLister:
-    """Real :class:`Lister`. Reuses one HTTP session so TLS handshakes are amortised."""
+    """Real :class:`Lister`. Reuses one HTTP session so TLS handshakes are amortised.
 
-    def __init__(
+    Parameters
+    ----------
+    token_provider : HeaderSource
+        Supplies the headers of every request.
+    session : HttpSession, optional
+        Sends the requests; None makes a ``requests.Session``.
+    """
+
+    def __init__(  # noqa: D107
         self, token_provider: HeaderSource, session: HttpSession | None = None
     ):
         self.tokens = token_provider
@@ -158,6 +263,27 @@ class HttpLister:
         self.session = session
 
     def _post(self, url: str, payload: dict) -> Page:
+        """Post a JSON payload and read the page that comes back.
+
+        Parameters
+        ----------
+        url : str
+            The endpoint.
+        payload : dict
+            The request, sent as JSON.
+
+        Returns
+        -------
+        Page
+            The page the reply holds.
+
+        Raises
+        ------
+        TransientError
+            The request itself failed.
+        ApiError
+            Dropbox answered with an error; the subclass says which.
+        """
         try:
             resp = self.session.post(
                 url,
@@ -185,6 +311,20 @@ class HttpLister:
         raise _classify(resp.status_code, body, getattr(resp, "headers", {}) or {})
 
     def list_folder(self, path: str, recursive: bool) -> Page:
+        """List a folder.
+
+        Parameters
+        ----------
+        path : str
+            The Dropbox folder.
+        recursive : bool
+            Whether to list the whole subtree.
+
+        Returns
+        -------
+        Page
+            The first page.
+        """
         return self._post(
             f"{API_BASE}/files/list_folder",
             {
@@ -200,4 +340,16 @@ class HttpLister:
         )
 
     def continue_(self, cursor: str) -> Page:
+        """Fetch the page after a cursor.
+
+        Parameters
+        ----------
+        cursor : str
+            From the previous page.
+
+        Returns
+        -------
+        Page
+            The next page.
+        """
         return self._post(f"{API_BASE}/files/list_folder/continue", {"cursor": cursor})

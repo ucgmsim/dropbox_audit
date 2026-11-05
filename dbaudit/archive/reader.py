@@ -74,8 +74,10 @@ class ReaderError(RuntimeError):
 
 
 class ReadStoppedError(Exception):
-    """A read gave way to its caller's stop while Dropbox kept pushing back. Not a
-    ReaderError: nothing failed, and the walk hands its work back as a stopped one."""
+    """A read gave way to its caller's stop while Dropbox kept pushing back.
+
+    Not a ReaderError: nothing failed, and the walk hands its work back as a stopped one.
+    """
 
 
 class ShortReadError(ReaderError):
@@ -85,11 +87,26 @@ class ShortReadError(ReaderError):
 class TokenSource(Protocol):
     """What the range reader needs from a token provider."""
 
-    def access_token(self) -> str: ...
+    def access_token(self) -> str:
+        """Return the current access token.
 
-    def invalidate(self) -> None: ...
+        Returns
+        -------
+        str
+            A bearer token, refreshed if it was about to expire.
+        """
 
-    def root_namespace_id(self) -> str: ...
+    def invalidate(self) -> None:
+        """Forget the cached token, after the server rejected it."""
+
+    def root_namespace_id(self) -> str:
+        """Return the id of the team space root.
+
+        Returns
+        -------
+        str
+            The namespace id that anchors paths at the team space.
+        """
 
 
 class RangeReader(Protocol):
@@ -98,19 +115,64 @@ class RangeReader(Protocol):
     requests: int
     bytes_fetched: int
 
-    def read_range(self, part_idx: int, offset: int, length: int) -> bytes: ...
+    def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
+        """Read bytes from one part.
+
+        Parameters
+        ----------
+        part_idx : int
+            Which part of the archive.
+        offset : int
+            Where to start within that part, in bytes.
+        length : int
+            How many bytes.
+
+        Returns
+        -------
+        bytes
+            Exactly ``length`` bytes.
+        """
 
 
 class LocalRangeReader:
-    """Parts as files in a directory: used by the tests, and for local archives."""
+    """Parts as files in a directory: used by the tests, and for local archives.
 
-    def __init__(self, directory: str | Path, archive: ArchiveSet):
+    Parameters
+    ----------
+    directory : str or Path
+        The folder holding the parts, by name.
+    archive : ArchiveSet
+        The parts and their order.
+    """
+
+    def __init__(self, directory: str | Path, archive: ArchiveSet):  # noqa: D107
         self.directory = Path(directory)
         self.archive = archive
         self.requests = 0
         self.bytes_fetched = 0
 
     def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
+        """Read bytes from one part.
+
+        Parameters
+        ----------
+        part_idx : int
+            Which part of the archive.
+        offset : int
+            Where to start within that part, in bytes.
+        length : int
+            How many bytes.
+
+        Returns
+        -------
+        bytes
+            Exactly ``length`` bytes.
+
+        Raises
+        ------
+        ShortReadError
+            The file ended before ``length`` bytes.
+        """
         part = self.archive.parts[part_idx]
         with open(self.directory / part.name, "rb") as handle:
             handle.seek(offset)
@@ -125,9 +187,23 @@ class LocalRangeReader:
 
 
 class ConcatFile:
-    """A seekable, read-only file over an ArchiveSet. Enough of the interface for tarfile."""
+    """A seekable, read-only file over an ArchiveSet. Enough of the interface for tarfile.
 
-    def __init__(
+    Parameters
+    ----------
+    archive : ArchiveSet
+        The parts to read as one file.
+    reader : RangeReader
+        Fetches byte ranges of a part.
+    window_min : int
+        The smallest fetch, in bytes, and where the window restarts after a jump.
+    window_max : int
+        The largest fetch, in bytes.
+    shape : int, optional
+        Which request shape to start with; None picks one at random.
+    """
+
+    def __init__(  # noqa: D107
         self,
         archive: ArchiveSet,
         reader: RangeReader,
@@ -152,15 +228,55 @@ class ConcatFile:
         self.shape = secrets.randbelow(SHAPES) if shape is None else shape
 
     def tell(self) -> int:
+        """Return the current position.
+
+        Returns
+        -------
+        int
+            Bytes from the start of the archive.
+        """
         return self._pos
 
     def seekable(self) -> bool:
+        """Whether the file can seek.
+
+        Returns
+        -------
+        bool
+            Always True.
+        """
         return True
 
     def readable(self) -> bool:
+        """Whether the file can be read.
+
+        Returns
+        -------
+        bool
+            Always True.
+        """
         return True
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        """Move the position; nothing is fetched until the next read.
+
+        Parameters
+        ----------
+        offset : int
+            Bytes, relative to ``whence``.
+        whence : int
+            ``io.SEEK_SET``, ``io.SEEK_CUR`` or ``io.SEEK_END``.
+
+        Returns
+        -------
+        int
+            The new position, in bytes from the start.
+
+        Raises
+        ------
+        ValueError
+            ``whence`` is unknown or the position would be negative.
+        """
         if whence == io.SEEK_SET:
             new = offset
         elif whence == io.SEEK_CUR:
@@ -175,6 +291,23 @@ class ConcatFile:
         return self._pos
 
     def read(self, size: int = -1) -> bytes:
+        """Read ``size`` bytes, fetching a window if the cache does not hold them.
+
+        Parameters
+        ----------
+        size : int
+            How many bytes; unbounded reads are refused. Fewer come back at the end of the archive.
+
+        Returns
+        -------
+        bytes
+            The bytes read.
+
+        Raises
+        ------
+        ValueError
+            ``size`` is negative or None.
+        """
         if size is None or size < 0:
             raise ValueError("ConcatFile does not support unbounded reads")
         end = min(self._pos + size, self.archive.total_size)
@@ -191,12 +324,17 @@ class ConcatFile:
         return data
 
     def cached(self) -> tuple[int, int]:
-        """The stretch of the archive the last fetch holds: (start, end), empty if none."""
+        """Return the stretch of the archive the last fetch holds: (start, end), empty if none.
+
+        Returns
+        -------
+        tuple of int
+            ``(start, end)`` in bytes from the start of the archive.
+        """
         return self._cache_start, self._cache_start + len(self._cache)
 
     def drop_cache(self, keep_window: bool = False) -> None:
-        """Forget the fetched window, so the next read asks the server again -- and asks
-        it differently.
+        """Forget the fetched window, so the next read asks the server again, differently.
 
         A read that came back wrong is indistinguishable from one that came back right
         until something reads those bytes a second time -- and a second read served out
@@ -209,6 +347,11 @@ class ConcatFile:
         ``keep_window`` keeps the size the window had grown to, for re-reading the same
         stretch of archive: in a dense run of small members the window is at 16 MiB, and
         starting again from the floor would cost several fetches to grow back.
+
+        Parameters
+        ----------
+        keep_window : bool
+            Keep the grown window size instead of resetting it to ``window_min``.
         """
         self._cache = b""
         self._cache_start = -1
@@ -217,6 +360,15 @@ class ConcatFile:
             self._window = self._window_min
 
     def _fill(self, pos: int, need: int) -> None:
+        """Fetch a window starting at ``pos`` into the cache.
+
+        Parameters
+        ----------
+        pos : int
+            Where the wanted bytes start, in bytes from the start of the archive.
+        need : int
+            How many bytes are wanted; the window is at least this long.
+        """
         cache_end = self._cache_start + len(self._cache)
         gap = pos - cache_end
         if self._cache_start >= 0 and 0 <= gap <= self._window:
@@ -254,9 +406,26 @@ class DropboxRangeReader:
 
     ``TokenProvider.headers()`` is deliberately not reused: it sends
     ``Content-Type: application/json``, which Dropbox's content endpoints reject.
+
+    Parameters
+    ----------
+    archive : ArchiveSet
+        The parts to read; each is addressed by its Dropbox file id.
+    tokens : TokenSource
+        Supplies the access token and the team space root.
+    limiter : AdaptiveLimiter
+        The account-wide rate limiter every request waits on.
+    session : HttpSession, optional
+        Sends the requests; None makes a ``requests.Session``.
+    retries : int
+        How many failed tries a read gets; a 429 does not count as one.
+    timeout : int
+        Seconds to wait for each reply.
+    sleep : callable, optional
+        Waits between tries, given seconds; None uses ``time.sleep``. Tests pass a stand-in.
     """
 
-    def __init__(
+    def __init__(  # noqa: D107
         self,
         archive: ArchiveSet,
         tokens: TokenSource,
@@ -284,6 +453,22 @@ class DropboxRangeReader:
         self.session = session
 
     def _headers(self, target: str, offset: int, length: int) -> dict:
+        """Make the headers of one download request.
+
+        Parameters
+        ----------
+        target : str
+            The part's Dropbox file id, or its path if it has none.
+        offset : int
+            Where the range starts within the part, in bytes.
+        length : int
+            How many bytes.
+
+        Returns
+        -------
+        dict
+            The headers, with the range as ``bytes=first-last``.
+        """
         return {
             "Authorization": f"Bearer {self.tokens.access_token()}",
             "Dropbox-API-Path-Root": json.dumps(
@@ -294,12 +479,62 @@ class DropboxRangeReader:
         }
 
     def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
+        """Read bytes from one part.
+
+        Parameters
+        ----------
+        part_idx : int
+            Which part of the archive.
+        offset : int
+            Where to start within that part, in bytes.
+        length : int
+            How many bytes.
+
+        Returns
+        -------
+        bytes
+            Exactly ``length`` bytes.
+
+        Raises
+        ------
+        ReaderError
+            The part could not be read after the allowed tries.
+        ShortReadError
+            Dropbox sent fewer bytes than asked.
+        ReadStoppedError
+            A stop was requested while Dropbox kept answering 429.
+        """
         if offset % DROPBOX_BLOCK == DROPBOX_BLOCK - 1:
             # Asked from one byte earlier, which Dropbox answers truly (DROPBOX_BLOCK).
             return self._read_range(part_idx, offset - 1, length + 1)[1:]
         return self._read_range(part_idx, offset, length)
 
     def _read_range(self, part_idx: int, offset: int, length: int) -> bytes:
+        """Fetch a range as it is, with retries, backoff and rate-limit handling.
+
+        Parameters
+        ----------
+        part_idx : int
+            Which part of the archive.
+        offset : int
+            Where to start within that part, in bytes.
+        length : int
+            How many bytes.
+
+        Returns
+        -------
+        bytes
+            Exactly ``length`` bytes.
+
+        Raises
+        ------
+        ReaderError
+            The part could not be read after the allowed tries.
+        ShortReadError
+            Dropbox sent fewer bytes than asked.
+        ReadStoppedError
+            A stop was requested while Dropbox kept answering 429.
+        """
         part = self.archive.parts[part_idx]
         target = part.dbx_id or part.path_display
         last, failures = None, 0
@@ -357,6 +592,31 @@ class DropboxRangeReader:
     def _validate(
         self, part: Part, response: HttpResponse, offset: int, length: int
     ) -> bytes:
+        """Check that a 206 answers the range that was asked for.
+
+        Parameters
+        ----------
+        part : Part
+            The part read, for error messages.
+        response : HttpResponse
+            The reply.
+        offset : int
+            The first byte asked for, within the part.
+        length : int
+            How many bytes were asked for.
+
+        Returns
+        -------
+        bytes
+            The body, exactly ``length`` bytes.
+
+        Raises
+        ------
+        ReaderError
+            The reply's Content-Range is not the one asked for.
+        ShortReadError
+            The body is not ``length`` bytes.
+        """
         wanted = f"bytes {offset}-{offset + length - 1}/"
         got = response.headers.get("Content-Range", "")
         if not got.startswith(wanted):
@@ -379,6 +639,18 @@ class DropboxRangeReader:
 
 
 def _retry_after(response: HttpResponse) -> float:
+    """How long Dropbox asked to wait after a 429.
+
+    Parameters
+    ----------
+    response : HttpResponse
+        The 429 reply.
+
+    Returns
+    -------
+    float
+        Seconds, from the body or the Retry-After header; 60 if neither is readable.
+    """
     body = {}
     try:
         body = response.json()

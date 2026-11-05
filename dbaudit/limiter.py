@@ -39,7 +39,36 @@ OVERLOAD_WINDOW = (
 
 
 class AdaptiveLimiter:
-    def __init__(
+    """Admits requests at an adaptive rate and concurrency, and parks everyone on a 429.
+
+    Parameters
+    ----------
+    rps : float
+        The starting request rate, per second.
+    max_concurrency : int
+        The most requests in flight at once.
+    min_concurrency : int
+        The fewest allowed, however many 429s come back.
+    recover_after : float
+        Seconds of clean running before the rate or concurrency climbs a step.
+    burst : float
+        Requests that may go out at once from an idle start.
+    clock : callable
+        Returns the time in seconds; tests pass a fake.
+    sleep : callable
+        Waits for the given seconds; tests pass a fake.
+    max_rps : float, optional
+        The ceiling the rate climbs to; None keeps it at ``rps``.
+    start_concurrency : int, optional
+        The starting concurrency; None starts at ``max_concurrency``.
+
+    Raises
+    ------
+    ValueError
+        ``start_concurrency`` is outside the minimum and maximum.
+    """
+
+    def __init__(  # noqa: D107
         self,
         rps: float = 5.0,
         max_concurrency: int = 8,
@@ -92,34 +121,75 @@ class AdaptiveLimiter:
 
     @property
     def concurrency(self) -> int:
+        """The number of requests allowed in flight now.
+
+        Returns
+        -------
+        int
+            The current limit.
+        """
         with self._lock:
             return self._concurrency
 
     @property
     def paused_until(self) -> float:
+        """The clock time until which every request is parked; 0 if none.
+
+        Returns
+        -------
+        float
+            A time on the limiter's clock, in seconds.
+        """
         with self._lock:
             return self._paused_until
 
     @property
     def granted_total(self) -> int:
+        """Every request let through so far.
+
+        Returns
+        -------
+        int
+            The count.
+        """
         with self._lock:
             return self._granted_total
 
     @property
     def in_flight(self) -> int:
+        """The requests in flight now.
+
+        Returns
+        -------
+        int
+            The count.
+        """
         with self._lock:
             return self._in_flight
 
     # ---- internals -----------------------------------------------------
 
     def _refill(self, now: float) -> None:
+        """Add the tokens earned since the last refill, up to the burst.
+
+        Parameters
+        ----------
+        now : float
+            The clock time, in seconds.
+        """
         elapsed = now - self._last_refill
         if elapsed > 0:
             self._tokens = min(self.burst, self._tokens + elapsed * self.rps)
             self._last_refill = now
 
     def _try_acquire(self) -> float:
-        """Take a slot, or return how long to wait before trying again."""
+        """Take a slot, or return how long to wait before trying again.
+
+        Returns
+        -------
+        float
+            0 if a slot was taken; otherwise seconds to wait.
+        """
         with self._lock:
             now = self.clock()
             self._refill(now)
@@ -136,6 +206,7 @@ class AdaptiveLimiter:
             return 0.0
 
     def _release(self) -> None:
+        """Give a slot back."""
         with self._lock:
             self._in_flight -= 1
 
@@ -143,7 +214,13 @@ class AdaptiveLimiter:
 
     @contextmanager
     def slot(self):
-        """Block until it is this worker's turn to make one API request."""
+        """Block until it is this worker's turn to make one API request.
+
+        Yields
+        ------
+        None
+            While the caller holds the slot.
+        """
         while True:
             wait = self._try_acquire()
             if wait == 0.0:
@@ -155,6 +232,13 @@ class AdaptiveLimiter:
             self._release()
 
     def on_rate_limited(self, retry_after: float) -> None:
+        """Record a 429: park every worker, and cut the rate and concurrency once per overload.
+
+        Parameters
+        ----------
+        retry_after : float
+            Seconds Dropbox asked everyone to wait.
+        """
         with self._lock:
             now = self.clock()
             # Requests in flight when Dropbox objects all come back 429 together: one
@@ -183,6 +267,7 @@ class AdaptiveLimiter:
             )
 
     def on_success(self) -> None:
+        """Record a successful request, and climb a step after a clean interval."""
         raised = stepped = None
         with self._lock:
             now = self.clock()
