@@ -281,10 +281,14 @@ class Store:
         return row is not None
 
     @overload
-    def get_meta(self, key: str, default: None = None) -> str | None: ...
+    def get_meta(  # numpydoc ignore=GL08  # @overload stub; ruff D418 forbids its docstring
+        self, key: str, default: None = None
+    ) -> str | None: ...
 
     @overload
-    def get_meta(self, key: str, default: str) -> str: ...
+    def get_meta(  # numpydoc ignore=GL08  # @overload stub; ruff D418 forbids its docstring
+        self, key: str, default: str
+    ) -> str: ...
 
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         """Read a metadata value.
