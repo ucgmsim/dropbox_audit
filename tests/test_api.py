@@ -36,16 +36,17 @@ class FakeSession:
     def post(
         self,
         url: str,
-        headers: dict[str, str] | None = None,
+        *,
+        headers: dict[str, str],
+        timeout: float,
         data: str | None = None,
-        timeout: float | None = None,
     ) -> FakeResp:
         self.calls.append((url, data))
         return self.resps.pop(0)
 
 
 class FakeTokens:
-    def headers(self):
+    def headers(self) -> dict[str, str]:
         return {"Authorization": "Bearer x", "Content-Type": "application/json"}
 
 

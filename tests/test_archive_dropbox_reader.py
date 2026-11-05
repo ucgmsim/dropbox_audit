@@ -46,6 +46,7 @@ class FakeSession:
     def post(
         self,
         url: str,
+        *,
         headers: dict[str, str],
         timeout: float,
         data: str | None = None,
@@ -225,13 +226,14 @@ def test_a_read_gives_way_to_its_callers_stop_while_dropbox_pushes_back():
         def post(
             self,
             url: str,
+            *,
             headers: dict[str, str],
             timeout: float,
             data: str | None = None,
         ) -> FakeResponse:
             if len(self.calls) == 2:
                 stop.append(True)  # a signal lands mid-storm
-            return super().post(url, headers, timeout)
+            return super().post(url, headers=headers, timeout=timeout)
 
     reader.session = Storm(*[limited] * 3, ok(0, 512))
     reader.should_stop = lambda: bool(stop)
@@ -258,6 +260,7 @@ class DropboxLikeSession:
     def post(
         self,
         url: str,
+        *,
         headers: dict[str, str],
         timeout: float,
         data: str | None = None,
