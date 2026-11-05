@@ -127,7 +127,7 @@ def main() -> int:
         if c is None:
             r = (
                 LocalRangeReader(args.local_dir, archive_set)
-                if args.local_dir
+                if tokens is None
                 else DropboxRangeReader(archive_set, tokens, limiter)
             )
             readers.append(r)

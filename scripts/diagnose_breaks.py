@@ -237,7 +237,7 @@ def main() -> int:
     # One reader per thread: a requests.Session is not thread-safe (Ruling T7-3).
     readers = [
         LocalRangeReader(args.local_dir, archive_set)
-        if args.local_dir
+        if tokens is None
         else DropboxRangeReader(archive_set, tokens, limiter)
         for _ in range(args.workers)
     ]
@@ -398,7 +398,7 @@ def main() -> int:
             if c is None:
                 r = (
                     LocalRangeReader(args.local_dir, archive_set)
-                    if args.local_dir
+                    if tokens is None
                     else DropboxRangeReader(archive_set, tokens, limiter)
                 )
                 readers.append(r)
@@ -436,7 +436,7 @@ def main() -> int:
                 # the original verdict non-independent.
                 fresh_reader = (
                     LocalRangeReader(args.local_dir, archive_set)
-                    if args.local_dir
+                    if tokens is None
                     else DropboxRangeReader(archive_set, tokens, limiter)
                 )
                 fresh = ConcatFile(
@@ -467,7 +467,7 @@ def main() -> int:
                     break
                 probe_reader = (
                     LocalRangeReader(args.local_dir, archive_set)
-                    if args.local_dir
+                    if tokens is None
                     else DropboxRangeReader(archive_set, tokens, limiter)
                 )
                 readers.append(probe_reader)
