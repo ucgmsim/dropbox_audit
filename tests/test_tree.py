@@ -3,6 +3,7 @@ import hashlib
 import io
 import os
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pytest
 
@@ -611,6 +612,18 @@ def test_the_command_refuses_a_missing_database_or_folder(tmp_path, capsys):
     )
     assert "/R/nowhere is not in" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_tree_without_min_size_folds_below_1_gib(tmp_path: Path) -> None:
+    from dbaudit.cli import main
+
+    gib = 2**30
+    listing(tmp_path, file("/R/under/f", gib - 1), file("/R/over/f", gib))
+    out = tmp_path / "tree.html"
+    assert main(["tree", "--db", str(tmp_path / "audit.db"), "--out", str(out)]) == 0
+    text = out.read_text(encoding="utf-8")
+    assert ">over</span>" in text and ">f</span>" in text
+    assert ">under</span>" not in text
 
 
 def test_sizes_are_read_in_binary_units():
