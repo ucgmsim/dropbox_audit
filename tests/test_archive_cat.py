@@ -6,12 +6,15 @@ tests/test_live_archive.py for the one live check, gated behind DBAUDIT_LIVE=1.
 import io
 import itertools
 import random
+import sqlite3
 import sys
 import tarfile
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
+from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import LocalRangeReader, ShortReadError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import Member, WalkResult
@@ -411,7 +414,7 @@ def test_cat_fetches_the_member_and_its_anchors_not_the_window(
     fetched = {"bytes": 0, "reads": 0}
     real_read = LocalRangeReader.read_range
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self: LocalRangeReader, part_idx: int, offset: int, length: int):
         block = real_read(self, part_idx, offset, length)
         fetched["bytes"] += len(block)
         fetched["reads"] += 1
@@ -565,7 +568,7 @@ def _setup_for_a_mid_stream_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     calls = {"n": 0}
     real_read = LocalRangeReader.read_range
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self: LocalRangeReader, part_idx: int, offset: int, length: int):
         calls["n"] += 1
         if calls["n"] == 2:
             raise ShortReadError("simulated mid-stream corruption")
@@ -650,13 +653,19 @@ class _Swaps(LocalRangeReader):
     first half of the read true -- a read that goes wrong partway through."""
 
     def __init__(
-        self, directory, archive, lie_on, fill=None, take_from=None, back_half=False
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        lie_on: Collection[int] | None,
+        fill: bytes | None = None,
+        take_from: int | None = None,
+        back_half: bool = False,
     ):
         super().__init__(directory, archive)
         self.lie_on, self.fill, self.take_from = lie_on, fill, take_from
         self.back_half, self.calls, self.lied = back_half, 0, 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         self.calls += 1
         true = super().read_range(part_idx, offset, length)
         if self.lie_on is not None and self.calls not in self.lie_on:
@@ -678,7 +687,7 @@ class _Swaps(LocalRangeReader):
         return super().read_range(part_idx, at, length)
 
 
-def _single_part_archive(tmp_path: Path, members):
+def _single_part_archive(tmp_path: Path, members: Sequence[tuple]):
     source = tmp_path / "parts"
     source.mkdir()
     data = build_tar(members)
@@ -700,7 +709,9 @@ def _single_part_archive(tmp_path: Path, members):
     return db, source
 
 
-def _with_reader(monkeypatch: pytest.MonkeyPatch, make):
+def _with_reader(
+    monkeypatch: pytest.MonkeyPatch, make: Callable[[str, ArchiveSet], LocalRangeReader]
+):
     monkeypatch.setattr(
         "dbaudit.cli._reader_for",
         lambda row, archive_set, tokens=None, limiter=None: make(
@@ -753,7 +764,7 @@ def test_cat_repairs_a_read_whose_body_is_another_range(
 @pytest.mark.parametrize("liar", [1, 2, 3])
 @pytest.mark.unshaped
 def test_cat_repairs_a_bad_read_on_any_chunk_of_a_large_member(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, liar
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, liar: int
 ):
     """Several reads per member, and whichever of them comes back wrong, the file is
     right. Before, only the chunk boundaries of the *index* were checked: none."""
@@ -1080,16 +1091,26 @@ def test_cat_rejects_another_members_header_before_writing_a_byte(
 # refused -- never written, with exit 0.
 
 
+_Lie = Callable[["_Planned", int, int, bytes], bytes]
+"""A planned bad read: given the reader, the archive-wide offset, the length and the
+true bytes, it returns the bytes to serve instead."""
+
+
 class _Planned(LocalRangeReader):
     """Truthful, except on the read_range calls numbered in ``plan`` (1-based), whose
     body is ``plan[n](reader, offset, length, true)`` instead -- always the right length,
     as the real failure was. ``offset`` is the archive-wide one. Every call is logged."""
 
-    def __init__(self, directory, archive, plan=None):
+    def __init__(
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        plan: Mapping[int, _Lie] | None = None,
+    ):
         super().__init__(directory, archive)
         self.plan, self.calls, self.lied, self.log = dict(plan or {}), 0, 0, []
 
-    def raw(self, offset, length):
+    def raw(self, offset: int, length: int):
         """The true bytes at an archive-wide offset, straight from the part files."""
         out = b""
         for idx, within, take in self.archive.slices(offset, length):
@@ -1098,7 +1119,7 @@ class _Planned(LocalRangeReader):
                 out += handle.read(take)
         return out
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         self.calls += 1
         true = super().read_range(part_idx, offset, length)
         at = self.archive.parts[part_idx].offset + offset
@@ -1112,11 +1133,11 @@ class _Planned(LocalRangeReader):
         return lie
 
 
-def _random(seed, n):
+def _random(seed: int, n: int):
     return random.Random(seed).randbytes(n)
 
 
-def _split_archive(tmp_path: Path, members, part_size):
+def _split_archive(tmp_path: Path, members: Sequence[tuple], part_size: int):
     source = tmp_path / "parts"
     source.mkdir()
     write_parts(source, build_tar(members), part_size=part_size)
@@ -1137,12 +1158,12 @@ def _split_archive(tmp_path: Path, members, part_size):
     return db, source
 
 
-def _row(db, path):
+def _row(db: str, path: str):
     store = ArchiveStore(db)
     return store.find_members(store.get("a.tar")["id"], path)[0]
 
 
-def _cat(db, member, out):
+def _cat(db: str, member: str, out: Path):
     return main(
         [
             "archive",
@@ -1159,7 +1180,7 @@ def _cat(db, member, out):
     )
 
 
-def _planned(monkeypatch: pytest.MonkeyPatch, plan):
+def _planned(monkeypatch: pytest.MonkeyPatch, plan: Mapping[int, _Lie] | None):
     readers = []
     _with_reader(
         monkeypatch, lambda d, a: readers.append(_Planned(d, a, plan)) or readers[-1]
@@ -1167,7 +1188,7 @@ def _planned(monkeypatch: pytest.MonkeyPatch, plan):
     return readers
 
 
-def _back_half(reader, at, length, true):
+def _back_half(reader: _Planned, at: int, length: int, true: bytes):
     cut = length // 2
     return true[:cut] + (bytes(range(256)) * (length // 256 + 1))[: length - cut]
 
@@ -1258,7 +1279,9 @@ def test_cat_refuses_a_part_rewritten_with_the_same_layout(
 
 @pytest.mark.unshaped
 def test_cat_repairs_a_read_wrong_in_its_back_half_before_writing_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsysbinary
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsysbinary: pytest.CaptureFixture[bytes],
 ):
     """Right at its head, wrong from halfway: on a read that is not the last, only the
     next read can see it, so no read is written until the next has agreed with its tail.
@@ -1306,7 +1329,7 @@ def test_cat_does_not_take_zeros_at_a_reads_tail_on_trust(
     monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 16_384)
     monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 1_024)
 
-    def content(seed):
+    def content(seed: int):
         body = bytearray(_random(seed, 40_000))
         body[14_000:16_500] = bytes(2_500)  # the first reads meet in here
         return bytes(body)
@@ -1355,7 +1378,7 @@ def test_cat_does_not_take_fill_at_both_ends_of_a_read_on_trust(
 @pytest.mark.parametrize("extra", [0, 300])
 @pytest.mark.unshaped
 def test_cat_confirms_the_last_read_when_nothing_follows_the_member(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: int
 ):
     """An archive that ends at the member, or within a block of it, offers no block
     after it to vouch for the read's tail -- so the read is taken only once a second
@@ -1461,7 +1484,7 @@ def test_cat_checks_both_ends_of_a_read_that_meets_a_part_boundary(
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
 
-    def shifted(reader, at, length, true):
+    def shifted(reader: _Planned, at: int, length: int, true: bytes):
         return reader.raw(at - 777, length)
 
     readers = _planned(monkeypatch, {2: shifted})
@@ -1615,7 +1638,7 @@ def test_cat_reads_repetitive_data_twice_and_distinctive_data_once(
     "where", ["in the block after the member", "in the member's own headers"]
 )
 def test_cat_extracts_a_member_whose_anchor_block_a_part_boundary_splits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
 ):
     """Parts need not be a multiple of 512 bytes (`split -b 1GB` is 10**9), so a
     boundary can fall inside a block. Inside the one after the member, or between a long
@@ -1663,7 +1686,7 @@ def test_cat_extracts_a_member_whose_anchor_block_a_part_boundary_splits(
 # ---- each safeguard, pinned: the shapes that only it catches ------------------------------
 
 
-def _zeros_at(payload_len, start, stop, seed):
+def _zeros_at(payload_len: int, start: int, stop: int, seed: int):
     body = bytearray(_random(seed, payload_len))
     body[start:stop] = bytes(stop - start)
     return bytes(body)
@@ -1688,7 +1711,7 @@ def test_cat_reads_twice_a_read_whose_head_only_zeros_vouch_for(
         ],
     )
 
-    def front_half_zeros(reader, at, length, true):
+    def front_half_zeros(reader: _Planned, at: int, length: int, true: bytes):
         return bytes(length // 2) + true[length // 2 :]
 
     readers = _planned(monkeypatch, {2: front_half_zeros})
@@ -1719,7 +1742,7 @@ def test_cat_holds_a_re_read_to_its_own_head_too(
         ],
     )
 
-    def all_but_its_tail(reader, at, length, true):
+    def all_but_its_tail(reader: _Planned, at: int, length: int, true: bytes):
         return b"x" * (length - 1_024) + true[length - 1_024 :]
 
     readers = _planned(monkeypatch, {1: _back_half, 4: all_but_its_tail})
@@ -1751,7 +1774,7 @@ def test_cat_refuses_rather_than_take_a_thrice_served_body_its_neighbour_denies(
     )
     other = _row(db, "run/before.bin")
 
-    def cached_wrong(reader, at, length, true):
+    def cached_wrong(reader: _Planned, at: int, length: int, true: bytes):
         return reader.raw(other["hdr_offset"], length)
 
     readers = _planned(monkeypatch, {4: cached_wrong, 5: cached_wrong, 6: cached_wrong})
@@ -1775,7 +1798,7 @@ def test_cat_does_not_take_the_terminators_zeros_as_proof(
         tmp_path, [("run/before.bin", b"b" * 3_000), ("run/last.bin", payload)]
     )
 
-    def zeros_from_halfway(reader, at, length, true):
+    def zeros_from_halfway(reader: _Planned, at: int, length: int, true: bytes):
         return true[: length // 2] + bytes(length - length // 2)
 
     readers = _planned(monkeypatch, {1: zeros_from_halfway})
@@ -1798,7 +1821,7 @@ def test_cat_rereads_zeros_where_the_index_says_a_header_follows(
         tmp_path, [("run/data.bin", payload), ("run/after.bin", b"a" * 3_000)]
     )
 
-    def zeros_from_halfway(reader, at, length, true):
+    def zeros_from_halfway(reader: _Planned, at: int, length: int, true: bytes):
         return true[: length // 2] + bytes(length - length // 2)
 
     readers = _planned(monkeypatch, {1: zeros_from_halfway})
@@ -1855,7 +1878,7 @@ def test_cat_refuses_a_member_whose_data_moved_under_the_same_header(
     assert not out.exists()
 
 
-def _cat_across_parts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part_size):
+def _cat_across_parts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part_size: int):
     monkeypatch.setattr("dbaudit.cli.CAT_CHUNK", 16_384)
     monkeypatch.setattr("dbaudit.cli.CAT_OVERLAP", 1_024)
     payload = _random(33, 40_000)
@@ -1907,7 +1930,7 @@ def test_cat_does_not_let_a_few_shared_bytes_vouch_for_a_read(
         ],
     )
 
-    def wrong_between_its_ends(reader, at, length, true):
+    def wrong_between_its_ends(reader: _Planned, at: int, length: int, true: bytes):
         return true[:64] + b"x" * (length - 128) + true[length - 64 :]
 
     readers = _planned(monkeypatch, {2: wrong_between_its_ends})
@@ -1928,12 +1951,12 @@ TWINS = [
 ]
 
 
-def _twins_back_half(me, twin):
+def _twins_back_half(me: sqlite3.Row, twin: Mapping[str, int]):
     """A read crossed halfway with the same range of an equal-size twin: its second half
     is the twin's data, then the header after the twin -- a valid header, not this one's."""
     shift = twin["hdr_offset"] - me["hdr_offset"]
 
-    def lie(reader, at, length, true):
+    def lie(reader: _Planned, at: int, length: int, true: bytes):
         half = length // 2
         return true[:half] + reader.raw(at + shift + half, length - half)
 
@@ -2111,7 +2134,7 @@ def test_cat_does_not_let_a_few_zero_bytes_of_a_header_vouch_for_a_request(
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
 
-    def zeros_then_true(reader, at, length, true):
+    def zeros_then_true(reader: _Planned, at: int, length: int, true: bytes):
         half = length // 2
         return bytes(half) + true[half:]
 
@@ -2162,7 +2185,7 @@ def test_cat_does_not_let_a_few_bytes_of_the_next_header_vouch_for_a_request(
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
 
-    def right_at_both_ends(reader, at, length, true):
+    def right_at_both_ends(reader: _Planned, at: int, length: int, true: bytes):
         return true[:600] + b"x" * (length - 800) + true[length - 200 :]
 
     readers = _planned(monkeypatch, {1: right_at_both_ends})
@@ -2176,7 +2199,7 @@ def test_cat_does_not_let_a_few_bytes_of_the_next_header_vouch_for_a_request(
     assert out.read_bytes() == payload
 
 
-def _split_at(tmp_path: Path, data, cuts):
+def _split_at(tmp_path: Path, data: bytes, cuts: Sequence[int]):
     source = tmp_path / "parts"
     source.mkdir()
     edges = [0, *cuts, len(data)]
@@ -2255,7 +2278,7 @@ def test_cat_repairs_a_twins_body_that_ends_one_byte_into_the_next_header(
     shift = i2.offset - i1.offset
     db = _split_at(tmp_path, data, [end1 + 1])
 
-    def splice(reader, at, length, true):
+    def splice(reader: _Planned, at: int, length: int, true: bytes):
         return true[:2_048] + reader.raw(at + shift + 2_048, length - 2_048)
 
     readers = _planned(monkeypatch, {3: splice})
@@ -2274,11 +2297,17 @@ class _ServesTwice(LocalRangeReader):
     """Truthful, except that the 2nd and 3rd fetches of one exact range both return the
     same wrong body -- a server that, once, got the same range wrong twice running."""
 
-    def __init__(self, directory, archive, target, wrong):
+    def __init__(
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        target: tuple[int, int],
+        wrong: Callable[[bytes], bytes],
+    ):
         super().__init__(directory, archive)
         self.target, self.wrong, self.seen, self.lied = target, wrong, 0, 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         true = super().read_range(part_idx, offset, length)
         if (self.archive.parts[part_idx].offset + offset, length) != self.target:
             return true
@@ -2340,8 +2369,8 @@ def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(
     has confirmed -- here one that began inside a stored tarball and walked its members.
     Its run/x.bin is the tarball's old copy, not the archive's. `cat` refuses such a row
     and says how to finish the index, rather than extract it with exit 0."""
-    import argparse
     import threading
+    import types
 
     from dbaudit import cli
 
@@ -2376,7 +2405,7 @@ def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(
     )
     store = ArchiveStore(db)
     row = store.get("a.tar")
-    args = argparse.Namespace(
+    args = types.SimpleNamespace(
         window_min=65_536, window_max=16 << 20, batch=2_000, max_batches=None
     )
     run = cli._Run(
@@ -2409,7 +2438,7 @@ def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(
 # ---- review 5's mutant-killers: each pins a check no earlier test could see --------------
 
 
-def _clean_log(monkeypatch: pytest.MonkeyPatch, db, path):
+def _clean_log(monkeypatch: pytest.MonkeyPatch, db: str, path: str):
     """The requests a clean `cat` of ``path`` makes, to aim a bad read at one of them."""
     readers = _planned(monkeypatch, {})
     assert _cat(db, path, Path(db).parent / "clean.bin") == 0
@@ -2470,7 +2499,7 @@ def test_cat_expects_the_terminator_after_the_last_member(
     last_read = next(i for i, (at, n) in enumerate(log) if at + n == stop) + 1
     shift = m1["hdr_offset"] - m2["hdr_offset"]
 
-    def splice(reader, at, length, true):
+    def splice(reader: _Planned, at: int, length: int, true: bytes):
         return true[:2_048] + reader.raw(at + shift + 2_048, length - 2_048)
 
     readers = _planned(monkeypatch, {last_read: splice})
@@ -2528,7 +2557,7 @@ def test_cat_tells_two_copies_of_a_path_apart_by_owner_and_mode(
 
 @pytest.mark.parametrize("part", [300, 511, 700, 1_000])
 def test_cat_extracts_every_member_across_parts_smaller_than_the_overlap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, part: int
 ):
     """A bridge across a boundary must stop at the next one: parts smaller than the
     bytes two reads share are otherwise straddled twice by one bridge."""
@@ -2614,7 +2643,7 @@ def test_cat_checks_a_settled_last_read_against_the_read_before_it(
     first_last = next(i for i, (at, n) in enumerate(log) if at + n == stop) + 1
     wrong = {}
 
-    def served_thrice(reader, at, length, true):
+    def served_thrice(reader: _Planned, at: int, length: int, true: bytes):
         wrong.setdefault("body", _random(18, length - 1_024) + true[length - 1_024 :])
         return wrong["body"]
 
@@ -2650,7 +2679,7 @@ def test_cat_rereads_a_header_where_the_terminator_belongs_even_served_thrice(
     first = next(i for i, (at, n) in enumerate(log) if at + n == stop) + 1
     shift = m1["hdr_offset"] - m2["hdr_offset"]
 
-    def splice(reader, at, length, true):
+    def splice(reader: _Planned, at: int, length: int, true: bytes):
         return true[:2_048] + reader.raw(at + shift + 2_048, length - 2_048)
 
     readers = _planned(monkeypatch, {first + k: splice for k in (0, 1, 2)})

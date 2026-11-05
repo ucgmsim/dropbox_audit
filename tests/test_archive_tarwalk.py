@@ -1,13 +1,16 @@
 import io
 import tarfile
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
+from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import ConcatFile, LocalRangeReader, ReaderError
 from dbaudit.archive.tarwalk import (
     CONFIRM_FILLS,
     REREAD_LIMIT,
+    Member,
     ScanStoppedError,
     UnsettledReadError,
     UnsupportedArchiveError,
@@ -19,13 +22,20 @@ from tests.archive_fakes import build_tar, write_parts
 MEMBERS = [(f"run/file{i:03d}.bin", bytes([i % 251]) * (1000 + i)) for i in range(50)]
 
 
-def collect(tmp_path: Path, data, part_size=4096, start=0, batch_size=7, window=None):
+def collect(
+    tmp_path: Path,
+    data: bytes,
+    part_size: int = 4096,
+    start: int = 0,
+    batch_size: int = 7,
+    window: int | None = None,
+):
     archive = write_parts(tmp_path, data, part_size=part_size)
     windows = {} if window is None else {"window_min": window, "window_max": window}
     handle = ConcatFile(archive, LocalRangeReader(tmp_path, archive), **windows)
     seen, cursors = [], []
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int):
         seen.extend(members)
         cursors.append(next_offset)
 
@@ -105,11 +115,11 @@ def test_a_missing_final_part_reports_truncated(tmp_path: Path):
 class _Counting(LocalRangeReader):
     """Counts the fetches that cover ``watch``."""
 
-    def __init__(self, directory, archive, watch):
+    def __init__(self, directory: str | Path, archive: ArchiveSet, watch: int):
         super().__init__(directory, archive)
         self.watch, self.covering = watch, 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         data = super().read_range(part_idx, offset, length)
         start = self.archive.parts[part_idx].offset + offset
         self.covering += start <= self.watch < start + length
@@ -158,7 +168,7 @@ def test_a_well_formed_bad_read_cannot_fake_a_truncated_archive(tmp_path: Path):
     reader = _LiesOnce(tmp_path, archive, late, fill=data[0:512], span=512)
     rows = {}
 
-    def commit(batch, offset):
+    def commit(batch: list[Member], offset: int):
         rows.update((m.hdr_offset, m.name) for m in batch)  # INSERT OR REPLACE
 
     result = walk(ConcatFile(archive, reader), 0, commit)
@@ -310,7 +320,9 @@ def test_batches_commit_with_the_offset_to_resume_from(tmp_path: Path):
 
 
 @pytest.mark.parametrize("window", [1024, 65536])
-def test_should_stop_ends_the_walk_after_the_current_member(tmp_path: Path, window):
+def test_should_stop_ends_the_walk_after_the_current_member(
+    tmp_path: Path, window: int
+):
     """A SIGINT handler wants the walk to stop within one header hop, not one whole
     batch: should_stop is checked after every member, not only at batch_size (Ruling
     G). It commits what has left the held-back window; the walk resuming from its
@@ -329,7 +341,7 @@ def test_should_stop_ends_the_walk_after_the_current_member(tmp_path: Path, wind
     )
     seen = []
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int):
         seen.extend(members)
 
     calls = {"n": 0}
@@ -434,7 +446,7 @@ def test_find_chain_start_gives_way_between_reads_when_asked(tmp_path: Path):
     reads = []
 
     class Counting(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int):
             reads.append(offset)
             return super().read_range(part_idx, offset, length)
 
@@ -462,12 +474,20 @@ class _LiesOnce(LocalRangeReader):
 
     once = True
 
-    def __init__(self, directory, archive, bad, fill=JUNK, span=1024, nth=1):
+    def __init__(
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        bad: int,
+        fill: bytes = JUNK,
+        span: int | None = 1024,
+        nth: int = 1,
+    ):
         super().__init__(directory, archive)
         self.bad, self.fill, self.span, self.nth = bad, fill, span, nth
         self.covering = self.lied = 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         data = super().read_range(part_idx, offset, length)
         start = self.archive.parts[part_idx].offset + offset
         if not start <= self.bad < start + length:
@@ -491,12 +511,12 @@ class _AlwaysLies(_LiesOnce):
 
     once = False
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         self.fill = bytes((b + self.lied) % 256 for b in JUNK)
         return super().read_range(part_idx, offset, length)
 
 
-def _header_offsets(data):
+def _header_offsets(data: bytes):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as reference:
         return [m.offset for m in reference]
 
@@ -632,7 +652,7 @@ def _long_name_archive():
 # member's real header at 2048.
 
 
-def _with_field(data, header, start, length, value):
+def _with_field(data: bytes, header: int, start: int, length: int, value: bytes):
     """`data` with one field of the header at `header` rewritten and its checksum redone
     -- how another tar writer might have filled that field in."""
     block = bytearray(data[header : header + 512])
@@ -655,12 +675,17 @@ def _long_link_archive():
     ), target
 
 
-def _rows(tmp_path: Path, reader_class=LocalRangeReader, data=None, **reader_kw):
+def _rows(
+    tmp_path: Path,
+    reader_class: type[LocalRangeReader] = LocalRangeReader,
+    data: bytes = b"",
+    **reader_kw,
+):
     archive = write_parts(tmp_path, data, part_size=len(data))
     reader = reader_class(tmp_path, archive, **reader_kw)
     rows = {}
 
-    def commit(batch, offset):
+    def commit(batch: list[Member], offset: int):
         rows.update((m.hdr_offset, m) for m in batch)  # INSERT OR REPLACE
 
     result = walk(ConcatFile(archive, reader), 0, commit)
@@ -700,7 +725,7 @@ def test_a_bad_read_of_only_a_long_link_target_block_is_read_again(tmp_path: Pat
     "form",
     ["gnu name (100 bytes)", "oldgnu name (99 bytes)", "gnu link target (100 bytes)"],
 )
-def test_the_check_costs_nothing_when_the_writer_follows_gnu(tmp_path: Path, form):
+def test_the_check_costs_nothing_when_the_writer_follows_gnu(tmp_path: Path, form: str):
     """The header after the long blocks is still in the window that just served it, so
     checking against it takes no request: one fetch for the whole small archive, and one
     for the second reading from the start of the fetch that served its last header --
@@ -795,7 +820,7 @@ def _gnu_sparse_archive():
     tarfile cannot write one. Header at 0, map block at 512, 512 stored bytes at 1024,
     terminator at 1536; the file it describes is 4096 bytes."""
 
-    def octal(value, width):
+    def octal(value: int, width: int):
         return b"%0*o" % (width - 1, value)
 
     header = bytearray(512)
@@ -839,11 +864,16 @@ class _Scripted(LocalRangeReader):
     bad read lands exactly where a test needs it. ``what`` is a byte count to garble
     there, or the exact bytes to put there instead."""
 
-    def __init__(self, directory, archive, script):
+    def __init__(
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        script: Mapping[int, tuple[int, int | bytes]],
+    ):
         super().__init__(directory, archive)
         self.script, self.fetches = dict(script), 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         data = super().read_range(part_idx, offset, length)
         self.fetches += 1
         if self.fetches not in self.script:
@@ -977,12 +1007,14 @@ class _LiesAtEach(LocalRangeReader):
     """Lies once at each of several offsets: a walk that meets one transient after
     another, which is what a long run on a flaky account looks like."""
 
-    def __init__(self, directory, archive, offsets):
+    def __init__(
+        self, directory: str | Path, archive: ArchiveSet, offsets: Iterable[int]
+    ):
         super().__init__(directory, archive)
         self.pending = set(offsets)
         self.lied = 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         data = super().read_range(part_idx, offset, length)
         start = self.archive.parts[part_idx].offset + offset
         for bad in sorted(self.pending):
@@ -995,7 +1027,7 @@ class _LiesAtEach(LocalRangeReader):
         return data
 
 
-def _walk_with_transients(tmp_path: Path, count):
+def _walk_with_transients(tmp_path: Path, count: int):
     data = build_tar(MEMBERS)
     archive = write_parts(tmp_path, data, part_size=len(data))
     offsets = _header_offsets(data)[10 : 10 + count]
@@ -1016,7 +1048,14 @@ def test_a_walk_rescues_up_to_the_reread_limit(tmp_path: Path):
 class _LiesOnEach(_LiesOnce):
     """Lies on every fetch covering ``bad`` whose number is in ``nths``."""
 
-    def __init__(self, directory, archive, bad, nths, **kw):
+    def __init__(
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        bad: int,
+        nths: Iterable[int],
+        **kw,
+    ):
         super().__init__(directory, archive, bad, **kw)
         self.nths = set(nths)
 
@@ -1044,11 +1083,17 @@ def test_a_verdict_that_keeps_changing_gives_up_loudly(tmp_path: Path):
 class _NeverTheSameTwice(LocalRangeReader):
     """Every fetch covering ``bad`` carries a different member's valid header there."""
 
-    def __init__(self, directory, archive, bad, donors):
+    def __init__(
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        bad: int,
+        donors: Sequence[bytes],
+    ):
         super().__init__(directory, archive)
         self.bad, self.donors, self.lied = bad, list(donors), 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         data = super().read_range(part_idx, offset, length)
         start = self.archive.parts[part_idx].offset + offset
         if not start <= self.bad < start + length:
@@ -1078,6 +1123,7 @@ def test_a_header_that_never_reads_the_same_way_twice_gives_up_loudly(tmp_path: 
     assert all(key < offsets[30] for key in rows.rows)
 
     # The retry UnsettledReadError invites starts where the members read only once begin.
+    assert rows.cursor is not None
     result = walk(
         ConcatFile(archive, LocalRangeReader(tmp_path, archive)),
         rows.cursor,
@@ -1098,13 +1144,21 @@ def test_a_header_that_never_reads_the_same_way_twice_gives_up_loudly(tmp_path: 
 # overturn a correct one.
 
 
-def _terminator(data):
+def _terminator(data: bytes):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:
         last = t.getmembers()[-1]
     return last.offset_data + (-(-last.size // 512)) * 512
 
 
-def _walk_lying_once(tmp_path: Path, data, bad, nth, fill=JUNK, start=0, span=1024):
+def _walk_lying_once(
+    tmp_path: Path,
+    data: bytes,
+    bad: int,
+    nth: int,
+    fill: bytes = JUNK,
+    start: int = 0,
+    span: int | None = 1024,
+):
     archive = write_parts(tmp_path, data, part_size=len(data))
     reader = _LiesOnce(tmp_path, archive, bad, fill=fill, span=span, nth=nth)
     seen = []
@@ -1116,7 +1170,7 @@ def _walk_lying_once(tmp_path: Path, data, bad, nth, fill=JUNK, start=0, span=10
 
 @pytest.mark.parametrize("nth", [1, 2])
 @pytest.mark.unshaped
-def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path: Path, nth):
+def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path: Path, nth: int):
     data = build_tar(MEMBERS)
     result, seen, reader = _walk_lying_once(tmp_path, data, _terminator(data), nth)
     assert result.state == "complete", (
@@ -1128,7 +1182,9 @@ def test_one_bad_read_cannot_turn_a_complete_archive_corrupt(tmp_path: Path, nth
 
 @pytest.mark.parametrize("nth", [1, 2])
 @pytest.mark.unshaped
-def test_one_bad_read_cannot_pass_a_damaged_archive_as_complete(tmp_path: Path, nth):
+def test_one_bad_read_cannot_pass_a_damaged_archive_as_complete(
+    tmp_path: Path, nth: int
+):
     """The false `complete` is the silent failure: members go missing and `index`
     refuses to walk the archive again. Here the archive really is damaged -- junk after
     its terminator -- and one read of zeros there must not hide it."""
@@ -1159,7 +1215,7 @@ def test_a_bad_read_of_the_very_first_block_is_read_again(tmp_path: Path):
 
 @pytest.mark.parametrize("nth", [1, 2, 3, 4])
 @pytest.mark.unshaped
-def test_a_walk_resumed_at_the_terminator_confirms_complete(tmp_path: Path, nth):
+def test_a_walk_resumed_at_the_terminator_confirms_complete(tmp_path: Path, nth: int):
     """A stop landing between the last batch and `finish_segment` leaves the cursor on
     the terminator, so a resumed walk's own start decides the verdict. The read that
     matters here is #2, not #1: tarfile meets the lie, re-seeks to `offset - 1`, and that
@@ -1176,7 +1232,9 @@ def test_a_walk_resumed_at_the_terminator_confirms_complete(tmp_path: Path, nth)
 
 @pytest.mark.parametrize("nth", [1, 2, 3, 4])
 @pytest.mark.unshaped
-def test_a_walk_resumed_at_the_terminator_still_finds_real_damage(tmp_path: Path, nth):
+def test_a_walk_resumed_at_the_terminator_still_finds_real_damage(
+    tmp_path: Path, nth: int
+):
     """The same resume on an archive that really is damaged after its terminator: a
     read of zeros over the damage must not let it pass as complete."""
     data = bytearray(build_tar(MEMBERS))
@@ -1266,12 +1324,14 @@ def test_a_walk_starting_on_a_damaged_long_name_member_says_what_is_wrong(
 # producing a verdict it cannot stand behind.
 
 
-def _pax_tar(members, pax_global=None):
+def _pax_tar(
+    members: Sequence[tuple[str, bytes, dict[str, str] | None]],
+    pax_global: dict[str, str] | None = None,
+):
     buf = io.BytesIO()
-    kw = {"format": tarfile.PAX_FORMAT}
-    if pax_global:
-        kw["pax_headers"] = pax_global
-    with tarfile.open(fileobj=buf, mode="w", **kw) as tf:
+    with tarfile.open(
+        fileobj=buf, mode="w", format=tarfile.PAX_FORMAT, pax_headers=pax_global or None
+    ) as tf:
         for name, payload, extra in members:
             info = tarfile.TarInfo(name)
             info.size = len(payload)
@@ -1281,7 +1341,7 @@ def _pax_tar(members, pax_global=None):
     return buf.getvalue()
 
 
-def _walk_all(tmp_path: Path, data):
+def _walk_all(tmp_path: Path, data: bytes):
     archive = write_parts(tmp_path, data, part_size=len(data))
     calls = []
     result = walk(
@@ -1362,7 +1422,7 @@ def test_one_bad_read_carrying_a_pax_header_is_read_again_not_believed(tmp_path:
     reader = _LiesOnce(tmp_path, archive, at, fill=pax[:1536], span=1536)
     rows = {}
 
-    def commit(batch, offset):
+    def commit(batch: list[Member], offset: int):
         rows.update((m.hdr_offset, m.name) for m in batch)
 
     result = walk(ConcatFile(archive, reader), 0, commit)
@@ -1391,7 +1451,7 @@ def test_one_bad_read_carrying_a_global_pax_header_leaves_nothing_behind(
     )
     rows = {}
 
-    def commit(batch, offset):
+    def commit(batch: list[Member], offset: int):
         rows.update((m.hdr_offset, m.name) for m in batch)
 
     result = walk(ConcatFile(archive, reader), 0, commit)
@@ -1407,7 +1467,7 @@ def test_one_bad_read_carrying_a_global_pax_header_leaves_nothing_behind(
 
 
 @pytest.mark.parametrize("fmt", [tarfile.GNU_FORMAT, tarfile.USTAR_FORMAT])
-def test_gnu_and_ustar_archives_are_not_mistaken_for_pax(tmp_path: Path, fmt):
+def test_gnu_and_ustar_archives_are_not_mistaken_for_pax(tmp_path: Path, fmt: int):
     """GNU long names and link targets also live outside the header, but they are GNU
     format, and ustar's 155-byte name prefix is inside the checksummed header -- neither
     may trip the pax check."""
@@ -1439,7 +1499,7 @@ def test_giving_up_on_a_member_after_a_g_header_keeps_the_cursor_before_the_g(
     archive = write_parts(tmp_path, data, part_size=len(data))
 
     class EveryRereadDiffers(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int):
             true = super().read_range(part_idx, offset, length)
             if self.requests == 1:
                 return true  # the first read: the g and its member
@@ -1476,7 +1536,7 @@ class _Rows:
     def __init__(self):
         self.rows, self.cursor, self.calls = {}, None, []
 
-    def commit(self, members, next_offset):
+    def commit(self, members: list[Member], next_offset: int):
         self.calls.append(("commit", [m.hdr_offset for m in members], next_offset))
         self.rows.update((m.hdr_offset, m) for m in members)
         self.cursor = next_offset
@@ -1488,11 +1548,11 @@ class _Rows:
         return all(k < self.cursor for k in self.rows)
 
 
-def _names_of(members):
+def _names_of(members: Sequence[tuple[str, bytes]]):
     return [name.rsplit("/", 1)[-1] for name, *_ in members]
 
 
-def _header_with_size(data, header, size):
+def _header_with_size(data: bytes, header: int, size: int):
     """The header at ``header`` claiming ``size`` bytes, checksum redone: a valid header
     that sends the chain wherever a test needs it -- as a real one from elsewhere would."""
     return _with_field(data, header, 124, 12, b"%011o" % size)[header : header + 512]
@@ -1651,7 +1711,9 @@ class _LiesOnceArmed(LocalRangeReader):
     there -- so a lie lands on the first read of a place after some event, whatever the
     read pattern before it."""
 
-    def __init__(self, directory, archive, bad, fill):
+    def __init__(
+        self, directory: str | Path, archive: ArchiveSet, bad: int, fill: bytes
+    ):
         super().__init__(directory, archive)
         self.bad, self.fill, self.armed, self.lied, self.covering = (
             bad,
@@ -1661,7 +1723,7 @@ class _LiesOnceArmed(LocalRangeReader):
             0,
         )
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         data = super().read_range(part_idx, offset, length)
         start = self.archive.parts[part_idx].offset + offset
         self.covering += start <= self.bad < start + length
@@ -1687,7 +1749,7 @@ def test_a_wrong_header_read_by_the_confirming_pass_is_outvoted(tmp_path: Path):
     reader = _LiesOnceArmed(tmp_path, archive, at, donor)
     rows = _Rows()
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int):
         rows.commit(members, next_offset)
         reader.armed = True  # the first pass has ended
 
@@ -1708,7 +1770,7 @@ def test_a_wrong_header_read_by_the_confirming_pass_is_outvoted(tmp_path: Path):
 
 @pytest.mark.parametrize("stop_at_check", range(1, 58))
 def test_a_stop_anywhere_loses_nothing_and_repeats_nothing(
-    tmp_path: Path, stop_at_check
+    tmp_path: Path, stop_at_check: int
 ):
     """A stop at any check -- in the first pass, or while its verdict is read again --
     commits only members read twice or far enough behind; the walk resumed from where it
@@ -1723,7 +1785,7 @@ def test_a_stop_anywhere_loses_nothing_and_repeats_nothing(
         checks["n"] += 1
         return checks["n"] == stop_at_check
 
-    def walk_from(start, stop):
+    def walk_from(start: int, stop: Callable[[], bool] | None):
         return walk(
             ConcatFile(
                 archive,
@@ -1753,7 +1815,9 @@ class _LiesAfter(_AlwaysLies):
     """Truthful for the first ``first`` fetches covering ``bad``, then wrong -- and wrong
     differently -- every time after."""
 
-    def __init__(self, directory, archive, bad, first, **kw):
+    def __init__(
+        self, directory: str | Path, archive: ArchiveSet, bad: int, first: int, **kw
+    ):
         super().__init__(directory, archive, bad, **kw)
         self.first = first
 
@@ -1776,6 +1840,7 @@ def test_giving_up_during_a_second_reading_leaves_it_to_be_read_again(tmp_path: 
 
     assert reader.lied >= 2, "the test did not reach the second reading"
     assert (rows.names(), rows.cursor) == ([], 0)
+    assert rows.cursor is not None
     result = walk(
         ConcatFile(archive, LocalRangeReader(tmp_path, archive)),
         rows.cursor,
@@ -1919,11 +1984,13 @@ class _GarblesEachOnce(LocalRangeReader):
     """Garbles 512 bytes at each of ``offsets`` in turn, at most one per fetch: successive
     transients, each met only after the walk has survived the one before."""
 
-    def __init__(self, directory, archive, offsets):
+    def __init__(
+        self, directory: str | Path, archive: ArchiveSet, offsets: Iterable[int]
+    ):
         super().__init__(directory, archive)
         self.pending, self.lied = sorted(offsets), 0
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         data = bytearray(super().read_range(part_idx, offset, length))
         start = self.archive.parts[part_idx].offset + offset
         if (
@@ -1977,7 +2044,7 @@ def test_confirming_a_verdict_reads_its_last_fetches_again_not_the_walk(tmp_path
     reader = LocalRangeReader(tmp_path, archive)
     at_commit = []
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int):
         at_commit.append(reader.requests)
 
     result = walk(
@@ -2024,7 +2091,7 @@ def test_a_wrong_header_read_by_the_second_reading_of_a_sound_archive_is_outvote
     reader = _LiesOnceArmed(tmp_path, archive, at, _header_with_size(data, at, 5000))
     rows = _Rows()
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int):
         rows.commit(members, next_offset)
         reader.armed = True  # the first pass has ended
 
@@ -2052,13 +2119,13 @@ def test_a_global_header_only_the_second_readings_bad_read_saw_stops_applying(
     assert glob[156:157] == b"g"
     archive = write_parts(tmp_path, data, part_size=len(data))
 
-    def run(lie):
+    def run(lie: bool):
         reader = _LiesOnceArmed(
             tmp_path, archive, at, glob[:1024] + data[at : at + 512]
         )
         rows = _Rows()
 
-        def commit(members, next_offset):
+        def commit(members: list[Member], next_offset: int):
             rows.commit(members, next_offset)
             reader.armed = lie  # the first pass has ended
 
@@ -2077,7 +2144,7 @@ def test_a_global_header_only_the_second_readings_bad_read_saw_stops_applying(
     assert reader.requests == honest.requests + 1, (reader.requests, honest.requests)
 
 
-def _cut_after_a_long_name(damaged=False):
+def _cut_after_a_long_name(damaged: bool = False):
     """MEMBERS[:5], then a long-named member whose real header is cut short by the end of
     the archive -- or, if ``damaged``, present but corrupt. Returns the data and where the
     long-named member's header sequence begins."""
@@ -2104,7 +2171,7 @@ def test_a_tie_break_that_finds_the_archive_cut_short_says_truncated(tmp_path: P
     reader = _LiesOnceArmed(tmp_path, archive, start, data[0:512])
     rows = _Rows()
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int):
         rows.commit(members, next_offset)
         reader.armed = True  # the first pass has ended
 
@@ -2145,7 +2212,7 @@ def test_a_second_reading_that_moves_a_sparse_member_is_outvoted(tmp_path: Path)
     reader = _LiesOnceArmed(tmp_path, archive, 0, wrong)
     rows = _Rows()
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int):
         rows.commit(members, next_offset)
         reader.armed = True  # the first pass has ended
 
@@ -2166,7 +2233,7 @@ class _LiesThenFails(_LiesOnce):
 
     armed = False
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         if self.armed:
             self.armed = False
             raise ReaderError(
@@ -2190,7 +2257,7 @@ def test_a_walk_interrupted_before_its_verdict_is_read_again_reads_it_again_on_r
     reader = _LiesThenFails(tmp_path, archive, at, fill=data[0:512], span=512)
     rows = _Rows()
 
-    def commit(batch, next_offset):
+    def commit(batch: list[Member], next_offset: int):
         rows.commit(batch, next_offset)
         reader.armed = True  # the first pass has ended
 
@@ -2199,6 +2266,7 @@ def test_a_walk_interrupted_before_its_verdict_is_read_again_reads_it_again_on_r
     assert reader.lied == 1, "the test did not actually inject the bad read"
     assert rows.cursor <= at and all(k < rows.cursor for k in rows.rows)
 
+    assert rows.cursor is not None
     result = walk(
         ConcatFile(archive, LocalRangeReader(tmp_path, archive)),
         rows.cursor,
@@ -2309,7 +2377,7 @@ def test_a_second_reading_in_a_dense_run_starts_at_the_window_it_had_grown_to(
     reader = LocalRangeReader(tmp_path, archive)
     at_commit = []
 
-    def commit(batch, next_offset):
+    def commit(batch: list[Member], next_offset: int):
         at_commit.append(reader.requests)
 
     result = walk(
@@ -2336,7 +2404,7 @@ def test_two_readings_that_run_out_in_different_places_do_not_agree(tmp_path: Pa
     covering = dict.fromkeys(wrong, 0)
 
     class RunsOffTwice(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int):
             got = super().read_range(part_idx, offset, length)
             start = self.archive.parts[part_idx].offset + offset
             for at, header in wrong.items():
@@ -2381,7 +2449,7 @@ def test_rescues_after_the_walk_moves_on_do_not_use_up_the_verdicts_re_reads(
     archive = write_parts(tmp_path, data, part_size=len(data))
 
     class DerailsThenGarbles(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int):
             got = bytearray(super().read_range(part_idx, offset, length))
             start = self.archive.parts[part_idx].offset + offset
             if not state["lied"] and start <= at and at + 512 <= start + length:
@@ -2456,7 +2524,7 @@ def test_a_landing_that_reads_two_more_fetches_of_real_headers_is_read_back_past
 @pytest.mark.parametrize("settles_on", ["another member", "no member"])
 @pytest.mark.unshaped
 def test_a_header_that_flips_from_pass_to_pass_gives_up_rather_than_loop(
-    tmp_path: Path, settles_on
+    tmp_path: Path, settles_on: str
 ):
     """Review 7's B1. The server serves member 20's header one way on one pass and another
     way on the next, each version holding for the whole pass, tie-break included. Where
@@ -2479,14 +2547,14 @@ def test_a_header_that_flips_from_pass_to_pass_gives_up_rather_than_loop(
     state = {"flipped": False, "passes": 1, "fetches": 0}
 
     class Flipping(ConcatFile):
-        def drop_cache(self, keep_window=False):
+        def drop_cache(self, keep_window: bool = False):
             if keep_window:  # the walk starting its next pass
                 state["flipped"] = not state["flipped"]
                 state["passes"] += 1
             super().drop_cache(keep_window)
 
     class Reader(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int):
             state["fetches"] += 1
             if state["fetches"] > 500:
                 raise RuntimeError("still reading: the walk is going round in circles")
@@ -2523,7 +2591,7 @@ def test_a_header_that_flips_from_pass_to_pass_gives_up_rather_than_loop(
 # ---- review 7: what is held back costs no more than it must ------------------------------
 
 
-def _dense(count=600, where="run"):
+def _dense(count: int = 600, where: str = "run"):
     return [(f"{where}/s{i:05d}.bin", b"s" * 100) for i in range(count)]
 
 
@@ -2603,7 +2671,7 @@ def test_a_crossing_or_a_stop_anywhere_in_a_dense_run_commits_no_more_than_a_bat
 
 @pytest.mark.parametrize("refused", range(1, 30))
 def test_a_commit_refused_anywhere_in_a_dense_run_resumes_exactly(
-    tmp_path: Path, refused
+    tmp_path: Path, refused: int
 ):
     """Committed a batch at a time, the members of an agreeing second reading carry the
     cursor of the next one in each commit. Refuse any one commit and resume from the
@@ -2613,7 +2681,7 @@ def test_a_commit_refused_anywhere_in_a_dense_run_resumes_exactly(
     archive = write_parts(tmp_path, data, part_size=len(data))
     rows, calls = _Rows(), {"n": 0}
 
-    def commit(batch, next_offset):
+    def commit(batch: list[Member], next_offset: int):
         calls["n"] += 1
         if calls["n"] == refused:
             raise RuntimeError("simulated: the store refused this commit")
@@ -2718,7 +2786,7 @@ def test_a_second_reading_lets_go_of_the_first_as_it_passes_it(
 # ---- review 8: the window ages by how far the walk moves on, not by what it re-reads ---
 
 
-def _uncopied_long_names(count):
+def _uncopied_long_names(count: int):
     """``count`` small members with GNU long names, from a writer that does not copy the
     start of the name into the header after the name's blocks -- which `_settled`
     accepts, at the cost of one more read each."""
@@ -2793,7 +2861,7 @@ def test_a_server_that_lies_about_most_headers_is_given_up_on(
     archive = write_parts(tmp_path, data, part_size=len(data))
 
     class LiesUnlessAskedThere(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int):
             got = bytearray(super().read_range(part_idx, offset, length))
             start = self.archive.parts[part_idx].offset + offset
             for at in offsets:
@@ -2915,7 +2983,7 @@ def test_a_verdict_reached_after_rescues_does_not_count_as_one(tmp_path: Path):
     archive = write_parts(tmp_path, data, part_size=len(data))
 
     class LiesUnlessAskedThere(LocalRangeReader):
-        def read_range(self, part_idx, offset, length):
+        def read_range(self, part_idx: int, offset: int, length: int):
             got = bytearray(super().read_range(part_idx, offset, length))
             start = self.archive.parts[part_idx].offset + offset
             for at in lying:
@@ -2944,7 +3012,11 @@ def test_a_verdict_reached_after_rescues_does_not_count_as_one(tmp_path: Path):
 
 
 def _derailed_into_a_stored_tarball(
-    directory, inner_members, uncopied, landing, window
+    directory: Path,
+    inner_members: Sequence[tuple[str, bytes]],
+    uncopied: Iterable[int],
+    landing: int,
+    window: int,
 ):
     """Walk an archive whose second header is read once wrongly, sending the walk to the
     header sequence ``landing`` of a stored tarball of ``inner_members``; those at
@@ -3125,11 +3197,17 @@ class _LiesUnlessAskedThere(LocalRangeReader):
     ``lying`` that a read covers without starting there, as a first read of it does not
     and a re-read does."""
 
-    def __init__(self, directory, archive, lying, suspect):
+    def __init__(
+        self,
+        directory: str | Path,
+        archive: ArchiveSet,
+        lying: Iterable[int],
+        suspect: bytes,
+    ):
         super().__init__(directory, archive)
         self.lying, self.suspect = lying, suspect
 
-    def read_range(self, part_idx, offset, length):
+    def read_range(self, part_idx: int, offset: int, length: int):
         got = bytearray(super().read_range(part_idx, offset, length))
         start = self.archive.parts[part_idx].offset + offset
         for at in self.lying:
@@ -3202,6 +3280,7 @@ def test_a_walk_on_from_a_chain_start_scan_counts_from_where_the_scan_ends(
         window_max=window,
     )
     start = find_chain_start(concat, scan_from, scan_read=scan)
+    assert start is not None
     assert concat.cached() == (scan_from, scan_from + scan), "the scan is one read"
     passes = []
     original = tarwalk._walk_chain
