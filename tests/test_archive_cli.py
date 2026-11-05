@@ -35,7 +35,7 @@ from dbaudit.archive.reader import (
 )
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import REREAD_LIMIT, WalkResult, find_chain_start
-from dbaudit.auth import TokenProvider
+from dbaudit.auth import AuthError, TokenProvider
 from dbaudit.cli import LISTING_ATTEMPTS, main
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
@@ -3488,3 +3488,148 @@ def test_status_without_an_archive_summarises_the_database(
     assert "walking     : 1 (" in out
     assert "mid-walk:" in out and "b.tar" in out and "covered" in out
     assert "[ 0]" not in out  # no segment listing without --archive
+
+
+# ---- the walk's checks of the folder, before and after ------------------------------
+
+
+def dropbox_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, ArchiveSet, Path]:
+    """A registered Dropbox archive whose parts really sit in a local folder."""
+    source = tmp_path / "parts"
+    source.mkdir()
+    archive_set = write_parts(source, build_tar(MEMBERS), 4096)
+    db = str(tmp_path / "archives.db")
+    register_dropbox(monkeypatch, db, archive_set)
+    return db, archive_set, source
+
+
+def test_index_stops_before_the_walk_when_the_credentials_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    db, _, _ = dropbox_archive(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister([AuthError("the refresh token was revoked")]),
+    )
+    capsys.readouterr()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 2
+    assert "error: the refresh token was revoked" in capsys.readouterr().err
+    row = ArchiveStore(db).get("a.tar")
+    assert run_starts(db, row["id"]) == 0
+
+
+def test_index_marks_an_archive_error_when_a_part_is_gone_from_its_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    db, archive_set, _ = dropbox_archive(tmp_path, monkeypatch)
+    last = archive_set.parts[-1].name
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister([dropbox_entries(archive_set)[:-1]]),
+    )
+    monkeypatch.setattr("dbaudit.cli._reader_for", landmine_reader)
+    capsys.readouterr()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
+    assert f"1 part(s) missing from /d: {last}" in capsys.readouterr().err
+    row = ArchiveStore(db).get("a.tar")
+    assert row["state"] == "error" and run_starts(db, row["id"]) == 0
+
+
+def landmine_reader(
+    row: object,
+    archive_set: ArchiveSet,
+    tokens: TokenProvider | None = None,
+    limiter: AdaptiveLimiter | None = None,
+) -> LocalRangeReader:
+    """A `_reader_for` for walks that must never get as far as reading."""
+    raise AssertionError("this archive must not be read")
+
+
+def test_a_folder_that_cannot_be_listed_after_the_walk_does_not_undo_the_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    db, archive_set, source = dropbox_archive(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister([dropbox_entries(archive_set), RuntimeError("proxy died")]),
+    )
+
+    def reader_for(
+        row: object,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ) -> LocalRangeReader:
+        return LocalRangeReader(source, archive_set)
+
+    monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
+    capsys.readouterr()
+    assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
+    captured = capsys.readouterr()
+    assert "could not re-list /d to fingerprint it: RuntimeError: proxy died" in (
+        captured.err
+    )
+    store = ArchiveStore(db)
+    row = store.get("a.tar")
+    assert row["state"] == "complete"
+    assert store.stats(row["id"])["n_members"] == len(MEMBERS)
+
+
+# ---- register: the parts cannot be read ---------------------------------------------
+
+
+def test_register_refuses_a_folder_with_no_part_of_that_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    source = tmp_path / "parts"
+    source.mkdir()
+    (source / "notes.txt").write_text("not a part")
+    db = tmp_path / "archives.db"
+    args = ["archive", "register", "--db", str(db), "--local-dir", str(source)]
+    assert main([*args, "--name", "a.tar"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "a.tar" in err
+    assert not db.exists()
+
+
+def test_register_says_when_the_local_folder_cannot_be_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    missing = tmp_path / "no-such-folder"
+    db = tmp_path / "archives.db"
+    args = ["archive", "register", "--db", str(db), "--local-dir", str(missing)]
+    assert main([*args, "--name", "a.tar"]) == 2
+    assert f"error: could not read {missing}: FileNotFoundError" in (
+        capsys.readouterr().err
+    )
+    assert not db.exists()
+
+
+def test_register_stops_when_the_credentials_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister",
+        fake_build_lister([AuthError("rclone has no remote called TeamSpace")]),
+    )
+    db = tmp_path / "archives.db"
+    args = ["archive", "register", "--db", str(db), "--folder", "/d"]
+    assert main([*args, "--name", "a.tar"]) == 2
+    assert "error: rclone has no remote called TeamSpace" in capsys.readouterr().err
+    assert not db.exists()
+
+
+def test_register_says_when_the_dropbox_folder_cannot_be_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(
+        "dbaudit.cli.build_lister", fake_build_lister([RuntimeError("proxy died")])
+    )
+    db = tmp_path / "archives.db"
+    args = ["archive", "register", "--db", str(db), "--folder", "/d"]
+    assert main([*args, "--name", "a.tar"]) == 2
+    assert "error: could not read /d: RuntimeError: proxy died" in (
+        capsys.readouterr().err
+    )

@@ -9,7 +9,7 @@ import random
 import sqlite3
 import sys
 import tarfile
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,9 @@ from dbaudit.archive.parts import ArchiveSet
 from dbaudit.archive.reader import LocalRangeReader, ShortReadError
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import Member, WalkResult
+from dbaudit.auth import AuthError, TokenProvider
 from dbaudit.cli import main
+from dbaudit.limiter import AdaptiveLimiter
 from tests.archive_fakes import build_tar, write_parts
 
 PAYLOAD = bytes(range(256)) * 30  # 7,680 bytes: spans a 4 KiB part boundary
@@ -2688,3 +2690,151 @@ def test_cat_rereads_a_header_where_the_terminator_belongs_even_served_thrice(
     assert _cat(db, "run/r02/m.bin", out) == 0
     assert readers[0].lied == 3
     assert out.read_bytes() == last
+
+
+# ---- the paths around the read: no such member, Dropbox credentials, the --out move ----
+
+
+def cat_small(db: str, *extra: str) -> int:
+    """`archive cat` of run/small.txt from a.tar."""
+    return main(
+        [
+            "archive",
+            "cat",
+            "--db",
+            db,
+            "--archive",
+            "a.tar",
+            "--member",
+            "run/small.txt",
+        ]
+        + list(extra)
+    )
+
+
+def test_cat_a_member_the_archive_lacks_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    db = setup_archive(tmp_path)
+    capsys.readouterr()
+    assert (
+        main(
+            ["archive", "cat", "--db", db, "--archive", "a.tar"]
+            + ["--member", "run/none.txt"]
+        )
+        == 1
+    )
+    assert "error: no member 'run/none.txt' in a.tar" in capsys.readouterr().err
+
+
+def as_dropbox_archive(db: str) -> None:
+    """Record the archive as one on Dropbox; its recorded folder still holds the parts."""
+    store = ArchiveStore(db)
+    store.connect().execute("UPDATE archives SET source='dropbox'")
+    store.close()
+
+
+def test_cat_of_a_dropbox_archive_reads_through_one_stream_of_the_remotes_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    db = setup_archive(tmp_path)
+    as_dropbox_archive(db)
+    seen: dict[str, object] = {}
+
+    class Tokens:
+        def __init__(self, remote: str) -> None:
+            seen["remote"] = remote
+
+    def reader_for(
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None = None,
+        limiter: AdaptiveLimiter | None = None,
+    ) -> LocalRangeReader:
+        seen["tokens"], seen["limiter"], seen["source"] = tokens, limiter, row["source"]
+        return LocalRangeReader(row["folder"], archive_set)
+
+    monkeypatch.setattr("dbaudit.cli.TokenProvider", Tokens)
+    monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
+    out = tmp_path / "small.txt"
+    assert cat_small(db, "--remote", "TeamSpace", "--out", str(out)) == 0
+    assert out.read_bytes() == b"hello\n"
+    assert seen["remote"] == "TeamSpace" and seen["source"] == "dropbox"
+    assert isinstance(seen["tokens"], Tokens)
+    limiter = seen["limiter"]
+    assert isinstance(limiter, AdaptiveLimiter) and limiter.concurrency == 1
+
+
+def test_cat_of_a_dropbox_archive_stops_when_the_credentials_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    db = setup_archive(tmp_path)
+    as_dropbox_archive(db)
+
+    def refused(remote: str) -> TokenProvider:
+        raise AuthError("rclone has no remote called TeamSpace")
+
+    monkeypatch.setattr("dbaudit.cli.TokenProvider", refused)
+    capsys.readouterr()
+    assert cat_small(db) == 2
+    assert "error: rclone has no remote called TeamSpace" in capsys.readouterr().err
+
+
+def test_cat_refuses_a_stream_that_comes_up_short_of_the_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def short(
+        concat: object,
+        member: sqlite3.Row,
+        total: int,
+        follows: sqlite3.Row | str | None,
+    ) -> Iterator[bytes]:
+        yield b"hel"
+
+    db = setup_archive(tmp_path)
+    monkeypatch.setattr("dbaudit.cli._verified_member_bytes", short)
+    out = tmp_path / "small.txt"
+    capsys.readouterr()
+    assert cat_small(db, "--out", str(out)) == 1
+    assert "error: wrote 3 of 6 byte(s) for 'run/small.txt' in a.tar" in (
+        capsys.readouterr().err
+    )
+    assert not out.exists() and not list(tmp_path.glob(".cat-*"))
+
+
+def test_cat_out_that_cannot_be_moved_into_place_exits_2_and_leaves_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def refuse(src: str, dst: str) -> None:
+        raise OSError("Invalid cross-device link")
+
+    db = setup_archive(tmp_path)
+    monkeypatch.setattr("dbaudit.cli.os.replace", refuse)
+    out = tmp_path / "small.txt"
+    capsys.readouterr()
+    assert cat_small(db, "--out", str(out)) == 2
+    assert (
+        f"error: could not write --out {str(out)!r}: Invalid cross-device link"
+        in capsys.readouterr().err
+    )
+    assert not out.exists() and not list(tmp_path.glob(".cat-*"))
+
+
+def test_cat_survives_a_temp_file_it_cannot_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def refuse_replace(src: str, dst: str) -> None:
+        raise OSError("read-only file system")
+
+    def refuse_unlink(path: str) -> None:
+        raise PermissionError("not yours to remove")
+
+    db = setup_archive(tmp_path)
+    monkeypatch.setattr("dbaudit.cli.os.replace", refuse_replace)
+    monkeypatch.setattr("dbaudit.cli.os.unlink", refuse_unlink)
+    out = tmp_path / "small.txt"
+    capsys.readouterr()
+    assert cat_small(db, "--out", str(out)) == 2
+    assert "read-only file system" in capsys.readouterr().err
+    assert not out.exists()
+    assert len(list(tmp_path.glob(".cat-*.tmp"))) == 1  # left behind, and said nothing
