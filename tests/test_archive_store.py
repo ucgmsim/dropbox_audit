@@ -3,6 +3,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1009,3 +1010,23 @@ def test_close_leaves_other_threads_connections_open(tmp_path: Path):
         assert one.result() == 1
         assert other.submit(store.connect).result() is theirs
         other.submit(store.close).result()
+
+
+def test_a_connection_whose_setup_fails_is_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "archives.db"
+    path.write_bytes(b"not a database, " * 64)
+    opened: list[sqlite3.Connection] = []
+    connect = sqlite3.connect
+
+    def recording(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        opened.append(connect(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(sqlite3, "connect", recording)
+    with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+        ArchiveStore(path).connect()
+    [conn] = opened
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conn.cursor()
