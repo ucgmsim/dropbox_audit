@@ -18,9 +18,14 @@ import json
 import sqlite3
 import threading
 import time
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from dbaudit.archive.parts import ArchiveSet, Part
+
+if TYPE_CHECKING:
+    from dbaudit.archive.tarwalk import Member, WalkResult
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -33,7 +38,7 @@ FINISHED_SEGMENT_STATES = frozenset(
 )
 
 
-def _as_int(value):
+def _as_int(value: object) -> int:
     """Raise rather than coerce: a bad size must stop the batch, not silently NULL it.
 
     This is what makes `commit_batch`'s atomicity meaningful to test -- see its
@@ -45,7 +50,7 @@ def _as_int(value):
 
 
 class ArchiveStore:
-    def __init__(self, path):
+    def __init__(self, path: str | Path):
         self.path = str(path)
         self._local = threading.local()
 
@@ -75,7 +80,7 @@ class ArchiveStore:
     def init_schema(self) -> None:
         self.connect().executescript(SCHEMA_PATH.read_text())
 
-    def query(self, sql: str, params=()) -> list[sqlite3.Row]:
+    def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Mirrors `Store.query` (dbaudit/store.py:166) -- the seam Task 9's report
         module is built on, rather than reaching past this store into SQL the way
         Task 7's review flagged `cmd_archive_status` for doing. Rows come back as
@@ -87,7 +92,7 @@ class ArchiveStore:
         """
         return self.connect().execute(sql, params).fetchall()
 
-    def stream(self, sql: str, params=()):
+    def stream(self, sql: str, params: Sequence[Any] = ()) -> Iterator[sqlite3.Row]:
         """Like `query`, but yields rows one at a time instead of calling `fetchall`.
 
         Added for Task 9's fix round 1: `report.summary`/`write_csv` used to read
@@ -105,7 +110,7 @@ class ArchiveStore:
         yield from self.connect().execute(sql, params)
 
     @contextlib.contextmanager
-    def read_transaction(self):
+    def read_transaction(self) -> Generator[None]:
         """A read-only `BEGIN`/`COMMIT` around a caller's sequence of `query`/`stream`
         calls, so they provably see one snapshot instead of however many happen to
         line up from separate autocommit statements landing between a concurrent
@@ -127,7 +132,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def log_event(self, archive_id, kind: str, detail: str = "") -> None:
+    def log_event(self, archive_id: int | None, kind: str, detail: str = "") -> None:
         """One row per notable happening -- retries, outcomes, run starts -- so a
         post-mortem on a stalled walk has something to read besides state columns.
         """
@@ -138,7 +143,14 @@ class ArchiveStore:
 
     # ---- archives ---------------------------------------------------------
 
-    def register(self, name, kind, folder, source, parts) -> int:
+    def register(
+        self,
+        name: str,
+        kind: str,
+        folder: str,
+        source: str,
+        parts: Iterable[Part],
+    ) -> int:
         """Insert or update an archive keyed by the content of its parts, not by
         name or folder -- folders get rearranged (v01p0_incomplete moved), but the
         part contents are what actually identify an archive.
@@ -235,7 +247,7 @@ class ArchiveStore:
             raise
         return archive_id
 
-    def get(self, name):
+    def get(self, name: str):
         """The archive to use for `name`.
 
         Multiple rows can share a name: parts move between folders (updated in
@@ -259,7 +271,7 @@ class ArchiveStore:
             ).fetchone()
         return row
 
-    def parts_of(self, archive_id) -> list[Part]:
+    def parts_of(self, archive_id: int) -> list[Part]:
         rows = (
             self.connect()
             .execute(
@@ -283,7 +295,7 @@ class ArchiveStore:
             for r in rows
         ]
 
-    def start_walk(self, archive_id) -> int:
+    def start_walk(self, archive_id: int) -> int:
         """Resume a walk: reclaim what a dead run left behind, and return the
         confirmed frontier to resume from.
 
@@ -331,7 +343,7 @@ class ArchiveStore:
             raise
         return cursor_offset
 
-    def finish(self, archive_id, result) -> None:
+    def finish(self, archive_id: int, result: WalkResult) -> None:
         """Record a completed walk's final outcome and confirmed frontier.
 
         `n_members`/`member_bytes` are recomputed from `members` rather than
@@ -389,7 +401,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def mark_unsupported(self, archive_id, detail: str) -> None:
+    def mark_unsupported(self, archive_id: int, detail: str) -> None:
         """The archive is in a format the walker does not index (pax), for good.
 
         Terminal, unlike `error`, which the next `index` retries: re-walking cannot
@@ -415,7 +427,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def fail(self, archive_id, error: str) -> None:
+    def fail(self, archive_id: int, error: str) -> None:
         """Record a walk-level failure, as opposed to `fail_segment`'s one chain.
 
         `state` is guarded the same way `commit_batch`/`start_walk`/`finish` guard
@@ -442,7 +454,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def mark_stale(self, archive_id, detail: str) -> None:
+    def mark_stale(self, archive_id: int, detail: str) -> None:
         """Flag an index as no longer trustworthy, without touching its rows.
 
         For a fingerprint check (a live part's content_hash) that disagrees with
@@ -462,7 +474,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def stats(self, archive_id) -> dict:
+    def stats(self, archive_id: int) -> dict[str, Any]:
         """A snapshot for `status`.
 
         `n_members`/`member_bytes` are recomputed from `members`, never carried as
@@ -502,7 +514,7 @@ class ArchiveStore:
             "run_start_covered": int(event["detail"]) if event else None,
         }
 
-    def _covered(self, conn, archive_id) -> int:
+    def _covered(self, conn: sqlite3.Connection, archive_id: int) -> int:
         """Bytes of the archive whose place in the chain is settled.
 
         Summed per segment rather than read off one column, because a segment's
@@ -541,7 +553,7 @@ class ArchiveStore:
                 covered += max(min(reached, span_end) - seg["scan_from"], 0)
         return covered
 
-    def build_indexes(self, archive_id) -> None:
+    def build_indexes(self, archive_id: int) -> None:
         """Composite indexes leading with archive_id, for the per-archive queries
         Task 8+ runs (`find_members`, browsing by directory or by size).
 
@@ -560,7 +572,13 @@ class ArchiveStore:
     # ---- members ------------------------------------------------------------
 
     def commit_batch(
-        self, archive_id, segment_id, members, next_offset, requests=0, bytes_fetched=0
+        self,
+        archive_id: int,
+        segment_id: int,
+        members: Iterable[Member],
+        next_offset: int,
+        requests: int = 0,
+        bytes_fetched: int = 0,
     ) -> None:
         """Members and the resume cursor in one transaction: the whole resumability
         story. The cursor belongs to the segment, because each chain resumes
@@ -643,7 +661,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def member_at(self, archive_id, hdr_offset):
+    def member_at(self, archive_id: int, hdr_offset: int):
         """The member whose header sits at ``hdr_offset``, or None -- how `cat` knows
         what must follow the member it extracts."""
         return (
@@ -655,7 +673,7 @@ class ArchiveStore:
             .fetchone()
         )
 
-    def repeated_paths(self, archive_id, limit: int) -> list[sqlite3.Row]:
+    def repeated_paths(self, archive_id: int, limit: int) -> list[sqlite3.Row]:
         """Every row whose path is recorded more than once, in header order, at most
         ``limit`` of them.
 
@@ -679,7 +697,7 @@ class ArchiveStore:
             .fetchall()
         )
 
-    def charge(self, archive_id, requests: int, bytes_fetched: int) -> None:
+    def charge(self, archive_id: int, requests: int, bytes_fetched: int) -> None:
         """Add reads made outside any segment -- an audit's -- to the archive's cost."""
         self.connect().execute(
             "UPDATE archives SET requests=requests+?, bytes_fetched=bytes_fetched+? "
@@ -687,7 +705,7 @@ class ArchiveStore:
             (requests, bytes_fetched, archive_id),
         )
 
-    def find_members(self, archive_id, path) -> list[sqlite3.Row]:
+    def find_members(self, archive_id: int, path: str) -> list[sqlite3.Row]:
         """Every member whose (dir, name) matches `path`, oldest header first.
 
         Split exactly as `Member.from_tarinfo` builds the columns (`rstrip("/")`,
@@ -707,7 +725,7 @@ class ArchiveStore:
             .fetchall()
         )
 
-    def query_members(self, archive_id) -> list[sqlite3.Row]:
+    def query_members(self, archive_id: int) -> list[sqlite3.Row]:
         return (
             self.connect()
             .execute(
@@ -717,7 +735,9 @@ class ArchiveStore:
             .fetchall()
         )
 
-    def drop_members_between(self, archive_id, start, end) -> None:
+    def drop_members_between(
+        self, archive_id: int, start: int, end: int | None
+    ) -> None:
         """Throw away rows in ``[start, end)``: they were never on the confirmed
         chain, whether because a segment is being reset or retired. ``end=None``
         means no upper bound, for a segment with no `stop_at` (the last part).
@@ -736,7 +756,7 @@ class ArchiveStore:
 
     # ---- segments -----------------------------------------------------------
 
-    def seed_segments(self, archive_id, parts) -> None:
+    def seed_segments(self, archive_id: int, parts: Iterable[Part]) -> None:
         """One segment per part. Segment 0 is authoritative: a tar begins at
         offset 0, so it needs no scan and no confirmation from a predecessor.
 
@@ -773,7 +793,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def segments(self, archive_id) -> list[sqlite3.Row]:
+    def segments(self, archive_id: int) -> list[sqlite3.Row]:
         return (
             self.connect()
             .execute(
@@ -782,7 +802,7 @@ class ArchiveStore:
             .fetchall()
         )
 
-    def segment(self, archive_id, idx) -> sqlite3.Row | None:
+    def segment(self, archive_id: int, idx: int) -> sqlite3.Row | None:
         return (
             self.connect()
             .execute(
@@ -791,7 +811,7 @@ class ArchiveStore:
             .fetchone()
         )
 
-    def claim_segment(self, archive_id, owner):
+    def claim_segment(self, archive_id: int, owner: str):
         """Atomically take the lowest-index pending segment, or None.
 
         Mirrors `Store.claim_shard` (dbaudit/store.py:193): one
@@ -812,7 +832,7 @@ class ArchiveStore:
             .fetchone()
         )
 
-    def set_segment_start(self, segment_id, offset) -> None:
+    def set_segment_start(self, segment_id: int, offset: int) -> None:
         """Record where a scan found this segment's first header, before any batch
         is committed.
 
@@ -825,7 +845,7 @@ class ArchiveStore:
             "UPDATE segments SET first_header=? WHERE id=?", (offset, segment_id)
         )
 
-    def mark_joined(self, segment_id) -> None:
+    def mark_joined(self, segment_id: int) -> None:
         """Confirm a segment's start, and raise the archive's frontier to match.
 
         A segment is believed only once the chain before it walks into exactly the
@@ -851,7 +871,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def reset_segment(self, segment_id, first_header) -> None:
+    def reset_segment(self, segment_id: int, first_header: int) -> None:
         """Drop a segment's rows and re-arm it from a corrected start, atomically.
 
         Split across two calls, a crash in between leaves rows from a chain nobody
@@ -885,7 +905,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def recheck(self, archive_id):
+    def recheck(self, archive_id: int):
         """Walk the chain again, from a confirmed start before the segment where the walk
         ended, and from there on. Returns (the segment walked again from, the segment
         where the walk had ended), or None for a `stale` archive, which only `register`
@@ -990,7 +1010,7 @@ class ArchiveStore:
             raise
         return again, ending
 
-    def rearm_beyond(self, archive_id, from_idx) -> None:
+    def rearm_beyond(self, archive_id: int, from_idx: int) -> None:
         """Put every `beyond` segment from ``from_idx`` on back to be scanned and walked.
 
         `beyond` means past where the chain ended; once the chain crosses into such a
@@ -1003,7 +1023,7 @@ class ArchiveStore:
             (archive_id, from_idx),
         )
 
-    def retire_segment(self, segment_id) -> None:
+    def retire_segment(self, segment_id: int) -> None:
         """A segment lying entirely past where the archive's chain ended.
 
         This is the normal case, not an exotic one: a tar's terminator is usually
@@ -1038,7 +1058,9 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def release_segment(self, segment_id, requests=0, bytes_fetched=0) -> None:
+    def release_segment(
+        self, segment_id: int, requests: int = 0, bytes_fetched: int = 0
+    ) -> None:
         """Hand a segment back to the queue without losing its progress, or its cost.
 
         Called when a walk stops early (Ctrl-C, `--max-batches`), so the next run
@@ -1072,7 +1094,13 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def finish_segment(self, segment_id, result, requests=0, bytes_fetched=0) -> None:
+    def finish_segment(
+        self,
+        segment_id: int,
+        result: WalkResult,
+        requests: int = 0,
+        bytes_fetched: int = 0,
+    ) -> None:
         """Record one chain's outcome, and the reader cost of producing it.
 
         Requests/bytes made after the last batch -- the terminator probe, or a
@@ -1100,7 +1128,9 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def fail_segment(self, segment_id, error: str, requests=0, bytes_fetched=0) -> None:
+    def fail_segment(
+        self, segment_id: int, error: str, requests: int = 0, bytes_fetched: int = 0
+    ) -> None:
         """Record one chain's failure, and the reader cost incurred before it failed."""
         conn = self.connect()
         try:
@@ -1124,7 +1154,7 @@ class ArchiveStore:
 
     # ---- moving archives between databases ----------------------------------
 
-    def forget(self, archive_id, why: str) -> None:
+    def forget(self, archive_id: int, why: str) -> None:
         """Drop an archive and everything recorded about it, so that the next run walks
         it from scratch. The event that says so has no archive to belong to."""
         conn = self.connect()
@@ -1137,7 +1167,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def import_from(self, source) -> list[tuple[int, int, int | None]]:
+    def import_from(self, source: str | Path) -> list[tuple[int, int, int | None]]:
         """Copy every archive in the database at ``source`` into this one, finished or
         mid-walk, under new ids: its row, parts, segments (with no owner, so that the
         next walk reclaims them), members, events and recheck note. An archive here with
@@ -1177,7 +1207,7 @@ class ArchiveStore:
             conn.execute("DETACH DATABASE src")
         return moved
 
-    def _tables(self, schema) -> set[str]:
+    def _tables(self, schema: str) -> set[str]:
         return {
             row[0]
             for row in self.connect().execute(
@@ -1185,13 +1215,15 @@ class ArchiveStore:
             )
         }
 
-    def _columns(self, schema, table) -> list[tuple[str, str]]:
+    def _columns(self, schema: str, table: str) -> list[tuple[str, str]]:
         return [
             (row["name"], row["type"])
             for row in self.connect().execute(f"PRAGMA {schema}.table_info({table})")
         ]
 
-    def _import_one(self, conn, row, source) -> tuple[int, int, int | None]:
+    def _import_one(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, source: str | Path
+    ) -> tuple[int, int, int | None]:
         old = conn.execute(
             "SELECT id FROM main.archives WHERE set_hash=?", (row["set_hash"],)
         ).fetchone()
@@ -1200,11 +1232,14 @@ class ArchiveStore:
         columns = [
             name for name, _ in self._columns("main", "archives") if name != "id"
         ]
-        new = conn.execute(
-            f"INSERT INTO main.archives ({', '.join(columns)}) "
-            f"VALUES ({', '.join('?' * len(columns))})",
-            [row[name] for name in columns],
-        ).lastrowid
+        new = cast(
+            "int",  # an INSERT always sets lastrowid
+            conn.execute(
+                f"INSERT INTO main.archives ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' * len(columns))})",
+                [row[name] for name in columns],
+            ).lastrowid,
+        )
         for table, leave_out, blank in (
             ("parts", (), ()),
             ("segments", ("id",), ("owner",)),
@@ -1257,7 +1292,7 @@ class ArchiveStore:
         self.log_event(new, "import", f"archive {row['id']} of {source}{replaced}")
         return row["id"], new, old["id"] if old is not None else None
 
-    def _drop(self, conn, archive_id) -> None:
+    def _drop(self, conn: sqlite3.Connection, archive_id: int) -> None:
         """Everything recorded about one archive, inside the caller's transaction."""
         for table in ("parts", "segments", "members", "events"):
             conn.execute(f"DELETE FROM main.{table} WHERE archive_id=?", (archive_id,))

@@ -19,8 +19,10 @@ import queue
 import threading
 import time
 from collections import Counter, deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
+from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.units import human_bytes, human_duration
 
 log = logging.getLogger("dbaudit")
@@ -45,7 +47,7 @@ class Job:
     archive_id: int | None = None
     retried: bool = False
     #: (folder, name) of each copy of the same content, tried in turn if this one has gone.
-    copies: tuple = ()
+    copies: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -79,32 +81,32 @@ class Runner:
 
     def __init__(
         self,
-        walk,
-        limiter,
-        stop,
+        walk: Callable[[Job], Done],
+        limiter: AdaptiveLimiter,
+        stop: threading.Event,
         *,
-        margin=2,
-        max_bugs=3,
-        limit=0,
-        summary_every=600.0,
-        on_bug=None,
-        clock=time.monotonic,
+        margin: int = 2,
+        max_bugs: int = 3,
+        limit: int = 0,
+        summary_every: float = 600.0,
+        on_bug: Callable[[Job, Exception], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.walk, self.limiter, self.stop = walk, limiter, stop
         self.margin, self.max_bugs, self.limit = margin, max_bugs, limit
         self.summary_every, self.on_bug, self.clock = summary_every, on_bug, clock
 
-    def run(self, jobs) -> Report:
+    def run(self, jobs: Iterable[Job]) -> Report:
         waiting = deque(sorted(jobs, key=lambda job: -job.size))
         estimate = {job.key: job.chains for job in waiting}  # a second try starts here
-        flying = {}  # job key -> (job, when it started)
+        flying: dict[str, tuple[Job, float]] = {}  # job key -> (job, when it started)
         finished = queue.Queue()
         outcomes, bugs, started = Counter(), 0, 0
         done_size, recent = 0, deque()  # (when, size) of each walk that finished
         granted0, started_at = self.limiter.granted_total, self.clock()
         last_summary, failed = started_at, False
 
-        def work(job):
+        def work(job: Job) -> None:
             done = Done(
                 "error", bug=True
             )  # unless the walk returns: even SystemExit reports
@@ -196,7 +198,16 @@ class Runner:
                 )
         return Report(outcomes, started, self.stop.is_set() and not failed, failed)
 
-    def _summary(self, outcomes, flying, waiting, done_size, recent, elapsed, rate):
+    def _summary(
+        self,
+        outcomes: Counter[str],
+        flying: dict[str, tuple[Job, float]],
+        waiting: deque[Job],
+        done_size: int,
+        recent: deque[tuple[float, int]],
+        elapsed: float,
+        rate: float,
+    ) -> None:
         """What is left, in flight or queued, at the last hour's pace: by count and by
         size. The largest archives go first, so the truth lies between the two."""
         window = min(elapsed, 3600.0)

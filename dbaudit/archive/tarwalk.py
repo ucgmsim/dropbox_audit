@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import tarfile
 from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from .reader import ReadStoppedError
+from .reader import ConcatFile, ReadStoppedError
 
 BLOCK = 512
 TERMINATOR = BLOCK * 2
@@ -70,6 +71,12 @@ REREAD_LIMIT = 3
 #: What a pass that crossed its boundary, or was stopped, read where it ended: nothing.
 _NOT_READ = object()
 
+#: Everything recorded about a member (name, link target, size, type flag, mode, mtime,
+#: owner, group, data offset), as two readings of it are compared.
+_Identity = tuple[str, str, int, bytes, int, float, str, str, int]
+#: A member's identity, and where the next header sequence begins.
+_Key = tuple[_Identity, int]
+
 
 class UnsettledReadError(Exception):
     """Reads of the same bytes kept disagreeing, past REREAD_LIMIT.
@@ -110,7 +117,7 @@ class Member:
     linkname: str
 
     @classmethod
-    def from_tarinfo(cls, info) -> Member:
+    def from_tarinfo(cls, info: tarfile.TarInfo) -> Member:
         path = info.name.rstrip("/") if info.isdir() else info.name
         head, _, tail = path.rpartition("/")
         return cls(
@@ -141,12 +148,12 @@ class WalkResult:
 
 
 def walk(
-    concat,
+    concat: ConcatFile,
     start_offset: int,
-    commit,
+    commit: Callable[[list[Member], int], None],
     batch_size: int = 2000,
     stop_at: int | None = None,
-    should_stop=None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> WalkResult:
     """Walk from ``start_offset``, calling ``commit(members, next_offset)`` per batch.
 
@@ -287,30 +294,37 @@ class _Pass:
 
     result: WalkResult
     held_from: int  # where its held-back members begin: the next pass starts there
-    window: list  # (before, key, member) of each held-back member, in order
+    window: list[
+        tuple[int, _Key, Member]
+    ]  # (before, key, member) of each held-back member, in order
     vpos: int  # where the header sequence it did not record begins
-    version: object  # what it read at vpos: a key, None for no member, or _NOT_READ
+    version: object  # what it read at vpos: a `_Key`, None for no member, or _NOT_READ
     seen: int
     diverged: bool  # a tie-break took it off the path of the pass before it
 
-    def reached(self):
+    def reached(self) -> tuple[str, int, int]:
         return self.result.state, self.result.end_offset, self.vpos
 
-    def versions(self) -> dict:
-        read = {before: key for before, key, _ in self.window}
+    def versions(self) -> dict[int, object]:
+        read: dict[int, object] = {before: key for before, key, _ in self.window}
         if self.version is not _NOT_READ:
             read[self.vpos] = self.version
         return read
 
 
-def _key(info, after):
+def _key(info: tarfile.TarInfo, after: int) -> _Key:
     """A member as two readings of it are compared: everything recorded, and where the
     next header sequence begins -- which for a GNU sparse member is not among the
     recorded fields, since it records the file's expanded size."""
     return _identity(info), after
 
 
-def _commit_in_batches(commit, entries, end: int, batch_size: int) -> None:
+def _commit_in_batches(
+    commit: Callable[[list[Member], int], None],
+    entries: list[tuple[int, Member]],
+    end: int,
+    batch_size: int,
+) -> None:
     """Commit ``entries`` -- (where its header sequence begins, member), in order -- at
     most ``batch_size`` members at a time: each commit with the cursor where the first
     member it does not carry begins, the last with ``end``. With no entries, one commit
@@ -325,16 +339,16 @@ def _commit_in_batches(commit, entries, end: int, batch_size: int) -> None:
 
 
 def _walk_chain(
-    concat,
+    concat: ConcatFile,
     start_offset: int,
-    commit,
+    commit: Callable[[list[Member], int], None],
     batch_size: int,
-    stop_at,
-    should_stop,
+    stop_at: int | None,
+    should_stop: Callable[[], bool] | None,
     seen: int,
-    rescued: list,
-    versions: dict,
-):
+    rescued: list[int],
+    versions: dict[int, object],
+) -> _Pass:
     """One pass of the chain from ``start_offset``; returns its `_Pass`.
 
     Each member is held back until the walk has read on through CONFIRM_FILLS more
@@ -357,10 +371,12 @@ def _walk_chain(
     diverged = False
     rereads = 0  # fetches that only re-read one place: not the walk's
 
-    def held_from(default):
+    def held_from(default: int) -> int:
         return window[0][0] if window else default
 
-    def finish(vpos, version, verdict):
+    def finish(
+        vpos: int, version: object, verdict: Callable[[int], WalkResult]
+    ) -> _Pass:
         """End the pass at ``vpos``, having read ``version`` there; ``verdict(seen)``
         says what that means, and is asked only once the batch is committed."""
         start = held_from(start_offset)
@@ -375,7 +391,7 @@ def _walk_chain(
             diverged,
         )
 
-    def found_nothing(before, how):
+    def found_nothing(before: int, how: str | None) -> Callable[[int], WalkResult]:
         """The verdict where no member begins at ``before``, as a walk arriving there
         reports it: ``how`` is tarfile's ReadError message, or None if it saw no member."""
         if how is None:
@@ -395,7 +411,7 @@ def _walk_chain(
     stamp, own, reach = 0, concat.fills, 0
     concat.seek(start_offset)
     try:
-        archive = tarfile.open(fileobj=concat, mode="r:")  # noqa: SIM115  # the walk reads from it until it ends
+        archive: tarfile.TarFile = tarfile.open(fileobj=concat, mode="r:")  # noqa: SIM115  # never closed: it holds no handle of its own, only the caller's ConcatFile, which stays open  # ty: ignore[no-matching-overload]  # ConcatFile is read-only; typeshed's _Fileobj also asks for write and close
     except tarfile.ReadError as exc:
         detail = str(exc)
         return finish(
@@ -488,7 +504,8 @@ def _walk_chain(
             batch.append((gone, member))
         seen += 1
         before = archive.offset
-        archive.members.clear()  # the walk is a stream; do not accumulate
+        # The walk is a stream; do not accumulate.
+        archive.members.clear()  # ty: ignore[unresolved-attribute]  # real TarFile attribute; typeshed omits it
         if stop_at is not None and before >= stop_at:
             return finish(
                 before,
@@ -515,7 +532,13 @@ def _walk_chain(
     return finish(before, None, found_nothing(before, None))
 
 
-def _settled(concat, archive, info, before, rescued):
+def _settled(
+    concat: ConcatFile,
+    archive: tarfile.TarFile,
+    info: tarfile.TarInfo,
+    before: int,
+    rescued: list[int],
+) -> tarfile.TarInfo | _NoMember:
     """The member to record, once nothing about it rests on one read alone.
 
     Two things are taken on trust from blocks no checksum covers, and each is read
@@ -560,7 +583,7 @@ def _settled(concat, archive, info, before, rescued):
             if not member.pax_headers:
                 # A `g` header seen only by the bad read would go on applying to every
                 # member after it: the walk's own TarFile keeps it.
-                archive.pax_headers.clear()
+                archive.pax_headers.clear()  # ty: ignore[unresolved-attribute]  # a dict at runtime; typeshed types it Mapping
             archive.offset = after
             return member
         previous = _identity(member)
@@ -577,7 +600,9 @@ class _NoMember:
     how: str | None
 
 
-def _long_fields_agree(concat, info, encoding, errors) -> bool:
+def _long_fields_agree(
+    concat: ConcatFile, info: tarfile.TarInfo, encoding: str, errors: str
+) -> bool:
     """Whether a member's long name and link target begin as the checksummed header
     after their blocks says. True for a member with no such blocks. The header was
     read a moment ago, so it is still in the window: checking costs no request."""
@@ -594,7 +619,7 @@ def _long_fields_agree(concat, info, encoding, errors) -> bool:
     ) and info.linkname.encode(encoding, errors).startswith(link_field)
 
 
-def _identity(info):
+def _identity(info: tarfile.TarInfo) -> _Identity:
     return (
         info.name,
         info.linkname,
@@ -608,32 +633,51 @@ def _identity(info):
     )
 
 
-def _read_here(concat, offset, encoding=tarfile.ENCODING, errors="surrogateescape"):
+def _read_here(
+    concat: ConcatFile,
+    offset: int,
+    encoding: str = tarfile.ENCODING,
+    errors: str = "surrogateescape",
+) -> tuple[tarfile.TarInfo, int] | str | None:
     """What a walk arriving at ``offset`` finds there, parsed from what the reader returns:
     (member, where the next header lies), or -- where no member begins -- the message of
     the ReadError tarfile raised, or None if it simply saw none."""
     concat.seek(offset)
     try:
-        one = tarfile.open(fileobj=concat, mode="r:", encoding=encoding, errors=errors)  # noqa: SIM115  # closed in the finally below
+        one: tarfile.TarFile = tarfile.open(  # noqa: SIM115  # closed in the finally below
+            fileobj=concat, mode="r:", encoding=encoding, errors=errors
+        )  # ty: ignore[no-matching-overload]  # ConcatFile is read-only; typeshed's _Fileobj also asks for write and close
     except tarfile.ReadError as exc:
         return str(exc)
     try:
         # Not next(): with no member at `offset` that seeks back a byte and quietly
         # reads the same place again -- a second request, and a retry nobody counted.
-        info = one.firstmember
+        info = one.firstmember  # ty: ignore[unresolved-attribute]  # real TarFile attribute; typeshed omits it
         return None if info is None else (info, one.offset)
     finally:
         one.close()  # the ConcatFile is the caller's; this leaves it open
 
 
-def _read_one(concat, offset, encoding=tarfile.ENCODING, errors="surrogateescape"):
+def _read_one(
+    concat: ConcatFile,
+    offset: int,
+    encoding: str = tarfile.ENCODING,
+    errors: str = "surrogateescape",
+) -> tuple[tarfile.TarInfo, int] | None:
     """The member whose header sequence begins at ``offset``, parsed from what the
     reader returns, and where the next header lies -- or None if none begins there."""
     found = _read_here(concat, offset, encoding, errors)
     return found if isinstance(found, tuple) else None
 
 
-def _tie_break(concat, archive, before, mine, theirs, rescued):
+def _tie_break(
+    concat: ConcatFile,
+    archive: tarfile.TarFile,
+    before: int,
+    mine: _Key,
+    theirs: object,
+    rescued: list[int],
+) -> tuple[tarfile.TarInfo, int] | str | None:
     """Two passes read the header sequence at ``before`` differently: this one as
     ``mine``, the one before it as ``theirs`` -- each a member's `_key`, or None for no
     member there. Read it afresh until one version has two reads behind it, and return
@@ -656,7 +700,7 @@ def _tie_break(concat, archive, before, mine, theirs, rescued):
     )
 
 
-def read_member(concat, offset) -> Member | None:
+def read_member(concat: ConcatFile, offset: int) -> Member | None:
     """The member whose header sequence begins at ``offset``, as the reader has it now
     -- how a recorded row is checked against a fresh read. None if none begins there.
 
@@ -671,7 +715,9 @@ def _first_non_zero(buf: bytes) -> int | None:
     return None if not rest else len(buf) - len(rest)
 
 
-def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
+def _classify_end(
+    concat: ConcatFile, end: int, seen: int, detail: str = ""
+) -> WalkResult:
     total = concat.archive.total_size
     remainder = total - end
     if remainder < TERMINATOR:
@@ -707,11 +753,11 @@ def _classify_end(concat, end: int, seen: int, detail: str = "") -> WalkResult:
 
 
 def find_chain_start(
-    concat,
+    concat: ConcatFile,
     from_offset: int,
     scan_read: int = 16 << 20,
     limit: int | None = None,
-    should_stop=None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int | None:
     """The first checksum-valid header at or after ``from_offset``.
 

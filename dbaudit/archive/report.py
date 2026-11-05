@@ -42,8 +42,12 @@ from __future__ import annotations
 import csv
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from dbaudit.store import _extension
+
+if TYPE_CHECKING:
+    from dbaudit.archive.store import ArchiveStore
 
 #: Members whose `dir` is empty sit at the archive's own root (the live FaultSZ03
 #: archive is all of these). Grouping them under "" would print as a blank column or
@@ -92,13 +96,15 @@ def _dir_prefix(dir_: str, depth: int) -> str:
     return "/".join(dir_.split("/")[:depth])
 
 
-def _bump(table: dict, key, size: int) -> None:
+def _bump[K](table: dict[K, dict[str, int]], key: K, size: int) -> None:
     entry = table.setdefault(key, {"count": 0, "bytes": 0})
     entry["count"] += 1
     entry["bytes"] += size
 
 
-def _by_bytes_desc(table: dict) -> list[tuple]:
+def _by_bytes_desc[K: (str, tuple[str, str])](
+    table: dict[K, dict[str, int]],
+) -> list[tuple[K, dict[str, int]]]:
     """`(key, {count, bytes})` pairs -- a plain dict would not survive `dict(...)` in
     the caller and then back out again with a defined order, and the brief's own test
     relies on descending-by-bytes being the order a caller sees without re-sorting.
@@ -106,11 +112,13 @@ def _by_bytes_desc(table: dict) -> list[tuple]:
     return sorted(table.items(), key=lambda kv: (-kv[1]["bytes"], kv[0]))
 
 
-def _by_count_desc(table: dict) -> list[tuple]:
+def _by_count_desc[K: (str, tuple[str, str])](
+    table: dict[K, dict[str, int]],
+) -> list[tuple[K, dict[str, int]]]:
     return sorted(table.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
 
 
-def summary(store, archive_id, top: int = 25) -> dict:
+def summary(store: ArchiveStore, archive_id: int, top: int = 25) -> dict[str, Any]:
     """Everything a human needs to decide what an archive is, in one dict.
 
     - `n_members`, `member_bytes` -- recomputed from the member rows read here
@@ -155,13 +163,14 @@ def summary(store, archive_id, top: int = 25) -> dict:
     """
     top = max(int(top), 0)
 
-    by_depth = {1: {}, 2: {}, 3: {}}
-    by_extension: dict = {}
-    owners: dict = {}
-    types: dict = {}
+    by_depth: dict[int, dict[str, dict[str, int]]] = {1: {}, 2: {}, 3: {}}
+    by_extension: dict[str, dict[str, int]] = {}
+    owners: dict[tuple[str, str], dict[str, int]] = {}
+    types: dict[str, dict[str, int]] = {}
     n_members = 0
     member_bytes = 0
-    earliest = latest = None
+    earliest: int | None = None
+    latest: int | None = None
 
     with store.read_transaction():
         archive_row = store.query(
@@ -212,14 +221,14 @@ def summary(store, archive_id, top: int = 25) -> dict:
         "by_extension": _by_bytes_desc(by_extension),
         "largest": largest,
         "mtime_span": (_iso_date(earliest), _iso_date(latest))
-        if earliest is not None
+        if earliest is not None and latest is not None
         else None,
         "owners": _by_count_desc(owners),
         "types": _by_count_desc(types),
     }
 
 
-def write_csv(store, archive_id, out_dir) -> list[str]:
+def write_csv(store: ArchiveStore, archive_id: int, out_dir: str | Path) -> list[str]:
     """Write `manifest.csv`, `by_dir.csv` and `by_extension.csv` into `out_dir`.
 
     `out_dir` is created (`parents=True, exist_ok=True`) rather than assumed to
@@ -246,8 +255,8 @@ def write_csv(store, archive_id, out_dir) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     written = []
-    by_dir: dict = {}
-    by_extension: dict = {}
+    by_dir: dict[str, dict[str, int]] = {}
+    by_extension: dict[str, dict[str, int]] = {}
 
     manifest_path = out_dir / "manifest.csv"
     with store.read_transaction(), open(manifest_path, "w", newline="") as handle:
