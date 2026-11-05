@@ -1,4 +1,6 @@
-"""Command line, on Typer: init, run, status, verify, report, export, index, tree, kinds,
+"""Command line, on Typer.
+
+The commands are init, run, status, verify, report, export, index, tree, kinds,
 and the `archive` group.
 
 `run` is the long-lived command. It is designed to be started under nohup, tmux or
@@ -146,6 +148,21 @@ DEFAULT_TREE_MAX_ROWS = 100_000
 
 
 def free_bytes(path: str) -> int:
+    """Return the free space, in bytes, where ``path`` would be created.
+
+    Walks up from the folder of ``path`` to the nearest one that exists, so it works
+    before the file or its folder has been made.
+
+    Parameters
+    ----------
+    path : str
+        A file that may not exist yet, such as the database to create.
+
+    Returns
+    -------
+    int
+        Bytes available to an unprivileged user on that filesystem.
+    """
     target = os.path.dirname(os.path.abspath(path)) or "."
     while not os.path.isdir(target):
         parent = os.path.dirname(target)
@@ -167,7 +184,25 @@ SIZE_UNITS = {
 
 
 def parse_size(text: str) -> int:
-    """'1GiB', '100MiB' or a plain byte count, for --min-size."""
+    """'1GiB', '100MiB' or a plain byte count, for --min-size.
+
+    Parameters
+    ----------
+    text : str
+        A byte count, or a number followed by B, KiB, MiB, GiB or TiB in any
+        case. Whitespace around it is ignored.
+
+    Returns
+    -------
+    int
+        The size in bytes; a fractional number such as ``1.5GiB`` is rounded
+        down.
+
+    Raises
+    ------
+    typer.BadParameter
+        If ``text`` is not a size.
+    """
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGT]iB|B)?\s*", text, re.IGNORECASE)
     if not match:
         raise typer.BadParameter(
@@ -179,6 +214,17 @@ def parse_size(text: str) -> int:
 
 
 def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
+    """Configure the root logger to write to stderr, and to a file if one is given.
+
+    Replaces any handlers already set up.
+
+    Parameters
+    ----------
+    verbose : bool
+        Log at DEBUG level instead of INFO.
+    logfile : str or None
+        A file to also write the log to; None logs to stderr only.
+    """
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if logfile:
         handlers.append(logging.FileHandler(logfile))
@@ -191,6 +237,20 @@ def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
 
 
 def _crawl_remote(store: Store) -> str:
+    """Return the rclone remote the crawl was started with.
+
+    A database that records none was made for the remote named ``dropbox``.
+
+    Parameters
+    ----------
+    store : Store
+        The audit database.
+
+    Returns
+    -------
+    str
+        The remote recorded when the database was initialised, or ``dropbox``.
+    """
     remote = store.get_meta("remote", "dropbox")
     return remote
 
@@ -198,8 +258,24 @@ def _crawl_remote(store: Store) -> str:
 def build_lister(
     remote: str, tokens: TokenProvider | None = None
 ) -> tuple[TokenProvider, HttpLister]:
-    """A lister, with its own HTTP session, over ``tokens`` or a new provider. Pass the
-    provider a run already holds: each new one shells out to rclone for its token."""
+    """Build a lister with its own HTTP session, over ``tokens`` or a new provider.
+
+    Pass the provider a run already holds: each new one shells out to rclone for its
+    token.
+
+    Parameters
+    ----------
+    remote : str
+        The rclone remote to borrow credentials from, used only when ``tokens``
+        is None.
+    tokens : TokenProvider or None
+        The provider to reuse; None makes a new one for ``remote``.
+
+    Returns
+    -------
+    tuple of (TokenProvider, HttpLister)
+        The provider in use and the lister built over it.
+    """
     tokens = tokens or TokenProvider(remote=remote)
     return tokens, HttpLister(tokens)
 
@@ -208,6 +284,21 @@ def build_lister(
 
 
 def cmd_init(args: SimpleNamespace) -> int:
+    """Create the database and seed it with the root shard.
+
+    Checks first that the disk has room and that the account and the root can be reached.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if there is too little disk space or the account or root
+        cannot be reached.
+    """
     projected = args.min_free_gb * 1024**3
     available = free_bytes(args.db)
     if available < projected:
@@ -265,6 +356,17 @@ def cmd_init(args: SimpleNamespace) -> int:
 
 
 def _progress_reporter(store: Store, stop: threading.Event, interval: float) -> None:
+    """Log the crawl's progress every ``interval`` seconds until ``stop`` is set.
+
+    Parameters
+    ----------
+    store : Store
+        The reporter's own connection to the audit database.
+    stop : threading.Event
+        Set to end the reporting.
+    interval : float
+        Seconds between reports.
+    """
     last_files, last_time = None, time.time()
     while not stop.wait(interval):
         try:
@@ -298,6 +400,22 @@ def _progress_reporter(store: Store, stop: threading.Event, interval: float) -> 
 
 
 def cmd_run(args: SimpleNamespace) -> int:
+    """Crawl the root until finished, or until a signal asks it to stop.
+
+    Takes an exclusive lock first. Re-running it resumes the crawl.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on a finished or interrupted crawl, 1 if shards ended in error, 2 if
+        the database is not initialised or credentials fail, 3 if another crawl
+        holds the lock.
+    """
     setup_logging(args.verbose, args.log)
     store = Store(args.db)
     if not store.is_initialised() or not store.get_meta("root"):
@@ -337,6 +455,15 @@ def cmd_run(args: SimpleNamespace) -> int:
         hard = {"count": 0}
 
         def handle(signum: int, frame: FrameType | None) -> None:
+            """Stop the crawl on the first signal, and exit at once on the second.
+
+            Parameters
+            ----------
+            signum : int
+                The signal number.
+            frame : FrameType or None
+                The interrupted frame; unused.
+            """
             hard["count"] += 1
             if hard["count"] == 1:
                 log.warning(
@@ -416,6 +543,18 @@ def cmd_run(args: SimpleNamespace) -> int:
 
 
 def cmd_status(args: SimpleNamespace) -> int:
+    """Print the crawl's progress, and the first shards that ended in error.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the database is not initialised.
+    """
     store = Store(args.db)
     root = store.get_meta("root") if store.is_initialised() else None
     if not root:
@@ -456,6 +595,19 @@ def cmd_status(args: SimpleNamespace) -> int:
 
 
 def cmd_verify(args: SimpleNamespace) -> int:
+    """Check a subtree against an independent rclone walk and print the differences.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 if the two agree, 1 if they differ, 2 if the database is not
+        initialised or the walk fails.
+    """
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -488,7 +640,19 @@ def cmd_verify(args: SimpleNamespace) -> int:
 
 
 def _space_usage(remote: str) -> tuple[int, int | None, int | None]:
-    """Dropbox's own view of usage, for the reconciliation residual."""
+    """Dropbox's own view of usage, for the reconciliation residual.
+
+    Parameters
+    ----------
+    remote : str
+        The rclone remote to borrow credentials from.
+
+    Returns
+    -------
+    tuple of (int, int or None, int or None)
+        The bytes the account uses, then the team's used and allocated bytes,
+        each None where Dropbox does not report it.
+    """
     import requests
 
     tokens = TokenProvider(remote=remote)
@@ -504,6 +668,19 @@ def _space_usage(remote: str) -> tuple[int, int | None, int | None]:
 
 
 def cmd_report(args: SimpleNamespace) -> int:
+    """Print the storage report: totals, duplicates, cold data, large folders and kinds.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the database is not initialised or the kinds inputs
+        cannot be used.
+    """
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -628,6 +805,13 @@ def cmd_report(args: SimpleNamespace) -> int:
 
 
 def _warn_incomplete(unfinished: int) -> None:
+    """Print a warning that the crawl is incomplete, so every figure is a lower bound.
+
+    Parameters
+    ----------
+    unfinished : int
+        How many shards are pending, running or in error.
+    """
     print(
         f"\n  WARNING: the crawl is incomplete -- {unfinished} shard(s) unfinished "
         f"or failed."
@@ -636,6 +820,18 @@ def _warn_incomplete(unfinished: int) -> None:
 
 
 def cmd_export(args: SimpleNamespace) -> int:
+    """Write the reports as CSV files, and print each path written.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the database is not initialised.
+    """
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -646,6 +842,22 @@ def cmd_export(args: SimpleNamespace) -> int:
 
 
 def cmd_tree(args: SimpleNamespace) -> int:
+    """Write a browsable HTML page of where the space goes.
+
+    The page is written beside its target and renamed into place, so a failed run never
+    leaves half a page behind.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 for a missing subtree, an unusable output path or
+        unusable kinds inputs.
+    """
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -721,14 +933,38 @@ REPORT_KIND_AGES = (2, 5, 10)  # the years Cold data uses
 def _kinds_inputs(
     args: SimpleNamespace,
 ) -> tuple[kinds.Rules, sqlite3.Connection | None]:
-    """The site rules and the archive index a command was given. Raises KindsError when
-    either cannot be used."""
+    """Load the site rules and open the archive index a command was given.
+
+    Raises KindsError when either cannot be used.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        Its ``rules`` and ``archive_db`` options, each a path or None.
+
+    Returns
+    -------
+    tuple of (kinds.Rules, sqlite3.Connection or None)
+        The rules, and a connection to the archive index or None when no
+        ``archive_db`` was given. The caller closes the connection.
+    """
     rules = kinds.load_rules(args.rules)
     return rules, kinds.archive_index(args.archive_db) if args.archive_db else None
 
 
 def _sized(n: float) -> str:
-    """human_bytes for a figure that shares out a tarball and so may not be whole."""
+    """human_bytes for a figure that shares out a tarball and so may not be whole.
+
+    Parameters
+    ----------
+    n : float
+        A number of bytes that may be fractional.
+
+    Returns
+    -------
+    str
+        ``n`` rounded to whole bytes and formatted by `human_bytes`.
+    """
     return human_bytes(round(n))
 
 
@@ -743,7 +979,28 @@ def _kinds_row(
     width: int,
     share: bool = True,
 ) -> str:
-    """A row of size, share of `total`, loose bytes and bytes in tarballs."""
+    """Format a row of size, share of `total`, loose bytes and bytes in tarballs.
+
+    Parameters
+    ----------
+    label : str
+        The row's name.
+    loose : float
+        Bytes stored as loose files.
+    tarred : float
+        Bytes inside tarballs.
+    total : float
+        Bytes all rows share, which the share is taken of.
+    width : int
+        Columns the label is padded to.
+    share : bool
+        Show the share; False leaves its column blank.
+
+    Returns
+    -------
+    str
+        The formatted row.
+    """
     part = f"{(loose + tarred) / total:.1%}" if share and total else ""
     return (
         f"  {label:<{width}}{_sized(loose + tarred):>12}{part:>8}{_sized(loose):>12}"
@@ -752,6 +1009,16 @@ def _kinds_row(
 
 
 def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
+    """Print the kinds tallied under three headings: By kind, By age and By year.
+
+    Parameters
+    ----------
+    counted : kinds.Tally
+        The tally of the listing.
+    looked_inside : bool
+        Whether tarballs were looked up in an archive index, which changes the
+        note under By kind.
+    """
     groups = counted.groups()
     total = counted.total()
     shown = {
@@ -833,6 +1100,21 @@ def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
 
 
 def cmd_kinds(args: SimpleNamespace) -> int:
+    """Print what kinds of data the listing holds, loose and in tarballs, and how old.
+
+    With ``out`` set it also writes the figures as CSV files into that folder.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the database is not initialised, the subtree is not
+        in it, ``out`` is not a folder or the kinds inputs cannot be used.
+    """
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -890,6 +1172,18 @@ def cmd_kinds(args: SimpleNamespace) -> int:
 
 
 def cmd_index(args: SimpleNamespace) -> int:
+    """Build the analysis indexes on the audit database.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        Always 0.
+    """
     setup_logging(args.verbose)
     store = Store(args.db)
     log.info("building analysis indexes (this scans the whole table once per index)")
@@ -909,6 +1203,16 @@ def _local_hash(path: Path) -> str:
     (`ArchiveSet.set_hash`): registering the parts from disk and then re-registering
     the same parts from the folder they were uploaded to updates one row rather than
     creating a second archive.
+
+    Parameters
+    ----------
+    path : Path
+        A local file, read in `DROPBOX_HASH_BLOCK`-byte blocks.
+
+    Returns
+    -------
+    str
+        The hex digest of the SHA-256 of the blocks' digests.
     """
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -925,6 +1229,20 @@ def _folder_entries(lister: Lister, folder: str, name: str) -> list[dict[str, ob
 
     The prefix is the filter, not a guess at the part naming: `ArchiveSet.from_entries`
     is what decides whether those files actually form a gapless part sequence.
+
+    Parameters
+    ----------
+    lister : Lister
+        Lists the folder.
+    folder : str
+        The Dropbox path of the folder.
+    name : str
+        The prefix a file's name must start with.
+
+    Returns
+    -------
+    list of dict
+        The metadata of the matching files, in listing order.
     """
     page = lister.list_folder(folder, recursive=False)
     entries = [
@@ -933,9 +1251,8 @@ def _folder_entries(lister: Lister, folder: str, name: str) -> list[dict[str, ob
         if e.get(".tag") == "file" and e["name"].startswith(name)
     ]
     while page.has_more:
-        assert (
-            page.cursor is not None
-        )  # Dropbox sends one with every page that has more
+        # Dropbox sends a cursor with every page that has more
+        assert page.cursor is not None
         page = lister.continue_(page.cursor)
         entries += [
             e
@@ -961,9 +1278,33 @@ def _listed(
     stop: threading.Event | None = None,
     tokens: TokenProvider | None = None,
 ) -> list[dict[str, object]] | None:
-    """`_folder_entries` through the shared limiter, the way the crawl lists, or None if
-    ``stop`` is set first. After a 401 the token is dropped from ``tokens`` before the
-    listing is asked again: Dropbox can refuse a token that still looks fresh here."""
+    """Run `_folder_entries` through the shared limiter, the way the crawl lists.
+
+    Returns None if ``stop`` is set first. After a 401 the token is dropped from
+    ``tokens`` before the listing is asked again: Dropbox can refuse a token that still
+    looks fresh here. A 429 is asked again after the limiter's pause; an expired token
+    or a failed request is retried up to `LISTING_ATTEMPTS` times and then raised.
+
+    Parameters
+    ----------
+    lister : Lister
+        Lists the folder.
+    limiter : AdaptiveLimiter
+        The limiter shared with the rest of the command.
+    folder : str
+        The Dropbox path of the folder.
+    name : str
+        The prefix a file's name must start with.
+    stop : threading.Event or None
+        Set to abandon the listing; None never stops.
+    tokens : TokenProvider or None
+        The provider whose token is dropped after a 401.
+
+    Returns
+    -------
+    list of dict or None
+        The metadata of the matching files, or None if ``stop`` was set first.
+    """
     tries = 0
     while stop is None or not stop.is_set():
         try:
@@ -988,7 +1329,19 @@ def _listed(
 
 
 def _archive_set(args: SimpleNamespace) -> tuple[ArchiveSet, str, str]:
-    """Build an ArchiveSet from Dropbox or from a local directory."""
+    """Build an ArchiveSet from Dropbox or from a local directory.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        Its ``name``, ``local_dir`` (or None), ``folder`` and ``remote``.
+
+    Returns
+    -------
+    tuple of (ArchiveSet, str, str)
+        The set, its source (``local`` or ``dropbox``) and the folder it was
+        read from.
+    """
     if args.local_dir:
         directory = Path(args.local_dir)
         entries = [
@@ -1017,7 +1370,20 @@ def _archive_set(args: SimpleNamespace) -> tuple[ArchiveSet, str, str]:
 
 
 def _stored_archive_set(store: ArchiveStore, row: sqlite3.Row) -> ArchiveSet:
-    """Rebuild the coordinate space from what `register` recorded."""
+    """Rebuild the coordinate space from what `register` recorded.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive database.
+    row : sqlite3.Row
+        The archive's row; its ``id`` selects the parts.
+
+    Returns
+    -------
+    ArchiveSet
+        The set made of the parts the store holds.
+    """
     return ArchiveSet(store.parts_of(row["id"]))
 
 
@@ -1027,12 +1393,34 @@ def _reader_for(
     tokens: TokenProvider | None = None,
     limiter: AdaptiveLimiter | None = None,
 ) -> LocalRangeReader | DropboxRangeReader:
-    """A reader per caller: a `requests.Session` is not thread-safe, so two chains
-    cannot share one.
+    """Return a new reader for each caller: a `requests.Session` is not thread-safe.
+
+    Two chains cannot share one.
 
     Where a local archive's parts live is the folder recorded at registration -- `index`
     has no `--local-dir` of its own. Task 8's `cat` builds its `ConcatFile` from this
     helper and `_stored_archive_set`, so `cat` and `index` reach the bytes the same way.
+
+    Where a local archive's parts live is the folder recorded at registration -- `index`
+    has no `--local-dir` of its own. Task 8's `cat` builds its `ConcatFile` from this
+    helper and `_stored_archive_set`, so `cat` and `index` reach the bytes the same way.
+
+    Parameters
+    ----------
+    row : sqlite3.Row
+        The archive's row; its ``source`` and ``folder`` say where the parts
+        are.
+    archive_set : ArchiveSet
+        The parts to read.
+    tokens : TokenProvider or None
+        Required for a Dropbox archive, unused for a local one.
+    limiter : AdaptiveLimiter or None
+        Required for a Dropbox archive, unused for a local one.
+
+    Returns
+    -------
+    LocalRangeReader or DropboxRangeReader
+        A reader over the recorded local folder, or over Dropbox.
     """
     if row["source"] == "local":
         return LocalRangeReader(row["folder"], archive_set)
@@ -1054,6 +1442,27 @@ def _fingerprint(
     moved between folders in five weeks, and an id survives that where a path does not.
     Returns (missing, changed) part names, or None if ``stop`` is set before the folder
     is listed.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive database.
+    row : sqlite3.Row
+        The archive's row; its ``folder`` and ``name`` say where to list.
+    remote : str
+        The rclone remote to borrow credentials from.
+    tokens : TokenProvider or None
+        The provider to reuse.
+    limiter : AdaptiveLimiter or None
+        The shared limiter; always given for a Dropbox archive.
+    stop : threading.Event or None
+        Set to abandon the listing.
+
+    Returns
+    -------
+    tuple of (list of str, list of str) or None
+        The names of the registered parts missing from the folder, and of those
+        whose content hash changed; None if ``stop`` was set first.
     """
     assert limiter is not None  # only a Dropbox archive is fingerprinted, and has one
     _, lister = build_lister(remote, tokens)
@@ -1073,10 +1482,24 @@ def _fingerprint(
 
 
 def _open_archive_store(path: str) -> ArchiveStore | None:
-    """The archive store at `path`, or None if it holds no archive index.
+    """Open the archive store at `path`, or return None if it holds no archive index.
 
     `index` and `status` never create one: `register` initialises the schema, so a typo
     in `--db` is a usage error rather than a silently created empty database.
+
+    `index` and `status` never create one: `register` initialises the schema, so a typo
+    in `--db` is a usage error rather than a silently created empty database.
+
+    Parameters
+    ----------
+    path : str
+        The database file.
+
+    Returns
+    -------
+    ArchiveStore or None
+        The open store, or None if ``path`` does not exist or is not an archive
+        database.
     """
     if not os.path.exists(path):
         return None
@@ -1091,8 +1514,22 @@ def _open_archive_store(path: str) -> ArchiveStore | None:
 
 
 def _other_kind_of_database(path: str) -> bool:
-    """A file at ``path`` that is not an archive database -- the audit database, given by
-    mistake -- which `run` and `import` must not add their tables to."""
+    """Return whether ``path`` is a file that is not an archive database.
+
+    That is the audit database, given by mistake, which `run` and `import` must not add
+    their tables to.
+
+    Parameters
+    ----------
+    path : str
+        The database file a command would write to.
+
+    Returns
+    -------
+    bool
+        True if the file exists and is not an archive database, False if it does
+        not exist or is one.
+    """
     if not os.path.exists(path):
         return False
     store = _open_archive_store(path)
@@ -1103,6 +1540,18 @@ def _other_kind_of_database(path: str) -> bool:
 
 
 def cmd_archive_register(args: SimpleNamespace) -> int:
+    """Record an archive, its parts and its segments, from Dropbox or a local folder.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the parts cannot be read or do not make an archive.
+    """
     try:
         archive_set, source, folder = _archive_set(args)
     except ArchiveSetError as exc:
@@ -1146,6 +1595,26 @@ class _Run:
     per account, and the provider caches its token behind a lock -- one per worker would
     each shell out to rclone to refresh. Everything else (reader, window, cache) is per
     chain, because a `requests.Session` is not thread-safe.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options; the walk reads ``max_batches``, ``window_min``
+        and ``window_max``.
+    store : ArchiveStore
+        The archive database.
+    row : sqlite3.Row
+        The archive's row.
+    archive_set : ArchiveSet
+        The archive's parts.
+    tokens : TokenProvider or None
+        The shared provider; None for a local archive.
+    limiter : AdaptiveLimiter or None
+        The shared limiter; None for a local archive.
+    stop : threading.Event
+        The caller's stop.
+    on_chains : Callable or None
+        Told how many chains are walking each time that changes.
     """
 
     def __init__(
@@ -1189,9 +1658,23 @@ class _Run:
         )  # not `lock`: a commit can hold that for seconds
 
     def stopping(self) -> bool:
+        """Return whether the caller or this archive's own limit stops the run.
+
+        Returns
+        -------
+        bool
+            True once either `stop` or `halt` is set.
+        """
         return self.stop.is_set() or self.halt.is_set()
 
     def chain(self, step: int) -> None:
+        """Count a chain starting or finishing, and tell ``on_chains`` the new count.
+
+        Parameters
+        ----------
+        step : int
+            +1 when a worker begins walking, -1 when it ends.
+        """
         with self.chain_lock:  # so the reports land in the order counts changed
             self.chains += step
             if self.on_chains is not None:
@@ -1224,6 +1707,25 @@ class _Run:
         because that cursor is how the segment records that it crossed. Charging those
         to the budget would buy no members at all, and `--max-batches` exists to bound
         how much gets walked, which is measured in members.
+
+        Parameters
+        ----------
+        segment_id : int
+            The id of the segment the batch belongs to.
+        members : list of Member
+            The members read in this batch.
+        next_offset : int
+            The archive offset the segment's cursor moves to, in bytes.
+        requests : int
+            Requests spent since the last commit.
+        bytes_fetched : int
+            Bytes fetched since the last commit.
+
+        Raises
+        ------
+        _StoppedError
+            If the batch carries members and `--max-batches` has been reached, in
+            which case nothing is written.
         """
         with self.lock:
             limit = self.args.max_batches
@@ -1244,12 +1746,39 @@ class _Run:
 
 
 def _chain_start(run: _Run, segment: sqlite3.Row, concat: ConcatFile) -> int | None:
-    """Where a chain with no start yet begins: where the chain before it crossed into this
-    part, which is exactly where the join would start it, or else the first header a scan
-    finds -- None if there is none. The scan gives way, before every read, to that crossing
-    and to a stop, which raises `_StoppedError`."""
+    """Find where a chain with no start yet begins.
+
+    That is where the chain before it crossed into this part, which is exactly where the
+    join would start it, or else the first header a scan finds -- None if there is none.
+    The scan gives way, before every read, to that crossing and to a stop, which raises
+    `_StoppedError`.
+
+    Parameters
+    ----------
+    run : _Run
+        The run the chain belongs to.
+    segment : sqlite3.Row
+        The segment whose chain has no start; its ``scan_from`` is where a scan
+        begins.
+    concat : ConcatFile
+        The archive's bytes, read through the chain's own reader.
+
+    Returns
+    -------
+    int or None
+        The archive offset of the chain's first header, or None if there is
+        none.
+    """
 
     def crossed():
+        """Return where the chain before this segment crossed into it, if it has.
+
+        Returns
+        -------
+        int or None
+            The earlier chain's exit offset, or None if it has not crossed or this
+            is the first segment.
+        """
         if segment["idx"] == 0:
             return None
         before = run.store.segment(run.archive_id, segment["idx"] - 1)
@@ -1271,7 +1800,15 @@ def _chain_start(run: _Run, segment: sqlite3.Row, concat: ConcatFile) -> int | N
 
 
 def _walk_segment(run: _Run, segment: sqlite3.Row) -> None:
-    """One chain: find where it starts if it has none, then walk to its boundary."""
+    """One chain: find where it starts if it has none, then walk to its boundary.
+
+    Parameters
+    ----------
+    run : _Run
+        The run the chain belongs to.
+    segment : sqlite3.Row
+        The claimed segment; its outcome is recorded in the store.
+    """
     args = run.args
     reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
     reader.should_stop = run.stopping  # a read stuck in 429s gives way to it
@@ -1281,8 +1818,15 @@ def _walk_segment(run: _Run, segment: sqlite3.Row) -> None:
     spent = {"requests": 0, "bytes": 0}
 
     def delta():
-        """What this reader has cost *since the last report*. The store adds what it is
-        given, so handing it the running total every time would compound it.
+        """Return what this reader has cost *since the last report*.
+
+        The store adds what it is given, so handing it the running total every time would
+        compound it.
+
+        Returns
+        -------
+        tuple of (int, int)
+            The requests made and the bytes fetched since `charged` last ran.
         """
         return (
             reader.requests - spent["requests"],
@@ -1290,9 +1834,19 @@ def _walk_segment(run: _Run, segment: sqlite3.Row) -> None:
         )
 
     def charged():
+        """Mark everything the reader has spent so far as reported."""
         spent["requests"], spent["bytes"] = reader.requests, reader.bytes_fetched
 
     def commit(members: list[Member], next_offset: int) -> None:
+        """Write one batch for this segment, and charge its cost once written.
+
+        Parameters
+        ----------
+        members : list of Member
+            The members read in this batch.
+        next_offset : int
+            The archive offset the segment's cursor moves to, in bytes.
+        """
         requests, fetched = delta()
         run.commit(segment["id"], members, next_offset, requests, fetched)
         charged()  # only once the write went through
@@ -1377,7 +1931,13 @@ def _walk_segment(run: _Run, segment: sqlite3.Row) -> None:
 
 
 def _worker(run: _Run) -> None:
-    """Claim segments until there are none left, or until the run is stopping."""
+    """Claim segments until there are none left, or until the run is stopping.
+
+    Parameters
+    ----------
+    run : _Run
+        The run to claim segments from.
+    """
     owner = f"{os.getpid()}:{threading.get_ident()}"
     run.chain(1)
     try:
@@ -1403,7 +1963,9 @@ def _worker(run: _Run) -> None:
 
 
 _OUTCOME, _REPAIRED, _BLOCKED = "outcome", "repaired", "blocked"
-# Stored in segment errors by archive runs, so existing DBs hold it: a marker, not the class's name.
+#: How a segment's error records a pax sighting, so the join can tell it from a failure.
+#: Stored in segment errors by archive runs, so existing DBs hold it:
+#: a marker, not the class's name.
 _PAX_SIGHTING = "UnsupportedArchive: "
 
 _ROW_FIELDS = (
@@ -1422,7 +1984,18 @@ _ROW_FIELDS = (
 
 
 def _row_of(item: sqlite3.Row | Member | None) -> tuple[object, ...] | None:
-    """A stored row or a freshly read Member, as one comparable tuple."""
+    """Convert a stored row or a freshly read Member into one comparable tuple.
+
+    Parameters
+    ----------
+    item : sqlite3.Row or Member or None
+        What to convert.
+
+    Returns
+    -------
+    tuple or None
+        The values of `_ROW_FIELDS`, in order; None if ``item`` is None.
+    """
     if item is None:
         return None
     if isinstance(item, sqlite3.Row):
@@ -1431,8 +2004,10 @@ def _row_of(item: sqlite3.Row | Member | None) -> tuple[object, ...] | None:
 
 
 def _audit_repeated_paths(run: _Run) -> list[int]:
-    """Read again every row whose path the index holds more than once, and walk again
-    each segment holding a row that disagrees. Returns those segments' indexes.
+    """Read again every row whose path repeats, and re-arm each segment with a bad one.
+
+    Every row whose path the index holds more than once is read again, and each segment
+    holding a row that disagrees is walked again. Returns those segments' indexes.
 
     A path can repeat legitimately (`tar -r`), but a bad read that is valid tar from
     elsewhere in the archive usually makes one: it records another member's header a
@@ -1450,6 +2025,17 @@ def _audit_repeated_paths(run: _Run) -> list[int]:
 
     A stop reaches it before every read, and raises `_StoppedError`: the walk then ends with no
     verdict, and the next run audits again.
+
+    Parameters
+    ----------
+    run : _Run
+        The run whose archive is audited.
+
+    Returns
+    -------
+    list of int
+        The ``idx`` of each segment reset to be walked again; empty if no row
+        disagreed.
     """
     store, archive_id = run.store, run.archive_id
     rows = store.repeated_paths(archive_id, AUDIT_LIMIT + 1)
@@ -1472,11 +2058,37 @@ def _audit_repeated_paths(run: _Run) -> list[int]:
     )
 
     def disagrees(row: sqlite3.Row) -> bool:
+        """Return whether a fresh read of ``row``'s header differs from the row.
+
+        Raises `_StoppedError` if the run is stopping.
+
+        Parameters
+        ----------
+        row : sqlite3.Row
+            A stored member row; its ``hdr_offset`` is where to read.
+
+        Returns
+        -------
+        bool
+            True if the member read there is not the one stored.
+        """
         if run.stopping():
             raise _StoppedError("stopped during the audit")
         return _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)
 
     def confirmed(row: sqlite3.Row) -> bool:
+        """Return whether ``row`` still disagrees on a second read, asked differently.
+
+        Parameters
+        ----------
+        row : sqlite3.Row
+            A stored member row that already disagreed once.
+
+        Returns
+        -------
+        bool
+            True if the member read again is still not the one stored.
+        """
         concat.drop_cache()  # a second request, asked differently
         return disagrees(row)
 
@@ -1521,6 +2133,20 @@ def _join(store: ArchiveStore, archive_id: int):
     chain reaches a verdict, or ("blocked", segment) while some chain has none yet.
 
     Run with no workers running, so nothing else is writing these rows.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive database.
+    archive_id : int
+        The id of the archive whose chains are joined.
+
+    Returns
+    -------
+    tuple of (str, int or WalkResult or sqlite3.Row)
+        A tag and its payload, as described above: ``repaired`` with the
+        repaired segment's index, ``outcome`` with the walk's result, or
+        ``blocked`` with the segment that has no verdict yet.
     """
     segments = store.segments(archive_id)
     index = 0
@@ -1566,6 +2192,20 @@ def _join(store: ArchiveStore, archive_id: int):
 
 
 def cmd_archive_index(args: SimpleNamespace) -> int:
+    """Walk one registered archive's header chains to a verdict, resuming if need be.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on a complete or cleanly stopped walk, 1 if the archive's state or the
+        walk ends in an error, 2 for a usage error, 3 if another walk holds the
+        lock.
+    """
     setup_logging(args.verbose)
     if _no_folder(args.lock):
         return 2
@@ -1660,10 +2300,32 @@ def _compression(
     limiter: AdaptiveLimiter | None,
     should_stop: Callable[[], bool] | None = None,
 ) -> str | None:
-    """The compression format the archive's first bytes announce, or None.
+    """Return the compression format the archive's first bytes announce, or None.
 
     A format is named only once two readings agree, as every verdict is: the second asks
     for a whole window, so its request ends tens of kilobytes from the first's.
+
+    A format is named only once two readings agree, as every verdict is: the second asks
+    for a whole window, so its request ends tens of kilobytes from the first's.
+
+    Parameters
+    ----------
+    row : sqlite3.Row
+        The archive's row.
+    archive_set : ArchiveSet
+        The archive's parts; the first is read.
+    tokens : TokenProvider or None
+        The shared provider; None for a local archive.
+    limiter : AdaptiveLimiter or None
+        The shared limiter; None for a local archive.
+    should_stop : Callable or None
+        Tells the reader to give up, which raises `ReadStoppedError`.
+
+    Returns
+    -------
+    str or None
+        The format's name from `COMPRESSION`, or None if the bytes are not a
+        known magic number or two readings disagree.
     """
     size = archive_set.parts[0].size
     if size == 0:
@@ -1683,17 +2345,48 @@ def _compression(
 
 
 def _compressed_as(row: sqlite3.Row) -> str | None:
-    """The compression format an `unsupported` archive was recorded under, or None for a
-    pax archive."""
+    """Return the compression format an `unsupported` archive was recorded under.
+
+    None for a pax archive.
+
+    Parameters
+    ----------
+    row : sqlite3.Row
+        The archive's row; its ``detail`` names the format.
+
+    Returns
+    -------
+    str or None
+        The format's name, or None if the archive was not recorded as
+        compressed.
+    """
     fmt, compressed, _ = (row["detail"] or "").partition("-compressed: ")
     return fmt if compressed and fmt in dict(COMPRESSION) else None
 
 
 @dataclass
 class _Walked:
-    """How one archive's walk ended: what `archive index` reports, and `archive run`
-    counts. ``started`` is False for a walk refused before it began, which has no
-    figures worth printing; ``bug`` marks the machinery failing, not the archive."""
+    """How one archive's walk ended.
+
+    It is what `archive index` reports and `archive run` counts. ``started`` is False for
+    a walk refused before it began, which has no figures worth printing; ``bug`` marks the
+    machinery failing, not the archive.
+
+    Parameters
+    ----------
+    state : str
+        The archive's state in the database after the walk.
+    code : int
+        The exit status for the walk.
+    errors : list of str
+        The messages to print to stderr, each starting ``error:``.
+    started : bool
+        False if the walk was refused before it began.
+    stopped : bool
+        True if a stop ended the walk before a verdict.
+    bug : bool
+        True if the machinery failed, not the archive.
+    """
 
     state: str
     code: int
@@ -1722,6 +2415,33 @@ def _walk_archive(
     ``check_before`` is False when the caller registered the parts from a listing a
     moment ago, which is that same check. ``on_chains`` is told how many chains are
     walking each time that changes.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options: ``remote``, ``workers``, ``batch``,
+        ``window_min``, ``window_max`` and ``max_batches``.
+    store : ArchiveStore
+        The archive database.
+    row : sqlite3.Row
+        The archive's row.
+    tokens : TokenProvider or None
+        The shared provider; None for a local archive.
+    limiter : AdaptiveLimiter or None
+        The shared limiter; None for a local archive.
+    stop : threading.Event
+        Set by the caller to end the walk early.
+    check_before : bool
+        Check the parts against the folder before the walk.
+    recheck : bool
+        Drop an ended walk's rows and walk the chain again.
+    on_chains : Callable or None
+        Told how many chains are walking.
+
+    Returns
+    -------
+    _Walked
+        How the walk ended.
     """
     archive_id = row["id"]
     archive_set = _stored_archive_set(store, row)
@@ -2027,6 +2747,24 @@ def _walk_archive(
 
 
 def _run_index(args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row) -> int:
+    """Walk one registered archive for `archive index`, then print its figures.
+
+    Signals ask the walk to stop after committing the batch in flight.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+    store : ArchiveStore
+        The archive database.
+    row : sqlite3.Row
+        The archive's row.
+
+    Returns
+    -------
+    int
+        The walk's exit status.
+    """
     dropbox = row["source"] == "dropbox"
     workers = max(args.workers, 1)
     tokens = limiter = None
@@ -2040,6 +2778,15 @@ def _run_index(args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row) -> 
     hard = {"count": 0}
 
     def handle(signum: int, frame: FrameType | None) -> None:
+        """Ask the walk to stop on the first signal, and exit at once on the second.
+
+        Parameters
+        ----------
+        signum : int
+            The signal number.
+        frame : FrameType or None
+            The interrupted frame; unused.
+        """
         hard["count"] += 1
         if hard["count"] == 1:
             # Flag first, then log: the log line is then proof the walk is already
@@ -2095,6 +2842,15 @@ def _run_index(args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row) -> 
 
 
 def _print_archive_status(store: ArchiveStore, row: sqlite3.Row) -> None:
+    """Print one archive's state, its figures and the progress of each segment.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive database.
+    row : sqlite3.Row
+        The archive's row.
+    """
     stats = store.stats(row["id"])
     total = stats["total_size"] or 1
     ratio = (
@@ -2159,12 +2915,32 @@ VERDICTS = frozenset({"complete", "truncated", "corrupt", "unsupported"})
 def _run_jobs(
     store: ArchiveStore, listing: Listing, workers: int
 ) -> tuple[list[Job], Counter[str], Counter[str]]:
-    """What `archive run` has to walk, largest first, and a count of everything else.
+    """List what `archive run` has to walk, largest first, and count everything else.
 
     Every valid archive the listing names that has no verdict yet, and every archive the
     database holds without one -- imported mid-walk, or registered by hand -- once per
     folder and name. A job carries the places of its copies, walked instead if its own
     has gone. Returns (jobs, counts, sizes), the last two keyed by kind.
+
+    Every valid archive the listing names that has no verdict yet, and every archive the
+    database holds without one -- imported mid-walk, or registered by hand -- once per
+    folder and name. A job carries the places of its copies, walked instead if its own
+    has gone. Returns (jobs, counts, sizes), the last two keyed by kind.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive database.
+    listing : Listing
+        The candidates found in the audit database.
+    workers : int
+        The most chains one archive may have.
+
+    Returns
+    -------
+    tuple of (list of Job, Counter, Counter)
+        The jobs, largest first; then the archives and the bytes counted under
+        each kind, such as ``new``, ``resuming``, ``done`` and ``copy``.
     """
     rows = (
         store.connect()
@@ -2191,6 +2967,27 @@ def _run_jobs(
         archive_id: int | None,
         copies: Iterable[tuple[str, str]] = (),
     ) -> None:
+        """Add a job for an archive not yet planned, and count it under ``kind``.
+
+        Does nothing if the place or the archive is already planned.
+
+        Parameters
+        ----------
+        kind : str
+            The counter key, ``new`` or ``resuming``.
+        folder : str
+            The Dropbox folder holding the parts.
+        name : str
+            The archive's name.
+        size : int
+            The archive's size in bytes.
+        chains : int
+            The chains to start with, held between 1 and ``workers``.
+        archive_id : int or None
+            The archive's id if registered, else None.
+        copies : Iterable of tuple of (str, str)
+            The (folder, name) of other copies, walked instead if this one has gone.
+        """
         # An archive that moved is listed where it is now, and is in the database where
         # it was registered: one walk, from where it is now, which comes first.
         if (folder, name) in places or archive_id in ids:
@@ -2259,14 +3056,28 @@ def _run_jobs(
 
 
 class _Walking:
-    """The contents being walked right now, by set hash. Two places the listing saw apart
-    can hold the same content by their turns, and one archive must not be walked by two
-    jobs at once."""
+    """The contents being walked right now, by set hash.
+
+    Two places the listing saw apart can hold the same content by their turns, and one
+    archive must not be walked by two jobs at once.
+    """
 
     def __init__(self):
         self._lock, self._hashes = threading.Lock(), set()
 
     def claim(self, set_hash: str) -> bool:
+        """Claim ``set_hash`` for the caller's walk, if no other job holds it.
+
+        Parameters
+        ----------
+        set_hash : str
+            The set hash of the content to walk.
+
+        Returns
+        -------
+        bool
+            True if now claimed, False if another job is walking that content.
+        """
         with self._lock:
             if set_hash in self._hashes:
                 return False
@@ -2274,6 +3085,13 @@ class _Walking:
             return True
 
     def release(self, set_hash: str) -> None:
+        """Release ``set_hash`` once its walk is over.
+
+        Parameters
+        ----------
+        set_hash : str
+            The set hash that was claimed.
+        """
         with self._lock:
             self._hashes.discard(set_hash)
 
@@ -2287,10 +3105,37 @@ def _walk_job(
     stop: threading.Event,
     walking: _Walking,
 ) -> Done:
-    """One archive at its turn. One listing of its folder registers what is there now:
-    the same row, with its walk so far, if the content is unchanged -- wherever it was
-    registered before -- or a new one if not. Then the walk. If the archive has gone, or
-    its parts no longer make a set, the next copy the listing saw is tried instead."""
+    """Walk one archive at its turn.
+
+    One listing of its folder registers what is there now: the same row, with its walk so
+    far, if the content is unchanged -- wherever it was registered before -- or a new one
+    if not. Then the walk. If the archive has gone, or its parts no longer make a set, the
+    next copy the listing saw is tried instead.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+    store : ArchiveStore
+        The archive database.
+    job : Job
+        The archive to walk; its ``archive_id`` is set once registered.
+    tokens : TokenProvider
+        The provider shared by every job.
+    limiter : AdaptiveLimiter
+        The limiter shared by every job.
+    stop : threading.Event
+        Set to end the walk early.
+    walking : _Walking
+        The contents other jobs are walking.
+
+    Returns
+    -------
+    Done
+        How the job ended: the archive's state, or ``stopped``, ``error``,
+        ``done`` if the content was walked before or is being walked by another
+        job, or why no copy could be used.
+    """
     try:
         _, lister = build_lister(args.remote, tokens)
         missed = None
@@ -2345,6 +3190,13 @@ def _walk_job(
                 return Done("done")  # this content was walked before
 
             def chains(n: int) -> None:
+                """Tell the scheduler how many chains this job has.
+
+                Parameters
+                ----------
+                n : int
+                    The chains walking now; the job counts at least 1.
+                """
                 job.chains = max(1, n)  # the scheduler counts this one's chains now
 
             walked = _walk_archive(
@@ -2373,7 +3225,17 @@ def _walk_job(
 
 
 def _record_bug(store: ArchiveStore, job: Job, exc: Exception) -> None:
-    """Leave the archive an unexpected failure stopped in `error`, saying why."""
+    """Leave the archive an unexpected failure stopped in `error`, saying why.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive database.
+    job : Job
+        The job that failed.
+    exc : Exception
+        The unexpected failure.
+    """
     detail = f"{type(exc).__name__}: {exc}"
     try:
         if job.archive_id is not None:
@@ -2385,6 +3247,17 @@ def _record_bug(store: ArchiveStore, job: Job, exc: Exception) -> None:
 
 
 def _print_run_plan(jobs: list[Job], counts: Counter[str], sizes: Counter[str]) -> None:
+    """Print the archives `archive run` will walk, and what it leaves alone.
+
+    Parameters
+    ----------
+    jobs : list of Job
+        The jobs, largest first.
+    counts : Counter
+        The archives of each kind.
+    sizes : Counter
+        The bytes of each kind.
+    """
     total = sum(job.size for job in jobs)
     print(
         f"archive run: {len(jobs):,} archives to walk ({human_bytes(total)}): "
@@ -2405,8 +3278,21 @@ def _print_run_plan(jobs: list[Job], counts: Counter[str], sizes: Counter[str]) 
 
 
 def _no_folder(*paths) -> bool:
-    """Say so, and return True, if any of ``paths`` -- a database or a lock a command
-    would create -- lies in a folder that does not exist."""
+    """Print an error and return True if any of ``paths`` lies in a missing folder.
+
+    The paths are the databases or locks a command would create.
+
+    Parameters
+    ----------
+    *paths : str or None
+        The files a command would create; None or empty ones are skipped.
+
+    Returns
+    -------
+    bool
+        True after reporting the first path whose folder does not exist, else
+        False.
+    """
     for path in filter(None, paths):
         folder = os.path.dirname(os.path.abspath(path))
         if not os.path.isdir(folder):
@@ -2416,6 +3302,21 @@ def _no_folder(*paths) -> bool:
 
 
 def cmd_archive_run(args: SimpleNamespace) -> int:
+    """Walk every archive that still needs it, many at once.
+
+    With ``dry_run`` it prints the plan and contacts nothing.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 1 if the run stopped after repeated unexpected failures, 2
+        for a usage error, 3 if another run holds the lock.
+    """
     setup_logging(args.verbose)
     if not 1 <= args.streams <= args.max_streams:
         print(
@@ -2472,9 +3373,21 @@ def cmd_archive_run(args: SimpleNamespace) -> int:
 
 
 def _run_limiter(args: SimpleNamespace) -> AdaptiveLimiter:
-    """One limiter for every walk and listing: Dropbox limits per account. The rate starts
-    where the streams need it, a request costing about 1.5 s, so the stream count is what
-    Dropbox's pushback adjusts."""
+    """Return the one limiter every walk and listing shares.
+
+    Dropbox limits per account. The rate starts where the streams need it, a request
+    costing about 1.5 s, so the stream count is what Dropbox's pushback adjusts.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        Its ``streams`` and ``max_streams`` options.
+
+    Returns
+    -------
+    AdaptiveLimiter
+        The limiter, started at ``streams`` concurrent requests.
+    """
     return AdaptiveLimiter(
         rps=args.streams / 1.5,
         max_rps=args.max_streams / 1.5,
@@ -2484,6 +3397,24 @@ def _run_limiter(args: SimpleNamespace) -> AdaptiveLimiter:
 
 
 def _run_archives(args: SimpleNamespace, store: ArchiveStore, jobs: list[Job]) -> int:
+    """Walk ``jobs`` with the parallel runner and print the totals.
+
+    Signals ask the runner to stop after committing every batch in flight.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+    store : ArchiveStore
+        The archive database.
+    jobs : list of Job
+        What to walk, largest first.
+
+    Returns
+    -------
+    int
+        0, or 1 if the runner stopped after repeated unexpected failures.
+    """
     tokens = TokenProvider(remote=args.remote)  # one, so its token is cached once
     limiter = _run_limiter(args)
     stop = threading.Event()
@@ -2491,6 +3422,15 @@ def _run_archives(args: SimpleNamespace, store: ArchiveStore, jobs: list[Job]) -
     hard = {"count": 0}
 
     def handle(signum: int, frame: FrameType | None) -> None:
+        """Ask the runner to stop on the first signal, and exit at once on the second.
+
+        Parameters
+        ----------
+        signum : int
+            The signal number.
+        frame : FrameType or None
+            The interrupted frame; unused.
+        """
         hard["count"] += 1
         if hard["count"] == 1:
             stop.set()
@@ -2533,6 +3473,19 @@ def _run_archives(args: SimpleNamespace, store: ArchiveStore, jobs: list[Job]) -
 
 
 def cmd_archive_import(args: SimpleNamespace) -> int:
+    """Copy every archive of another archive database into this one.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 for a usage error or a source that cannot be imported, 3
+        if a database's lock is held.
+    """
     source = _open_archive_store(args.source)
     if source is None:
         print(f"error: {args.source} holds no registered archives", file=sys.stderr)
@@ -2570,6 +3523,18 @@ def cmd_archive_import(args: SimpleNamespace) -> int:
 
 
 def cmd_archive_forget(args: SimpleNamespace) -> int:
+    """Drop an archive and all its rows, so the next run walks it afresh.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if there is no such archive, 3 if the lock is held.
+    """
     if _no_folder(args.lock):
         return 2
     store = _open_archive_store(args.db)
@@ -2602,6 +3567,19 @@ def cmd_archive_forget(args: SimpleNamespace) -> int:
 
 
 def cmd_archive_status(args: SimpleNamespace) -> int:
+    """Print the archive database's summary, or one archive's status.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the database holds no archives or the archive is
+        unknown.
+    """
     store = _open_archive_store(args.db)
     if store is None:
         print(f"error: {args.db} holds no registered archives", file=sys.stderr)
@@ -2618,9 +3596,18 @@ def cmd_archive_status(args: SimpleNamespace) -> int:
 
 
 def _print_archive_summary(store: ArchiveStore, db: str) -> None:
-    """Every archive in the database, by state, and the ones mid-walk: what `archive
-    run` has done so far, readable from any shell. One archive's full status is
-    `--archive`."""
+    """Print every archive in the database by state, and the ones mid-walk.
+
+    That is what `archive run` has done so far, readable from any shell. One archive's
+    full status is `--archive`.
+
+    Parameters
+    ----------
+    store : ArchiveStore
+        The archive database.
+    db : str
+        The database's path, shown in the first line.
+    """
     conn = store.connect()
     states = conn.execute(
         "SELECT state, COUNT(*), COALESCE(SUM(total_size), 0), COALESCE(SUM(n_members), 0) "
@@ -2652,9 +3639,10 @@ def _print_archive_summary(store: ArchiveStore, db: str) -> None:
 
 
 def _print_index_completeness_warning(row: sqlite3.Row) -> None:
-    """The "this index may not be the whole archive" warning, shared by `report` and
-    `export` rather than restated by each (T9-8; extended from `report` alone to
-    `export` too in Task 9's fix round 1).
+    """Print the "this index may not be the whole archive" warning, if one applies.
+
+    It is shared by `report` and `export` rather than restated by each (T9-8; extended
+    from `report` alone to `export` too in Task 9's fix round 1).
 
     `cat` (T8-4) refuses outright on a stale archive, because extracting one would
     write *wrong bytes* -- content that may no longer be what is actually on Dropbox
@@ -2666,6 +3654,11 @@ def _print_index_completeness_warning(row: sqlite3.Row) -> None:
     entire product is files meant to be handed to someone else, so it needs this
     caveat at least as much as a printed report does; printed before its "wrote ..."
     lines, the same way `report` prints it before a single figure (T9-8).
+
+    Parameters
+    ----------
+    row : sqlite3.Row
+        The archive's row; its ``state`` decides what is printed.
     """
     if row["state"] != "complete":
         # Task 11 runs `report`/`export` against a walk in progress, and a manifest
@@ -2698,11 +3691,24 @@ def _print_index_completeness_warning(row: sqlite3.Row) -> None:
 
 
 def cmd_archive_report(args: SimpleNamespace) -> int:
-    """Print the rollups `archive_report.summary` computes over one archive's
-    manifest, laid out the way `cmd_report` lays out the audit's own numbers.
+    """Print the rollups of one archive's manifest.
+
+    They are what `archive_report.summary` computes, laid out the way `cmd_report` lays out
+    the audit's own numbers.
 
     Read-only, and offline (T9-10): everything comes out of the local database, so
     there is no `--remote` here and nothing above this function touches Dropbox.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the database holds no archives or the archive is
+        unknown.
     """
     store = _open_archive_store(args.db)
     if store is None:
@@ -2770,8 +3776,20 @@ def cmd_archive_report(args: SimpleNamespace) -> int:
 
 
 def cmd_archive_export(args: SimpleNamespace) -> int:
-    """Write one archive's manifest and rollups as CSV, and print each path written --
-    the same convention `cmd_export` uses for the audit's own CSV export.
+    """Write one archive's manifest and rollups as CSV, and print each path written.
+
+    This is the same convention `cmd_export` uses for the audit's own CSV export.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 2 if the database holds no archives or the archive is
+        unknown.
     """
     store = _open_archive_store(args.db)
     if store is None:
@@ -2792,9 +3810,15 @@ def cmd_archive_export(args: SimpleNamespace) -> int:
 
 
 def _print_candidates(matches: Sequence[sqlite3.Row]) -> None:
-    """The offset/size/mtime of every member a path matched, so `--offset` can name
-    one of them. Shared by the two `cat` outcomes that need it: ambiguous (no
-    `--offset` given) and a given `--offset` that names none of them.
+    """Print the offset, size and mtime of every member a path matched.
+
+    That lets `--offset` name one of them. Shared by the two `cat` outcomes that need it:
+    ambiguous (no `--offset` given) and a given `--offset` that names none of them.
+
+    Parameters
+    ----------
+    matches : Sequence of sqlite3.Row
+        The members' index rows.
     """
     for match in matches:
         print(
@@ -2809,7 +3833,19 @@ class _CatError(Exception):
 
 
 def _ambiguous(shared: bytes) -> bool:
-    """Whether two reads agreeing on ``shared`` vouches for neither of them."""
+    """Whether two reads agreeing on ``shared`` vouches for neither of them.
+
+    Parameters
+    ----------
+    shared : bytes
+        The bytes two reads have in common.
+
+    Returns
+    -------
+    bool
+        True if ``shared`` is too short, or too regular, to vouch for either
+        read.
+    """
     return len(shared) < AMBIGUOUS_BELOW or len(
         zlib.compress(shared, 1)
     ) * AMBIGUOUS_RATIO < len(shared)
@@ -2818,7 +3854,7 @@ def _ambiguous(shared: bytes) -> bool:
 def _plan_reads(
     archive_set: ArchiveSet, hdr_offset: int, data_offset: int, end: int, stop: int
 ) -> list[tuple[int, int]]:
-    """The reads that cover [hdr_offset, stop), as (offset, length) pairs.
+    """Plan the reads that cover [hdr_offset, stop), as (offset, length) pairs.
 
     Each is at most CAT_CHUNK, and consecutive ones share bytes, so every read is checked
     at both ends by another request. That holds only if no read crosses a part boundary:
@@ -2828,9 +3864,49 @@ def _plan_reads(
     what they say rather than by an overlap, and so are read whole wherever a boundary
     falls -- parts need not be a multiple of 512 bytes (`split -b 1GB`): the member's own
     header sequence [hdr_offset, data_offset), and what follows it [end, stop).
+
+    Each is at most CAT_CHUNK, and consecutive ones share bytes, so every read is checked
+    at both ends by another request. That holds only if no read crosses a part boundary:
+    a read that does is two requests, and the two ends that meet at the boundary share
+    nothing. So reads stop at each boundary, and a short read straddling it shares bytes
+    with the reads either side. The exceptions are the two anchors, which are checked by
+    what they say rather than by an overlap, and so are read whole wherever a boundary
+    falls -- parts need not be a multiple of 512 bytes (`split -b 1GB`): the member's own
+    header sequence [hdr_offset, data_offset), and what follows it [end, stop).
+
+    Parameters
+    ----------
+    archive_set : ArchiveSet
+        The archive's parts, which locate an offset.
+    hdr_offset : int
+        The offset of the member's first header.
+    data_offset : int
+        The offset where the member's data begins.
+    end : int
+        The offset just past the member's padded data, where the next header
+        sits.
+    stop : int
+        The offset where the last read must end.
+
+    Returns
+    -------
+    list of tuple of (int, int)
+        The ``(offset, length)`` of each read, in bytes and in order.
     """
 
     def part_end(offset: int) -> int:
+        """Return the archive offset where the part holding ``offset`` ends.
+
+        Parameters
+        ----------
+        offset : int
+            An archive offset in bytes.
+
+        Returns
+        -------
+        int
+            The offset just past the last byte of that part.
+        """
         idx, _ = archive_set.locate(offset)
         part = archive_set.parts[idx]
         return part.offset + part.size
@@ -2860,10 +3936,24 @@ def _plan_reads(
 
 
 def _headers_mismatch(block: bytes, member: sqlite3.Row) -> str | None:
-    """Why ``block`` -- the bytes from a member's first header to its data -- is not the
-    member its index row describes, or None if it is. Every field the row holds is
-    compared: a read of another member's headers is caught even at the same size, and so
-    is a part rewritten under the index."""
+    """Return why ``block`` is not the member its index row describes, or None if it is.
+
+    ``block`` is the bytes from a member's first header to its data. Every field the row
+    holds is compared: a read of another member's headers is caught even at the same size,
+    and so is a part rewritten under the index.
+
+    Parameters
+    ----------
+    block : bytes
+        The bytes from the member's first header to its data.
+    member : sqlite3.Row
+        The member's index row.
+
+    Returns
+    -------
+    str or None
+        The first difference found, or None if the block is that member.
+    """
     try:
         with tarfile.open(fileobj=io.BytesIO(block), mode="r:") as sequence:
             info = sequence.firstmember  # ty: ignore[unresolved-attribute]  # real TarFile attribute; typeshed omits it
@@ -2931,6 +4021,28 @@ def _verified_member_bytes(
     surround it -- twice running from the start, or three times after a right one.
     Memory: the read held and the next, plus up to two more while a disagreement is
     settled -- at most five reads (80 MiB), usually two.
+
+    Parameters
+    ----------
+    concat : ConcatFile
+        The archive's bytes, read through a pass-through window.
+    member : sqlite3.Row
+        The member's index row.
+    total : int
+        The archive's size in bytes.
+    follows : sqlite3.Row or str or None
+        What the index says follows the member: its row; ``zeros`` where a
+        complete walk ended there; None where the index does not know.
+
+    Yields
+    ------
+    bytes
+        The member's data in order, in pieces.
+
+    Raises
+    ------
+    _CatError
+        If a read cannot be vouched for.
     """
     hdr, data_offset, size = member["hdr_offset"], member["data_offset"], member["size"]
     if data_offset + size > total:
@@ -2953,6 +4065,23 @@ def _verified_member_bytes(
     tail_cuts = [b for b in bounds if end < b < stop]
 
     def fetch(i: int) -> bytes:
+        """Fetch read ``i`` of the plan afresh, as a new request.
+
+        Parameters
+        ----------
+        i : int
+            The read's index in the plan.
+
+        Returns
+        -------
+        bytes
+            The bytes of that read.
+
+        Raises
+        ------
+        _CatError
+            If fewer bytes come back than the plan asks for.
+        """
         at, length = plan[i]
         concat.drop_cache()  # a re-read must be a new request
         concat.seek(at)
@@ -2962,27 +4091,85 @@ def _verified_member_bytes(
         return buf
 
     def shared(i: int, buf: bytes, side: str) -> bytes:
-        """The bytes read i has in common with read i+1 ("tail") or read i-1 ("head")."""
+        """Return the bytes read i shares with read i+1 ("tail") or read i-1 ("head").
+
+        Parameters
+        ----------
+        i : int
+            The read's index in the plan.
+        buf : bytes
+            The bytes of read ``i``.
+        side : str
+            ``tail`` for the overlap with the next read, ``head`` for the previous.
+
+        Returns
+        -------
+        bytes
+            The overlapping slice of ``buf``.
+        """
         j = i if side == "tail" else i - 1
         lo, hi = plan[j + 1][0], plan[j][0] + plan[j][1]
         return buf[lo - plan[i][0] : hi - plan[i][0]]
 
     def head_ok(i: int, buf: bytes, head: bytes | None) -> bool:
-        """Read i agrees with the read written before it -- or, the first read, with
-        the member's own headers."""
+        """Return whether read i agrees with the read written before it.
+
+        For the first read it is the member's own headers it must agree with.
+
+        Parameters
+        ----------
+        i : int
+            The read's index in the plan.
+        buf : bytes
+            The bytes of read ``i``.
+        head : bytes or None
+            The tail of the read before it, which ``buf``'s head must equal; None
+            for the first read.
+
+        Returns
+        -------
+        bool
+            True if the read agrees.
+        """
         if i == 0:
             return _headers_mismatch(buf[: data_offset - hdr], member) is None
         return shared(i, buf, "head") == head
 
     def trailer(buf: bytes) -> bytes | None:
-        """What follows the member, as the last read has it: the next member's header
-        sequence, or one block. None if the archive ends first."""
+        """Return what follows the member, as the last read has it.
+
+        That is the next member's header sequence, or one block. None if the archive ends first.
+
+        Parameters
+        ----------
+        buf : bytes
+            The bytes of the last read.
+
+        Returns
+        -------
+        bytes or None
+            The bytes after the member's padded data, or None.
+        """
         at = plan[last][0]
         if known:
             return buf[end - at : stop - at]  # short only if the parts shrank: refused
         return buf[end - at : end - at + BLOCK] if stop >= end + BLOCK else None
 
     def trailer_ok(block: bytes | None) -> bool:
+        """Return whether ``block``, what follows the member, is what the index says.
+
+        Parameters
+        ----------
+        block : bytes or None
+            The trailer from the last read; None where the archive ends first, which
+            is accepted.
+
+        Returns
+        -------
+        bool
+            True if the trailer is the next member's header, a terminator or, where
+            the index does not know, a plausible header.
+        """
         if block is None:
             return True
         if successor is not None:
@@ -2998,12 +4185,31 @@ def _verified_member_bytes(
         return True
 
     def settle(i: int, buf: bytes) -> bytes:
-        """Read i as the fetches settle it: the version that leads every other by two.
+        """Return the version of read i that leads every other by two votes.
+
         Normally that is ``buf`` and one fresh fetch agreeing with it. Once fetches have
-        disagreed it takes more, so a wrong body served twice cannot outvote a right one
-        served first. What no vote can catch is a server repeating one wrong answer --
-        ``buf`` and the fetch after it, or three fetches in a row. Versions are counted
-        by digest; only the leader's bytes are kept."""
+        disagreed it takes more, so a wrong body served twice cannot outvote a right one served
+        first. What no vote can catch is a server repeating one wrong answer -- ``buf`` and the
+        fetch after it, or three fetches in a row. Versions are counted by digest; only the
+        leader's bytes are kept.
+
+        Parameters
+        ----------
+        i : int
+            The read's index in the plan.
+        buf : bytes
+            The bytes of the read held so far, which count as one vote.
+
+        Returns
+        -------
+        bytes
+            The winning version of read ``i``.
+
+        Raises
+        ------
+        _CatError
+            If the fetches never settle on one version.
+        """
         votes = Counter({hashlib.sha256(buf).digest(): 1})
         kept = {hashlib.sha256(buf).digest(): buf}
         for _ in range(2 * REREAD_LIMIT):
@@ -3021,6 +4227,20 @@ def _verified_member_bytes(
     written = data_offset
 
     def release(i: int, buf: bytes) -> bytes:
+        """Return the unwritten part of read ``i`` that belongs to the member.
+
+        Parameters
+        ----------
+        i : int
+            The read's index in the plan.
+        buf : bytes
+            The bytes of read ``i``.
+
+        Returns
+        -------
+        bytes
+            The new data bytes, empty if the read adds none.
+        """
         nonlocal written
         at = plan[i][0]
         lo, hi = max(written, at), min(data_offset + size, at + plan[i][1])
@@ -3115,10 +4335,11 @@ def _verified_member_bytes(
 
 
 def cmd_archive_cat(args: SimpleNamespace) -> int:
-    """Extract one member's bytes by path, addressed directly through the index
-    rather than a search: a walk already recorded `data_offset` and `size` for every
-    member, so retrieving one is a direct read, not a scan. Each read is checked against
-    the member's own header, the block that follows it and the read beside it
+    """Extract one member's bytes by path, addressed directly through the index.
+
+    There is no search: a walk already recorded `data_offset` and `size` for every member,
+    so retrieving one is a direct read, not a scan. Each read is checked against the
+    member's own header, the block that follows it and the read beside it
     (`_verified_member_bytes`), because Dropbox has returned 206 bodies that were some
     other range -- and here there is no second walk to catch it.
 
@@ -3127,6 +4348,17 @@ def cmd_archive_cat(args: SimpleNamespace) -> int:
     is the first one that retrieves, so a wrong answer here is a wrong artefact the
     operator goes on to trust -- a database they query, a log they quote -- not just
     a bad report, which is why every ambiguity below is refused rather than guessed.
+
+    Parameters
+    ----------
+    args : SimpleNamespace
+        The command's options, as `_run` gathers them from Typer.
+
+    Returns
+    -------
+    int
+        0 on success, 1 if the archive or the member cannot be read reliably, 2
+        for a usage error or an ambiguous path.
     """
     store = _open_archive_store(args.db)
     if store is None:
@@ -3357,13 +4589,43 @@ def _run(
     body: Callable[[SimpleNamespace], int],
     params: dict[str, object],
 ) -> NoReturn:
+    """Run ``body`` with the options as one arguments object, and exit with its status.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    body : Callable
+        The command's body, taking the options and returning the exit status.
+    params : dict
+        The command function's ``locals()``; ``ctx`` is dropped.
+
+    Raises
+    ------
+    typer.Exit
+        Always, carrying the body's return value.
+    """
     options = {name: value for name, value in params.items() if name != "ctx"}
     verbose = ctx.find_root().params["verbose"]
     raise typer.Exit(body(SimpleNamespace(**options, verbose=verbose)))
 
 
 def arguments(command: Callable[..., object], **given: object) -> SimpleNamespace:
-    """What `command`'s body would get: its defaults, with `given` over them."""
+    """Build what `command`'s body would get: its defaults, with `given` over them.
+
+    Parameters
+    ----------
+    command : Callable
+        A Typer command function, whose parameter defaults are used.
+    **given : object
+        The options that replace those defaults.
+
+    Returns
+    -------
+    SimpleNamespace
+        The options, with ``verbose`` False.
+    """
     defaults = {
         name: parameter.default
         for name, parameter in inspect.signature(command).parameters.items()
@@ -3374,7 +4636,13 @@ def arguments(command: Callable[..., object], **given: object) -> SimpleNamespac
 
 @app.callback()
 def _options(verbose: Annotated[bool, typer.Option("--verbose")] = False) -> None:
-    pass
+    """Take the options every command shares.
+
+    Parameters
+    ----------
+    verbose : bool
+        Log at DEBUG level; `_run` reads it from the root context.
+    """
 
 
 @app.command("init", help="create the database and seed the root shard")
@@ -3387,6 +4655,23 @@ def init_command(
     ] = "dropbox",
     min_free_gb: Annotated[float, typer.Option()] = 30.0,
 ) -> None:
+    """Create the database and seed the root shard.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database to create.
+    root : str
+        The Dropbox folder to audit, for example ``/TeamSpace``.
+    remote : str
+        The rclone remote to borrow credentials from.
+    min_free_gb : float
+        The free disk space the database's folder must have, in units of 1024**3
+        bytes.
+    """
     _run(ctx, cmd_init, locals())
 
 
@@ -3430,11 +4715,51 @@ def run_command(
         str | None, typer.Option(help="lockfile path (default: <db>.lock)")
     ] = None,
 ) -> None:
+    """Crawl until finished; safe to interrupt and re-run.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    workers : int
+        The concurrent listing workers.
+    rps : float
+        The request rate to start at, in requests per second.
+    max_rps : float
+        The ceiling the rate climbs to while Dropbox allows it.
+    split_depth : int
+        The most levels a shard may be split into children.
+    queue_target : int or None
+        The shards to keep pending; None means 2 x workers.
+    max_shards : int
+        The most shards the crawl may create.
+    progress_interval : float
+        The seconds between progress lines.
+    no_index : bool
+        Skip building analysis indexes when the crawl completes.
+    log : str or None
+        A file to also write the log to.
+    lock : str or None
+        The lockfile path; None means the database's path plus ``.lock``.
+    """
     _run(ctx, cmd_run, locals())
 
 
 @app.command("status", help="show progress")
 def status_command(ctx: typer.Context, db: Annotated[str, typer.Option()]) -> None:
+    """Show progress.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    """
     _run(ctx, cmd_status, locals())
 
 
@@ -3448,6 +4773,18 @@ def verify_command(
         str | None, typer.Argument(help="subtree to check (default: the crawl root)")
     ] = None,
 ) -> None:
+    """Re-walk a subtree with rclone and diff it against the database.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    path : str or None
+        The subtree to check; None checks the crawl root.
+    """
     _run(ctx, cmd_verify, locals())
 
 
@@ -3461,6 +4798,28 @@ def report_command(
     archive_db: Annotated[str | None, typer.Option(help=ARCHIVE_DB_HELP)] = None,
     rules: Annotated[str | None, typer.Option(help=RULES_HELP)] = None,
 ) -> None:
+    """Print the storage-reduction report.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    top : int
+        The rows to show in each table.
+    hotspot_min_files : int
+        The fewest files a folder needs to count as a small-file hotspot.
+    hotspot_max_mean : int
+        The largest mean file size, in bytes, of a hotspot.
+    archive_db : str or None
+        The archive index to look inside tarballs with; None judges them by
+        their names.
+    rules : str or None
+        A TOML file of the folder names that mark kinds; None uses the built-in
+        rules.
+    """
     _run(ctx, cmd_report, locals())
 
 
@@ -3470,11 +4829,33 @@ def export_command(
     db: Annotated[str, typer.Option()],
     out: Annotated[str, typer.Option()],
 ) -> None:
+    """Write the reports as CSV.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    out : str
+        The folder to write the CSV files into.
+    """
     _run(ctx, cmd_export, locals())
 
 
 @app.command("index", help="build analysis indexes")
 def index_command(ctx: typer.Context, db: Annotated[str, typer.Option()]) -> None:
+    """Build the analysis indexes.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    """
     _run(ctx, cmd_index, locals())
 
 
@@ -3505,6 +4886,32 @@ def tree_command(
     archive_db: Annotated[str | None, typer.Option(help=ARCHIVE_DB_HELP)] = None,
     rules: Annotated[str | None, typer.Option(help=RULES_HELP)] = None,
 ) -> None:
+    """Write a browsable HTML page of where the space goes.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    out : str
+        The HTML file to write.
+    subtree : str or None
+        The folder to cover; None covers the whole crawl root.
+    min_size : int
+        The size in bytes below which entries are folded. It is parsed from text
+        such as ``100MiB`` and defaults to 1 GiB.
+    max_rows : int
+        The most rows the page may have; ``--min-size`` is doubled until it
+        fits.
+    archive_db : str or None
+        The archive index to look inside tarballs with; None judges them by
+        their names.
+    rules : str or None
+        A TOML file of the folder names that mark kinds; None uses the built-in
+        rules.
+    """
     _run(ctx, cmd_tree, locals())
 
 
@@ -3526,6 +4933,26 @@ def kinds_command(
         typer.Option(help="also write the figures as CSV files into this folder"),
     ] = None,
 ) -> None:
+    """Show what kinds of data the listing holds, loose and in tarballs, and how old.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The audit database.
+    archive_db : str or None
+        The archive index to look inside tarballs with; None judges them by
+        their names.
+    rules : str or None
+        A TOML file of the folder names that mark kinds; None uses the built-in
+        rules.
+    subtree : str or None
+        The folder to cover; None covers the whole crawl root.
+    out : str or None
+        A folder to also write the figures into as CSV files.
+    """
     _run(ctx, cmd_kinds, locals())
 
 
@@ -3542,6 +4969,24 @@ def archive_register_command(
     ] = None,
     remote: Annotated[str, typer.Option()] = "dropbox",
 ) -> None:
+    """Record an archive, its parts and its segments.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    name : str
+        The archive's own name, for example ``big.tar``.
+    folder : str or None
+        The Dropbox folder holding the parts.
+    local_dir : str or None
+        The local directory holding the parts.
+    remote : str
+        The rclone remote to borrow credentials from.
+    """
     if (folder is None) == (local_dir is None):
         raise typer.BadParameter("give exactly one of --folder and --local-dir")
     _run(ctx, cmd_archive_register, locals())
@@ -3574,6 +5019,36 @@ def archive_index_command(
     ] = False,
     lock: Annotated[str | None, typer.Option()] = None,
 ) -> None:
+    """Walk the header chains; safe to interrupt and re-run.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    archive : str
+        The registered archive's name.
+    remote : str
+        The rclone remote to borrow credentials from.
+    workers : int
+        The chains to walk at once.
+    rps : float
+        The request rate to start at, in requests per second.
+    window_min : int
+        The smallest read window, in bytes.
+    window_max : int
+        The largest read window, in bytes.
+    batch : int
+        The members to hold before each commit.
+    max_batches : int
+        The most batches to write; 0 means no limit.
+    recheck : bool
+        Ask a corrupt, truncated or unsupported verdict again.
+    lock : str or None
+        The lockfile path; None means the database's path plus ``.lock``.
+    """
     _run(ctx, cmd_archive_index, locals())
 
 
@@ -3610,6 +5085,38 @@ def archive_run_command(
     batch: Annotated[int, typer.Option()] = 2000,
     lock: Annotated[str | None, typer.Option()] = None,
 ) -> None:
+    """Walk every archive still to be walked, many at once; safe to re-run.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    audit_db : str
+        The audit database whose tar archives to walk.
+    remote : str
+        The rclone remote to borrow credentials from.
+    streams : int
+        The streams to start at.
+    max_streams : int
+        The most streams to climb to while Dropbox allows.
+    workers : int
+        The most chains one archive may have.
+    limit : int
+        The most archives to start; 0 means no limit.
+    dry_run : bool
+        Print what would be walked, without contacting Dropbox.
+    window_min : int
+        The smallest read window, in bytes.
+    window_max : int
+        The largest read window, in bytes.
+    batch : int
+        The members to hold before each commit.
+    lock : str or None
+        The lockfile path; None means the database's path plus ``.lock``.
+    """
     _run(ctx, cmd_archive_run, {**locals(), "max_batches": 0})
 
 
@@ -3634,6 +5141,22 @@ def archive_import_command(
         typer.Option(help="the lock the source's run holds, if not SOURCE.lock"),
     ] = None,
 ) -> None:
+    """Copy every archive of another archive database into this one.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    source : str
+        The archive database to copy from; it is left as it is.
+    lock : str or None
+        The lock the database's run holds, if not ``DB.lock``.
+    from_lock : str or None
+        The lock the source's run holds, if not ``SOURCE.lock``.
+    """
     _run(ctx, cmd_archive_import, locals())
 
 
@@ -3650,6 +5173,22 @@ def archive_forget_command(
         typer.Option(help="the lock the database's run holds, if not DB.lock"),
     ] = None,
 ) -> None:
+    """Drop an archive and all its rows, so the next run walks it afresh.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    archive : str
+        The registered archive's name.
+    folder : str
+        The Dropbox folder the archive was registered from.
+    lock : str or None
+        The lock the database's run holds, if not ``DB.lock``.
+    """
     _run(ctx, cmd_archive_forget, locals())
 
 
@@ -3659,6 +5198,18 @@ def archive_status_command(
     db: Annotated[str, typer.Option()],
     archive: Annotated[str | None, typer.Option()] = None,
 ) -> None:
+    """Show archive indexing progress.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    archive : str or None
+        The archive to show in full; None shows a summary of all.
+    """
     _run(ctx, cmd_archive_status, locals())
 
 
@@ -3669,6 +5220,20 @@ def archive_report_command(
     archive: Annotated[str, typer.Option()],
     top: Annotated[int, typer.Option()] = 25,
 ) -> None:
+    """Print rollups over one archive's manifest.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    archive : str
+        The registered archive's name.
+    top : int
+        The rows to show in each table.
+    """
     _run(ctx, cmd_archive_report, locals())
 
 
@@ -3679,6 +5244,20 @@ def archive_export_command(
     archive: Annotated[str, typer.Option()],
     out: Annotated[str, typer.Option()],
 ) -> None:
+    """Write one archive's manifest and rollups as CSV.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    archive : str
+        The registered archive's name.
+    out : str
+        The folder to write the CSV files into.
+    """
     _run(ctx, cmd_archive_export, locals())
 
 
@@ -3702,10 +5281,42 @@ def archive_cat_command(
     ] = None,
     remote: Annotated[str, typer.Option()] = "dropbox",
 ) -> None:
+    """Extract one member's bytes by path, in the fewest range reads.
+
+    Parameters
+    ----------
+    ctx : typer.Context
+        The Typer context; `_run` reads the root command's ``--verbose`` from
+        it.
+    db : str
+        The archive database.
+    archive : str
+        The registered archive's name.
+    member : str
+        The member's path inside the archive.
+    offset : int or None
+        The ``hdr_offset`` that picks one member when the path matches several.
+    out : str or None
+        A file to write to instead of stdout.
+    remote : str
+        The rclone remote to borrow credentials from.
+    """
     _run(ctx, cmd_archive_cat, locals())
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command line and return its exit status.
+
+    Parameters
+    ----------
+    argv : list of str or None
+        The arguments after the program name; None reads `sys.argv`.
+
+    Returns
+    -------
+    int
+        The exit status: the command's, or 1 for an error message from Typer.
+    """
     try:
         typer.main.get_command(app).main(args=argv, prog_name="dbaudit")
     except SystemExit as stop:
