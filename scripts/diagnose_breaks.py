@@ -20,6 +20,7 @@ whoever owns the data.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sqlite3
 import struct
@@ -74,7 +75,9 @@ def analyse(buf: bytes, base: int) -> dict:
                 )
         i = buf.find(b"ustar", i + 1)
     vals = struct.unpack(f"<{len(buf) // 4}f", buf[: len(buf) // 4 * 4])
-    plausible = sum(1 for v in vals if v == v and (v == 0.0 or 1e-30 < abs(v) < 1e30))
+    plausible = sum(
+        1 for v in vals if not math.isnan(v) and (v == 0.0 or 1e-30 < abs(v) < 1e30)
+    )
     return {
         "aligned": aligned,
         "unaligned": unaligned,
@@ -100,12 +103,20 @@ def phases(buf: bytes) -> str:
         if n < 16:
             continue
         v = struct.unpack(f"<{n}f", b[: n * 4])
-        good = [x for x in v if x == x and (x == 0.0 or 1e-8 < abs(x) < 1e4)]
+        good = [x for x in v if not math.isnan(x) and (x == 0.0 or 1e-8 < abs(x) < 1e4)]
         out.append(f"p{p}={len(good) * 100 // n}%")
     return " ".join(out)
 
 
-def scan(concats, x: int, cap: int, total: int, chunk: int, pool, label: str) -> dict:
+def scan(
+    concats: list[ConcatFile],
+    x: int,
+    cap: int,
+    total: int,
+    chunk: int,
+    pool: ThreadPoolExecutor,
+    label: str,
+) -> dict:
     """Read forward from `x` until an aligned header turns up or `cap` bytes are read.
 
     Chunks are fetched `len(concats)` at a time and analysed in order, so the answer is
@@ -126,7 +137,7 @@ def scan(concats, x: int, cap: int, total: int, chunk: int, pool, label: str) ->
         if not batch:
             break
 
-        def fetch(job):
+        def fetch(job: tuple[int, int, int]) -> tuple[int, bytes]:
             k, at, n = job
             concats[k].seek(at)
             return at, concats[k].read(n)
@@ -154,6 +165,7 @@ def scan(concats, x: int, cap: int, total: int, chunk: int, pool, label: str) ->
 
 
 def main() -> int:
+    """Run the diagnosis the command line asks for; return the exit status."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="archives.db")
     ap.add_argument("--archive", default="v01p0_incomplete.tar")
@@ -237,12 +249,12 @@ def main() -> int:
     t0 = time.time()
 
     if args.breaks:
-        BREAKS = [
+        breaks = [
             (f"break {i + 1}", int(b.split(":")[0]), int(b.split(":")[1]))
             for i, b in enumerate(args.breaks)
         ]
     else:
-        BREAKS = [
+        breaks = [
             ("break 1", 307_056_607_232, 322_134_851_072),
             ("break 2", 715_934_138_368, 966_566_893_056),
         ]
@@ -251,7 +263,7 @@ def main() -> int:
         "\n=== 1. are the break bytes stable? (re-read what the walk saw) ===",
         flush=True,
     )
-    for tag, x, _ in BREAKS:
+    for tag, x, _ in breaks:
         concats[0].seek(x)
         got = concats[0].read(1024).hex()
         was = (
@@ -312,7 +324,7 @@ def main() -> int:
     print("  (a healthy member should be plausible at phase 0)", flush=True)
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for tag, x, alive in BREAKS:
+        for tag, x, alive in breaks:
             gap = alive - x
             cap = min(int(args.cap_gib * 2**30), gap)
             print(
@@ -393,8 +405,8 @@ def main() -> int:
                 c = tls.concat = ConcatFile(archive_set, r, window_min=1, window_max=1)
             return c
 
-        def check(job):
-            k, m = job
+        def check(job: tuple[int, sqlite3.Row]) -> tuple[sqlite3.Row, str | None]:
+            _k, m = job
             c = mine()
             c.seek(m["hdr_offset"])
             info = header(c.read(BLOCK))
@@ -412,7 +424,7 @@ def main() -> int:
             print("  -> no read returned wrong bytes in this sample")
 
     if args.walk_gaps:
-        for tag, x, alive in BREAKS:
+        for tag, x, alive in breaks:
             print(
                 f"\n=== 4. {tag}: walking the hole [{x:,} .. {alive:,}) "
                 f"= {(alive - x) / 2**30:.2f} GiB ===",
@@ -436,7 +448,10 @@ def main() -> int:
                 readers.append(fresh_reader)
                 try:
                     res = walk(
-                        fresh, at, lambda ms, nxt: members.extend(ms), stop_at=alive
+                        fresh,
+                        at,
+                        lambda ms, nxt, members=members: members.extend(ms),
+                        stop_at=alive,
                     )
                 except UnsettledReadError as exc:
                     # The walker re-reads for itself now, and gives up only when reads

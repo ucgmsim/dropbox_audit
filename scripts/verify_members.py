@@ -28,7 +28,7 @@ for _root in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.ge
 
 from dbaudit.archive.parts import ArchiveSet, Part
 from dbaudit.archive.reader import ConcatFile, DropboxRangeReader, LocalRangeReader
-from dbaudit.archive.tarwalk import BLOCK, read_member
+from dbaudit.archive.tarwalk import BLOCK, Member, read_member
 from dbaudit.auth import TokenProvider
 from dbaudit.limiter import AdaptiveLimiter
 
@@ -48,25 +48,25 @@ FIELDS = (
 WINDOW = 4 << 10  # a member's whole header sequence, with room to spare
 
 
-def _connect(path):
+def _connect(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     return con
 
 
-def _row(item):
+def _row(item: sqlite3.Row | Member) -> tuple:
     if isinstance(item, sqlite3.Row):
         return tuple(item[f] for f in FIELDS)
     return tuple(getattr(item, f) for f in FIELDS)
 
 
-def _path(item):
+def _path(item: sqlite3.Row | Member) -> str:
     """The member's path, from a stored row or a freshly read Member."""
     field = item.__getitem__ if isinstance(item, sqlite3.Row) else item.__getattribute__
     return f"{field('dir')}/{field('name')}" if field("dir") else field("name")
 
 
-def _long_fields_agree(concat, member):
+def _long_fields_agree(concat: ConcatFile, member: Member) -> bool:
     """The fresh read's long name and link target begin as the header after them says."""
     if member.data_offset - member.hdr_offset <= BLOCK or member.type == "S":
         return True
@@ -81,6 +81,7 @@ def _long_fields_agree(concat, member):
 
 
 def main() -> int:
+    """Run the check the command line asks for; return the exit status."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--db", required=True)
     ap.add_argument("--archive", required=True)
@@ -169,7 +170,7 @@ def main() -> int:
     )
     concat = ConcatFile(archive_set, reader, window_min=WINDOW, window_max=WINDOW)
 
-    def fresh(offset):
+    def fresh(offset: int) -> Member | None:
         concat.drop_cache()  # every read is a request of its own
         return read_member(concat, offset)
 

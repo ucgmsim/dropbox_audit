@@ -50,6 +50,7 @@ def windows(data_offset: int, size: int, n: int) -> list[tuple[int, int]]:
 
 
 def main() -> int:
+    """Run the comparison the command line asks for; return the exit status."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="archives2.db")
     ap.add_argument("--archive", default="v01p0_incomplete.tar")
@@ -133,7 +134,7 @@ def main() -> int:
             c = tls.concat = ConcatFile(archive_set, r, window_min=1, window_max=1)
         return c
 
-    def fetch(job):
+    def fetch(job: tuple[int, int]) -> str:
         at, length = job
         c = mine()
         c.seek(at)
