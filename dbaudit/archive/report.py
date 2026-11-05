@@ -42,7 +42,8 @@ from __future__ import annotations
 import csv
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from sqlite3 import Row
+from typing import TYPE_CHECKING, TypedDict
 
 from dbaudit.store import _extension
 
@@ -58,6 +59,51 @@ ROOT_LABEL = "(root)"
 #: Matches `dbaudit.report.extension_profile`'s convention for a file with no
 #: (or too-long a) extension, so the two reports agree on how to spell "none".
 NO_EXTENSION = "(none)"
+
+
+_Totals = dict[str, int]
+
+
+class ArchiveSummary(TypedDict):
+    """What `summary` returns: one archive's contents, rolled up.
+
+    Attributes
+    ----------
+    state : str
+        The archive's state.
+    n_parts : int
+        How many parts it has.
+    n_members : int
+        Members read.
+    member_bytes : int
+        Their sizes added up, in bytes.
+    by_top_dir : list[tuple[str, dict[str, int]]]
+        Count and bytes per first path component, the most bytes first.
+    by_depth : dict[int, list[tuple[str, dict[str, int]]]]
+        The same for the first 1, 2 and 3 components.
+    by_extension : list[tuple[str, dict[str, int]]]
+        Count and bytes per extension, the most bytes first.
+    largest : list[sqlite3.Row]
+        The largest members (``dir``, ``name``, ``size``), the biggest first.
+    mtime_span : tuple[str, str] | None
+        Earliest and latest modification dates, ``YYYY-MM-DD`` in UTC; None with no dated member.
+    owners : list[tuple[tuple[str, str], dict[str, int]]]
+        Count and bytes per ``(uname, gname)``, the most members first.
+    types : list[tuple[str, dict[str, int]]]
+        Count and bytes per tar type flag, the most members first.
+    """
+
+    state: str
+    n_parts: int
+    n_members: int
+    member_bytes: int
+    by_top_dir: list[tuple[str, _Totals]]
+    by_depth: dict[int, list[tuple[str, _Totals]]]
+    by_extension: list[tuple[str, _Totals]]
+    largest: list[Row]
+    mtime_span: tuple[str, str] | None
+    owners: list[tuple[tuple[str, str], _Totals]]
+    types: list[tuple[str, _Totals]]
 
 
 def _utc(ts: int) -> datetime:
@@ -195,7 +241,7 @@ def _by_count_desc[K: (str, tuple[str, str])](
     return sorted(table.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
 
 
-def summary(store: ArchiveStore, archive_id: int, top: int = 25) -> dict[str, Any]:
+def summary(store: ArchiveStore, archive_id: int, top: int = 25) -> ArchiveSummary:
     """Everything a human needs to decide what an archive is, in one dict.
 
     - `n_members`, `member_bytes` -- recomputed from the member rows read here
@@ -249,11 +295,9 @@ def summary(store: ArchiveStore, archive_id: int, top: int = 25) -> dict[str, An
 
     Returns
     -------
-    dict[str, Any]
-        The sections described above, keyed ``state``, ``n_parts``, ``n_members``,
-        ``member_bytes``, ``by_top_dir``, ``by_depth``, ``by_extension``, ``largest``,
-        ``mtime_span``, ``owners`` and ``types``. Sizes are in bytes; modification times
-        are not returned except as the ``mtime_span`` dates.
+    ArchiveSummary
+        The sections described above. Sizes are in bytes; modification times are not
+        returned except as the ``mtime_span`` dates.
     """
     top = max(int(top), 0)
 

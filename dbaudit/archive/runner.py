@@ -21,8 +21,8 @@ import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Protocol
 
-from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.units import human_bytes, human_duration
 
 log = logging.getLogger("dbaudit")
@@ -31,6 +31,35 @@ log = logging.getLogger("dbaudit")
 #: the pace. Gone, refused and done archives were not walked here; stopped and error ones
 #: are left for the next run.
 WALKED = frozenset({"complete", "truncated", "corrupt", "unsupported", "stale"})
+
+
+class LimiterView(Protocol):
+    """What the scheduler reads of the limiter every walk shares.
+
+    `AdaptiveLimiter` satisfies it; so does any object with these two attributes.
+    """
+
+    @property
+    def concurrency(self) -> int:
+        """The number of requests allowed in flight now.
+
+        Returns
+        -------
+        int
+            The current limit.
+        """
+        ...
+
+    @property
+    def granted_total(self) -> int:
+        """Every request let through so far.
+
+        Returns
+        -------
+        int
+            The count.
+        """
+        ...
 
 
 @dataclass
@@ -130,7 +159,7 @@ class Runner:
     ----------
     walk : Callable[[Job], Done]
         Walks one archive; called on its own thread, once per start.
-    limiter : AdaptiveLimiter
+    limiter : LimiterView
         The limiter every walk shares; read for its concurrency and its grants.
     stop : threading.Event
         Set to stop starting archives; the run then waits for those in flight.
@@ -151,7 +180,7 @@ class Runner:
     def __init__(  # noqa: D107
         self,
         walk: Callable[[Job], Done],
-        limiter: AdaptiveLimiter,
+        limiter: LimiterView,
         stop: threading.Event,
         *,
         margin: int = 2,

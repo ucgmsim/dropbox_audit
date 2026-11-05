@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from dbaudit.archive.parts import ArchiveSet, Part
 
@@ -62,6 +62,51 @@ def _as_int(value: object) -> int:
     if not isinstance(value, int):
         raise ValueError(f"member size is not an int: {value!r}")  # noqa: TRY004  # ValueError is the raised type; TypeError would change behaviour
     return value
+
+
+class ArchiveStats(TypedDict):
+    """One archive's progress, as `ArchiveStore.stats` reports it.
+
+    Attributes
+    ----------
+    state : str
+        The archive's state.
+    total_size : int
+        The archive's size, in bytes.
+    n_members : int
+        Members recorded.
+    member_bytes : int
+        Their sizes added up, in bytes.
+    requests : int
+        Reads made.
+    bytes_fetched : int
+        Bytes those reads fetched.
+    covered : int
+        Bytes whose place in the chain is settled.
+    confirmed : int
+        The confirmed frontier, in bytes.
+    started_at : float | None
+        Epoch seconds the first walk began; None before one did.
+    updated_at : float | None
+        Epoch seconds of the last batch; None before one landed.
+    run_started_at : float | None
+        Epoch seconds the latest run began; None before any run.
+    run_start_covered : int | None
+        Bytes covered when that run began; None before any run.
+    """
+
+    state: str
+    total_size: int
+    n_members: int
+    member_bytes: int
+    requests: int
+    bytes_fetched: int
+    covered: int
+    confirmed: int
+    started_at: float | None
+    updated_at: float | None
+    run_started_at: float | None
+    run_start_covered: int | None
 
 
 class ArchiveStore:
@@ -621,7 +666,7 @@ class ArchiveStore:
             conn.execute("ROLLBACK")
             raise
 
-    def stats(self, archive_id: int) -> dict[str, Any]:
+    def stats(self, archive_id: int) -> ArchiveStats:
         """A snapshot for `status`.
 
         `n_members`/`member_bytes` are recomputed from `members`, never carried as
@@ -638,11 +683,9 @@ class ArchiveStore:
 
         Returns
         -------
-        dict[str, Any]
-            ``state``, ``total_size``, ``n_members``, ``member_bytes``, ``requests``,
-            ``bytes_fetched``, ``covered`` and ``confirmed`` (bytes), ``started_at`` and
-            ``updated_at`` (epoch seconds, None if unset), and ``run_started_at`` (epoch
-            seconds) with ``run_start_covered`` (bytes), both None before any run began.
+        ArchiveStats
+            The archive's state, sizes in bytes, and times in epoch seconds; the run
+            fields are None before any run began.
         """
         conn = self.connect()
         row = conn.execute(
