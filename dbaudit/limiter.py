@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 
 log = logging.getLogger("dbaudit.limiter")
@@ -45,8 +46,8 @@ class AdaptiveLimiter:
         min_concurrency: int = 1,
         recover_after: float = 300.0,
         burst: float = 1.0,
-        clock=time.monotonic,
-        sleep=time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
         max_rps: float | None = None,
         start_concurrency: int | None = None,
     ):

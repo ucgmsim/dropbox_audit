@@ -43,7 +43,7 @@ class Listing:
     other: tuple  # (files, bytes) named like `x.tar.<something>` that are neither
 
 
-def find_candidates(audit_db) -> Listing:
+def find_candidates(audit_db: str | Path) -> Listing:
     """Every candidate in the audit database at ``audit_db``, largest first."""
     # As a URI, so that a ?, # or % in the path is escaped rather than read as syntax.
     audit = sqlite3.connect(Path(audit_db).resolve().as_uri() + "?mode=ro", uri=True)
@@ -53,7 +53,7 @@ def find_candidates(audit_db) -> Listing:
         audit.close()
 
 
-def _find(audit) -> Listing:
+def _find(audit: sqlite3.Connection) -> Listing:
     found, compressed, other = {}, [0, 0], [0, 0]
     for dir_id, folder, name, size in audit.execute(
         "SELECT f.dir_id, d.path_display, f.name, f.size FROM files f "
@@ -89,7 +89,7 @@ def _find(audit) -> Listing:
                 (dir_id, len(base), base),
             )
         ]
-        total = sum(e["size"] for e in entries)
+        total = sum(int(e["size"]) for e in entries)
         # One part per folder, each folder named after its part: `register` reads one
         # folder, so the first part alone would pass as a whole archive and be walked to
         # the end of that part only to be called truncated.

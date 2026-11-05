@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
+
+from .store import Store
 
 VERIFY_CHECKERS = 4
 
@@ -60,7 +63,10 @@ def _run_rclone(remote: str, path: str) -> str:
 
 
 def verify_subtree(
-    store, path: str, rclone_fn=None, remote: str | None = None
+    store: Store,
+    path: str,
+    rclone_fn: Callable[[str], str] | None = None,
+    remote: str | None = None,
 ) -> VerifyResult:
     path = "/" + path.strip("/")
     remote = remote or store.get_meta("remote", "dropbox")

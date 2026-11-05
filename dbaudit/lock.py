@@ -16,7 +16,7 @@ class LockHeldError(RuntimeError):
 
 
 class InstanceLock:
-    def __init__(self, path):
+    def __init__(self, path: str | os.PathLike[str]):
         self.path = str(path)
         self._fh = None
 

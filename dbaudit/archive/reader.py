@@ -34,8 +34,13 @@ import io
 import json
 import secrets
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
+
+from ..api import HttpResponse, HttpSession
+from ..limiter import AdaptiveLimiter
+from .parts import ArchiveSet, Part
 
 WINDOW_MIN = 1 << 16
 WINDOW_MAX = 16 << 20
@@ -77,6 +82,16 @@ class ShortReadError(ReaderError):
     """Fewer bytes came back than were requested."""
 
 
+class TokenSource(Protocol):
+    """What the range reader needs from a token provider."""
+
+    def access_token(self) -> str: ...
+
+    def invalidate(self) -> None: ...
+
+    def root_namespace_id(self) -> str: ...
+
+
 class RangeReader(Protocol):
     """The seam that keeps the walker testable without a network."""
 
@@ -89,7 +104,7 @@ class RangeReader(Protocol):
 class LocalRangeReader:
     """Parts as files in a directory: used by the tests, and for local archives."""
 
-    def __init__(self, directory, archive):
+    def __init__(self, directory: str | Path, archive: ArchiveSet):
         self.directory = Path(directory)
         self.archive = archive
         self.requests = 0
@@ -114,8 +129,8 @@ class ConcatFile:
 
     def __init__(
         self,
-        archive,
-        reader,
+        archive: ArchiveSet,
+        reader: RangeReader,
         window_min: int = WINDOW_MIN,
         window_max: int = WINDOW_MAX,
         shape: int | None = None,
@@ -243,13 +258,13 @@ class DropboxRangeReader:
 
     def __init__(
         self,
-        archive,
-        tokens,
-        limiter,
-        session=None,
+        archive: ArchiveSet,
+        tokens: TokenSource,
+        limiter: AdaptiveLimiter,
+        session: HttpSession | None = None,
         retries: int = 5,
         timeout: int = DEFAULT_TIMEOUT,
-        sleep=None,
+        sleep: Callable[[float], None] | None = None,
     ):
         self.archive = archive
         self.tokens = tokens
@@ -259,7 +274,7 @@ class DropboxRangeReader:
         self.sleep = sleep or time.sleep
         #: Set by a walk to its stop: a read that Dropbox keeps answering 429 gives way to
         #: it between tries. A 429 costs no try, so nothing else would end such a read.
-        self.should_stop = None
+        self.should_stop: Callable[[], bool] | None = None
         self.requests = 0
         self.bytes_fetched = 0
         if session is None:
@@ -339,7 +354,9 @@ class DropboxRangeReader:
             )
         raise last or ReaderError(f"{part.name}: no attempts made")
 
-    def _validate(self, part, response, offset, length) -> bytes:
+    def _validate(
+        self, part: Part, response: HttpResponse, offset: int, length: int
+    ) -> bytes:
         wanted = f"bytes {offset}-{offset + length - 1}/"
         got = response.headers.get("Content-Range", "")
         if not got.startswith(wanted):
@@ -361,7 +378,7 @@ class DropboxRangeReader:
         return data
 
 
-def _retry_after(response) -> float:
+def _retry_after(response: HttpResponse) -> float:
     body = {}
     try:
         body = response.json()

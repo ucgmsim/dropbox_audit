@@ -18,8 +18,9 @@ knows how to act on; no retrying or sleeping happens at this layer.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 API_BASE = "https://api.dropboxapi.com/2"
 PAGE_LIMIT = 2000
@@ -65,6 +66,40 @@ class AuthExpiredError(ApiError):
     """The access token expired mid-crawl; refresh and retry."""
 
 
+class HttpResponse(Protocol):
+    """The part of an HTTP response the clients read."""
+
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+    @property
+    def content(self) -> bytes: ...
+
+    def json(self) -> Any: ...
+
+
+class HttpSession(Protocol):
+    """The part of ``requests.Session`` the clients use: POST with a timeout."""
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout: float,
+        data: str | None = None,
+    ) -> HttpResponse: ...
+
+
+class HeaderSource(Protocol):
+    """Whatever supplies the headers of an API request, such as a token provider."""
+
+    def headers(self) -> dict[str, str]: ...
+
+
 class Lister(Protocol):
     """The seam that keeps the crawler testable without a network."""
 
@@ -73,7 +108,7 @@ class Lister(Protocol):
     def continue_(self, cursor: str) -> Page: ...
 
 
-def _classify(status: int, body: dict, headers: dict) -> ApiError:
+def _classify(status: int, body: dict, headers: Mapping[str, str]) -> ApiError:
     if status == 429:
         retry_after = None
         error = body.get("error") if isinstance(body, dict) else None
@@ -81,13 +116,13 @@ def _classify(status: int, body: dict, headers: dict) -> ApiError:
             retry_after = error.get("retry_after")
         if retry_after is None:
             retry_after = headers.get("Retry-After")
-        try:
-            retry_after = float(retry_after)
-        except (TypeError, ValueError):
-            retry_after = DEFAULT_RETRY_AFTER
-        return RateLimitedError(
-            f"rate limited, retry after {retry_after}s", retry_after
-        )
+        seconds = DEFAULT_RETRY_AFTER
+        if retry_after is not None:
+            try:
+                seconds = float(retry_after)
+            except (TypeError, ValueError):
+                pass
+        return RateLimitedError(f"rate limited, retry after {seconds}s", seconds)
 
     if status == 401:
         return AuthExpiredError(f"401 from Dropbox: {str(body)[:200]}")
@@ -97,7 +132,7 @@ def _classify(status: int, body: dict, headers: dict) -> ApiError:
         tag = error.get(".tag") if isinstance(error, dict) else None
         if tag == "reset":
             return CursorResetError("cursor invalidated by Dropbox; re-listing subtree")
-        if tag == "path":
+        if tag == "path" and isinstance(error, dict):
             path_tag = (error.get("path") or {}).get(".tag")
             if path_tag in ("not_found", "not_folder", "restricted_content"):
                 return PathNotFoundError(f"path unusable: {path_tag}")
@@ -112,7 +147,9 @@ def _classify(status: int, body: dict, headers: dict) -> ApiError:
 class HttpLister:
     """Real :class:`Lister`. Reuses one HTTP session so TLS handshakes are amortised."""
 
-    def __init__(self, token_provider, session=None):
+    def __init__(
+        self, token_provider: HeaderSource, session: HttpSession | None = None
+    ):
         self.tokens = token_provider
         if session is None:
             import requests

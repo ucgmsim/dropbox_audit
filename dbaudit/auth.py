@@ -14,6 +14,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 
 API_BASE = "https://api.dropboxapi.com/2"
 _FRACTIONAL_SECONDS = re.compile(r"\.(\d+)")
@@ -101,10 +102,10 @@ class TokenProvider:
         refresh_margin: int = 600,
         refresh_cooldown: float = 60.0,
         *,
-        _dump_fn=None,
-        _refresh_fn=None,
-        _account_fn=None,
-        _clock=None,
+        _dump_fn: Callable[[], str] | None = None,
+        _refresh_fn: Callable[[], None] | None = None,
+        _account_fn: Callable[[str], dict] | None = None,
+        _clock: Callable[[], float] | None = None,
     ):
         self.remote = remote
         self.refresh_margin = refresh_margin
