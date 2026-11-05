@@ -17,6 +17,7 @@ import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import overload
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -278,6 +279,12 @@ class Store:
             .fetchone()
         )
         return row is not None
+
+    @overload
+    def get_meta(self, key: str, default: None = None) -> str | None: ...
+
+    @overload
+    def get_meta(self, key: str, default: str) -> str: ...
 
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         """Read a metadata value.

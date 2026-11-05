@@ -192,7 +192,6 @@ def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
 
 def _crawl_remote(store: Store) -> str:
     remote = store.get_meta("remote", "dropbox")
-    assert remote is not None  # the default is a str, so None cannot come back
     return remote
 
 
