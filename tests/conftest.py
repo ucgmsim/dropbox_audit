@@ -46,6 +46,6 @@ def _shapes(request: pytest.FixtureRequest):
 
 @pytest.fixture(autouse=True)
 def _close_stores():
-    """Close the stores the test handed to `tests.stores.closing`, when it ends."""
+    """Close the stores the test handed to `tests.stores.close_after_test`."""
     yield
     stores.close_opened()

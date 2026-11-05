@@ -10,7 +10,7 @@ import pytest
 from dbaudit.archive.parts import Part
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.archive.tarwalk import Member, WalkResult
-from tests.stores import closing
+from tests.stores import close_after_test
 
 
 def parts(count: int = 2, content: str = "ab"):
@@ -46,7 +46,7 @@ def member(offset: int, name: str = "f.bin", size: int = 10):
 
 
 def new_store(tmp_path: Path):
-    store = closing(ArchiveStore(tmp_path / "archives.db"))
+    store = close_after_test(ArchiveStore(tmp_path / "archives.db"))
     store.init_schema()
     return store
 

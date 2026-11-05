@@ -15,7 +15,7 @@ from dbaudit.cli import main
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import World, build_tar, members, write_parts
-from tests.stores import closing
+from tests.stores import close_after_test
 
 
 def three(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -56,7 +56,7 @@ def table_names(db: str):
 def manifest(db: str):
     """Each archive's row, parts, segments, members and events -- all but the import's
     own event -- keyed by its content rather than its id."""
-    conn = closing(ArchiveStore(db)).connect()
+    conn = close_after_test(ArchiveStore(db)).connect()
     skip, out = {"archive_id", "id", "owner"}, {}
     for archive in conn.execute("SELECT * FROM archives"):
         rows = {}
@@ -124,7 +124,7 @@ def test_import_copies_every_archive_under_new_ids_with_everything_recorded(
     copied = manifest(target)
     for set_hash, recorded in manifest(source).items():
         assert copied[set_hash] == recorded
-    conn = closing(ArchiveStore(target)).connect()
+    conn = close_after_test(ArchiveStore(target)).connect()
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM segments WHERE owner IS NOT NULL"
@@ -188,7 +188,7 @@ def test_import_replaces_an_archive_of_the_same_content_and_everything_it_held(
     assert db_import(target, source) == 0
     row = archives(target)["/R/b"]
     assert (row["state"], row["n_members"]) == ("complete", 30)
-    conn = closing(ArchiveStore(target)).connect()
+    conn = close_after_test(ArchiveStore(target)).connect()
 
     def count(sql: str, *args: object):
         return conn.execute(sql, args).fetchone()[0]
@@ -254,7 +254,7 @@ def test_an_imported_mid_walk_archive_finishes_with_the_members_a_fresh_walk_rec
     assert run(fresh, audit) == 0
 
     def members_of(db: str):
-        conn = closing(ArchiveStore(db)).connect()
+        conn = close_after_test(ArchiveStore(db)).connect()
         return {
             r["set_hash"]: [
                 tuple(m)
@@ -347,7 +347,7 @@ def test_forget_drops_an_archive_so_the_next_run_walks_it_from_scratch(
 
     assert forget(db, "one.tar", "/R/a") == 0
     assert "forgot archive" in capsys.readouterr().out
-    conn = closing(ArchiveStore(db)).connect()
+    conn = close_after_test(ArchiveStore(db)).connect()
     for table in ("parts", "segments", "members", "events"):
         assert (
             conn.execute(
@@ -429,7 +429,7 @@ def test_import_leaves_only_the_latest_content_of_one_name_in_one_folder(
         )
     target, source = (first, second) if imported == "newer" else (second, first)
     assert db_import(target, source) == 0
-    older, latest = closing(ArchiveStore(target)).query(
+    older, latest = close_after_test(ArchiveStore(target)).query(
         "SELECT id, state, detail FROM archives ORDER BY created_at"
     )
     assert (older["state"], older["detail"]) == (
@@ -506,7 +506,7 @@ def test_import_keeps_the_live_content_of_a_folder_that_went_back(tmp_path: Path
     assert db_import(fresh, db) == 0
     states = {
         row["n_parts"]: row["state"]
-        for row in closing(ArchiveStore(fresh)).query(
+        for row in close_after_test(ArchiveStore(fresh)).query(
             "SELECT n_parts, state FROM archives"
         )
     }

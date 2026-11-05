@@ -12,7 +12,7 @@ from dbaudit import kinds, report, tree
 from dbaudit.store import Store
 from tests.listing_fakes import archive
 from tests.listing_fakes import archive_index as index_file
-from tests.stores import closing
+from tests.stores import close_after_test
 
 LISTED = calendar.timegm((2026, 10, 1, 0, 0, 0, 0, 0, 0))
 
@@ -48,7 +48,7 @@ def folder(path: str) -> dict:
 
 
 def listing(tmp_path: Path, *entries):
-    store = closing(Store(tmp_path / "audit.db"))
+    store = close_after_test(Store(tmp_path / "audit.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     shard = store.add_shard("/R", 1)
@@ -551,7 +551,7 @@ def test_a_page_of_empty_files_divides_by_nothing(tmp_path: Path):
 
 
 def test_an_empty_listing_is_a_page_of_zeros(tmp_path: Path):
-    store = closing(Store(tmp_path / "audit.db"))
+    store = close_after_test(Store(tmp_path / "audit.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     outline = Outline(page_text(store))
@@ -564,7 +564,7 @@ def test_a_crawl_writing_while_the_page_is_built_cannot_reach_it(
     """Every query reads one snapshot. Read separately, a big file committed after
     measuring lands in a folder measured as small, which has no row to hold it."""
     store = listing(tmp_path, file("/R/a/x", 5), file("/R/b/y", 50))
-    crawler = closing(Store(tmp_path / "audit.db"))
+    crawler = close_after_test(Store(tmp_path / "audit.db"))
     measure = tree.measure
 
     def measure_then_crawl(*args):
@@ -672,7 +672,7 @@ def test_the_command_will_not_overwrite_the_database_or_write_nowhere(
     assert main(["tree", "--db", db, "--out", str(tmp_path / "no" / "t.html")]) == 2
     assert "is not a folder" in capsys.readouterr().err
     # the database is untouched
-    assert tree.find_dir(closing(Store(db)), "/R/big") is not None
+    assert tree.find_dir(close_after_test(Store(db)), "/R/big") is not None
 
 
 def test_the_command_will_not_write_over_the_database_by_another_name(

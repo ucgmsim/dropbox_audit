@@ -32,7 +32,7 @@ from dbaudit.cli import LISTING_ATTEMPTS, _run_limiter, main
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import World, build_tar, members
-from tests.stores import closing
+from tests.stores import close_after_test
 
 
 def rows(db: str):
@@ -1155,7 +1155,7 @@ def test_many_archives_walked_at_once_give_exactly_the_rows_walked_one_at_a_time
         ) in (0, 1)
 
     def manifest(db: str):
-        store = closing(ArchiveStore(db))
+        store = close_after_test(ArchiveStore(db))
         out = {}
         for archive in store.connect().execute(
             "SELECT id, set_hash, state, detail, n_members FROM archives"

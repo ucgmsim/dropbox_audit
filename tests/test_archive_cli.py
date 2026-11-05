@@ -40,7 +40,7 @@ from dbaudit.cli import LISTING_ATTEMPTS, main
 from dbaudit.limiter import AdaptiveLimiter
 from dbaudit.lock import InstanceLock
 from tests.archive_fakes import build_tar, write_parts
-from tests.stores import closing
+from tests.stores import close_after_test
 
 MEMBERS = [(f"run/file{i:02d}.bin", b"x" * (700 + i)) for i in range(30)]
 # One member big enough to swallow whole parts: split at 4096, parts 1-4 hold no header
@@ -218,7 +218,7 @@ def test_register_then_index_a_local_archive(
     assert str(len(MEMBERS)) in out
     assert "429s" in out  # T7-16: throttling is the first thing to look at
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     archive_id = store.get("a.tar")["id"]
     # Task 11's acceptance check, and the one behaviour an operator is asked to verify:
     # every segment on the chain had its start confirmed by the chain before it. The
@@ -247,7 +247,7 @@ def test_an_interrupted_index_resumes(tmp_path: Path):
         ]
     )
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     archive_id = store.get("a.tar")["id"]
 
     # Walk only the first two batches, as an interrupted run would have.
@@ -304,7 +304,7 @@ def test_parallel_chains_produce_the_same_manifest_as_one(tmp_path: Path):
                 str(workers),
             ]
         )
-        store = closing(ArchiveStore(db))
+        store = close_after_test(ArchiveStore(db))
         archive_id = store.get("a.tar")["id"]
         assert store.get("a.tar")["state"] == "complete"
         manifests[workers] = [
@@ -347,7 +347,7 @@ def test_a_walk_reports_how_many_chains_it_is_walking(
         return real_claim(self, archive_id, owner)
 
     monkeypatch.setattr(ArchiveStore, "claim_segment", claim_segment)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=4)
     seen = []
     walked = cli._walk_archive(
@@ -414,7 +414,7 @@ def test_chains_find_every_member_wherever_the_parts_divide(
         )
         == 0
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     got = [
         (r["hdr_offset"], r["size"])
         for r in store.query_members(store.get("a.tar")["id"])
@@ -451,7 +451,7 @@ def test_a_tar_inside_the_tar_at_a_boundary_is_repaired(tmp_path: Path):
         ]
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "2"])
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     names = [r["name"] for r in store.query_members(store.get("a.tar")["id"])]
     assert names == ["first.bin", "nested.tar", "last.bin"]
     assert store.get("a.tar")["state"] == "complete"
@@ -524,7 +524,7 @@ def test_a_signal_commits_the_batch_in_flight_and_leaves_the_walk_resumable(
     assert handled.is_set()
     assert signal.getsignal(signal.SIGINT) is before
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     partial = store.stats(row["id"])["n_members"]
     assert 0 < partial < len(MEMBERS)
@@ -614,7 +614,7 @@ def test_max_batches_commits_exactly_that_many_batches(
         )
         == 0
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert store.stats(row["id"])["n_members"] == 10
     # The refused batch was still read before it was refused. Releasing a segment has to
@@ -736,7 +736,7 @@ def test_a_stop_reaches_a_chain_still_scanning_for_its_first_header(
         "dbaudit.cli._reader_for",
         lambda row, s, t=None, l=None: Stopping(row["folder"], s),
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=2)
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(scans) == 1
@@ -854,7 +854,7 @@ def test_a_stop_that_lands_with_the_crossing_wins_and_nothing_more_is_read(
         "dbaudit.cli._reader_for",
         lambda row, s, t=None, l=None: Ordered(row["folder"], s),
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar", workers=2)
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and after == []
@@ -988,7 +988,7 @@ def test_an_empty_crossing_commit_does_not_consume_max_batches(tmp_path: Path):
         == 0
     )
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     empty_crossings = [
         s
@@ -1026,7 +1026,7 @@ def test_a_part_that_changed_before_the_walk_is_stale_and_nothing_is_read(
     monkeypatch.setattr("dbaudit.cli._reader_for", landmine)
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "stale"
     assert store.stats(row["id"])["n_members"] == 0
@@ -1062,7 +1062,7 @@ def test_a_part_that_changes_during_the_walk_is_stale_but_keeps_its_members(
     )
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "stale"
     assert store.stats(row["id"])["n_members"] == len(MEMBERS)
@@ -1175,7 +1175,7 @@ def test_indexing_a_finished_archive_reads_nothing(tmp_path: Path):
     )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "complete"
     before = row["requests"]
@@ -1273,7 +1273,7 @@ def test_a_missing_final_part_is_truncated_and_keeps_what_it_found(tmp_path: Pat
     )
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "truncated"
     assert 0 < store.stats(row["id"])["n_members"] < len(MEMBERS)
@@ -1304,7 +1304,7 @@ def test_status_shows_every_segment_and_the_efficiency_ratio(
 
     assert main(["archive", "status", "--db", db, "--archive", "a.tar"]) == 0
     out = capsys.readouterr().out
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     segments = store.segments(store.get("a.tar")["id"])
     assert len(segments) == 13
     for segment in segments:
@@ -1460,7 +1460,7 @@ def test_one_bad_read_at_the_terminator_cannot_change_the_archive_verdict(
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 0
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "complete", (
         f"a lie on covering read #{nth} decided the verdict"
@@ -1497,7 +1497,7 @@ def test_a_server_that_will_not_settle_leaves_a_retryable_error_not_a_verdict(
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
     assert liar.lied > REREAD_LIMIT // 2, "the test did not keep contradicting itself"
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] not in ("corrupt", "complete", "truncated")
     [segment] = store.segments(row["id"])
@@ -1582,7 +1582,7 @@ def test_a_pax_header_halts_its_own_walk_and_leaves_the_callers_stop_alone(
             "a.tar",
         ]
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     stop = threading.Event()
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
@@ -1617,7 +1617,7 @@ def test_pax_sighting_stored_before_the_rename_is_still_a_sighting(
             run.store.fail_segment(segment["id"], f"UnsupportedArchive: {reason}")
 
     monkeypatch.setattr("dbaudit.cli._walk_segment", walk_as_the_old_code_did)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
 
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
 
@@ -1813,7 +1813,7 @@ def test_meeting_pax_stops_the_pool_before_it_claims_another_segment(
         main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
         == 1
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     states = [s["state"] for s in store.segments(store.get("a.tar")["id"])]
     assert len(states) > 2
     assert states[0] == "error" and set(states[1:]) == {"pending"}, states
@@ -1973,7 +1973,7 @@ def test_a_path_truly_in_the_archive_twice_survives_the_audit_for_one_request(
     code, once = _index_with_appended(tmp_path, "run/file99.bin")
     assert code == 0
 
-    store = closing(ArchiveStore(twice))
+    store = close_after_test(ArchiveStore(twice))
     assert store.get("a.tar")["state"] == "complete"
     assert len(store.find_members(store.get("a.tar")["id"], "run/file05.bin")) == 2
     assert _requests(twice) - _requests(once) == 1
@@ -2080,7 +2080,7 @@ def test_a_stop_reaches_the_audit_and_the_next_run_audits_again(
         return real_read(concat, offset)
 
     monkeypatch.setattr("dbaudit.cli.read_member", read_member)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(audited) == 1
@@ -2141,7 +2141,7 @@ def test_a_read_that_gives_way_to_a_stop_leaves_nothing_in_error(
         return made[-1]
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     walked = cli._walk_archive(args, store, store.get("a.tar"), None, None, stop)
     assert walked.stopped and len(made) == nth
@@ -2190,7 +2190,7 @@ def test_a_read_that_gives_way_to_a_stop_still_commits_what_the_walk_confirmed(
             row["folder"], archive_set
         ),
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     # One fetch per header, so the walk has confirmed members by the 60th read.
     args = cli.arguments(
         cli.archive_index_command,
@@ -2305,7 +2305,7 @@ def test_a_stop_ends_a_walk_that_dropbox_keeps_answering_429(
         )
 
     monkeypatch.setattr("dbaudit.cli._reader_for", reader_for)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(
         cli.archive_index_command,
         db=db,
@@ -2417,7 +2417,7 @@ def test_a_stopped_walk_does_not_list_its_folder_again(
             source, archive_set
         ),
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     args = cli.arguments(cli.archive_index_command, db=db, archive="a.tar")
     walked = cli._walk_archive(
         args, store, store.get("a.tar"), None, cli.AdaptiveLimiter(rps=1000.0), stop
@@ -2477,7 +2477,7 @@ def test_one_bad_read_during_the_audit_does_not_re_walk_a_segment(
         main(["archive", "index", "--db", db, "--archive", "a.tar", "--workers", "1"])
         == 0
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "complete"
     assert event_count(db, row["id"], "audit_repair") == 0
@@ -2564,7 +2564,7 @@ def test_the_audit_repairs_a_segment_other_than_the_first(
         == 0
     )
     assert state["done"], "the test did not actually inject the bad read"
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in members]
@@ -2647,7 +2647,7 @@ def test_recheck_walks_again_an_archive_condemned_by_a_repeated_bad_read(
         main(["archive", "index", "--db", db, "--archive", "a.tar", "--recheck"]) == 0
     )
     assert "walking the chain again from offset 0" in capsys.readouterr().out
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "complete"
     assert _names(db) == [n.rsplit("/", 1)[-1] for n, _ in MEMBERS]
@@ -2661,7 +2661,7 @@ def test_recheck_walks_again_the_segments_the_verdict_retired(
     after it as `beyond`. Asking again must walk those too, from fresh scans, and join
     them to the chain -- not leave the walk blocked on a segment nobody will claim."""
     db, _liar = _condemned(tmp_path, monkeypatch, part_size=4096)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     archive_id = store.get("a.tar")["id"]
     states = [s["state"] for s in store.segments(archive_id)]
     ending = states.index("corrupt")
@@ -2845,7 +2845,7 @@ def test_recheck_of_an_archive_whose_parts_changed_throws_nothing_away(
     liar = _SameJunkEveryTime(source, _header_offsets(data)[20])
     monkeypatch.setattr("dbaudit.cli._reader_for", liar.reader_for)
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "corrupt"
     kept = store.stats(row["id"])["n_members"]
@@ -2937,7 +2937,7 @@ def test_recheck_walks_again_the_segment_that_handed_on_a_wrong_start(
     )
     small = ["--workers", "1", "--window-min", "1024", "--window-max", "1024"]
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", *small]) == 1
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     assert state["lied"], "the test did not actually inject the bad read"
     assert store.get("a.tar")["state"] == "corrupt"
     exit_ = store.segments(store.get("a.tar")["id"])[0]["exit_offset"]
@@ -3021,7 +3021,7 @@ def test_asked_again_about_the_same_verdict_recheck_steps_further_back(
     small = ["--workers", "1", "--window-min", "1024", "--window-max", "1024"]
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", *small]) == 1
     assert state["lied"], "the test did not actually inject the bad read"
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     segments = store.segments(store.get("a.tar")["id"])
     assert [s["state"] for s in segments] == ["crossed", "crossed", "corrupt"]
     assert {segments[1]["first_header"], segments[2]["first_header"]} <= set(
@@ -3132,7 +3132,7 @@ def test_recheck_is_refused_for_a_walk_that_only_stopped(
             "1024",
         ]
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "walking"
     kept = store.stats(row["id"])["n_members"]
@@ -3171,7 +3171,7 @@ def test_recheck_of_real_damage_walks_only_what_it_must(
         ]
     )
     assert main(["archive", "index", "--db", db, "--archive", "a.tar"]) == 1
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     segments = store.segments(store.get("a.tar")["id"])
     ending = next(s for s in segments if s["state"] != "crossed")
     assert 0 < ending["idx"] < len(segments) - 2
@@ -3576,7 +3576,7 @@ def test_a_folder_that_cannot_be_listed_after_the_walk_does_not_undo_the_walk(
     assert "could not re-list /d to fingerprint it: RuntimeError: proxy died" in (
         captured.err
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] == "complete"
     assert store.stats(row["id"])["n_members"] == len(MEMBERS)

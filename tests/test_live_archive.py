@@ -67,9 +67,9 @@ def test_a_real_archive_matches_a_downloaded_copy(live: tuple[str, Path]):
     )
 
     from dbaudit.archive.store import ArchiveStore
-    from tests.stores import closing
+    from tests.stores import close_after_test
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     archive_id = store.get(NAME)["id"]
     rows = store.query_members(archive_id)
     got = sorted(
@@ -101,9 +101,9 @@ def test_our_content_hash_is_the_one_dropbox_computed(live: tuple[str, Path]):
 
     from dbaudit.archive.store import ArchiveStore
     from dbaudit.cli import DROPBOX_HASH_BLOCK, _local_hash
-    from tests.stores import closing
+    from tests.stores import close_after_test
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     part = store.parts_of(store.get(NAME)["id"])[0]
     assert _local_hash(local) == part.content_hash
     assert part.size == local.stat().st_size
@@ -129,9 +129,9 @@ def test_cat_extracts_a_member_matching_the_downloaded_copy(
 
     from dbaudit.archive.store import ArchiveStore
     from dbaudit.cli import REGULAR_MEMBER_TYPES
-    from tests.stores import closing
+    from tests.stores import close_after_test
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     archive_id = store.get(NAME)["id"]
     regular = [
         r for r in store.query_members(archive_id) if r["type"] in REGULAR_MEMBER_TYPES

@@ -13,7 +13,7 @@ from dbaudit.report import (
     total_reclaimable_duplicates,
 )
 from dbaudit.store import Store
-from tests.stores import closing
+from tests.stores import close_after_test
 
 
 def mk(
@@ -37,7 +37,7 @@ def mk(
 
 
 def seed(tmp_path: Path, entries: list[dict]):
-    store = closing(Store(tmp_path / "a.db"))
+    store = close_after_test(Store(tmp_path / "a.db"))
     store.init_schema()
     store.set_meta("root", "/R")
     sid = store.add_shard("/R", 0, "recursive")

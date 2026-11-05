@@ -25,7 +25,7 @@ from dbaudit.tree import Summary
 from dbaudit.verify import VerifyResult, verify_subtree
 from tests.fakes import TREE, FakeLister
 from tests.listing_fakes import LISTED, archive, archive_index, file, listing
-from tests.stores import closing
+from tests.stores import close_after_test
 
 # GitHub Actions sets GITHUB_ACTIONS=true on every runner. Typer reads that
 # variable when it is imported and, if it is set, styles its help and error
@@ -44,7 +44,7 @@ def plain(text: str) -> str:
 
 def seeded_db(tmp_path: Path):
     db = tmp_path / "a.db"
-    store = closing(Store(db))
+    store = close_after_test(Store(db))
     store.init_schema()
     store.set_meta("root", "/R")
     store.add_shard("/R/a", 1, "recursive")

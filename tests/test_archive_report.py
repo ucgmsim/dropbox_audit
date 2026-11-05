@@ -24,7 +24,7 @@ from dbaudit.archive.report import summary, write_csv
 from dbaudit.archive.store import ArchiveStore
 from dbaudit.cli import main
 from tests.archive_fakes import build_tar, write_parts
-from tests.stores import closing
+from tests.stores import close_after_test
 
 MEMBERS = (
     [(f"run/fault_a/rel{i:02d}/out.bin", b"x" * 1000) for i in range(5)]
@@ -51,7 +51,7 @@ def indexed(tmp_path: Path):
         ]
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     return store, store.get("a.tar")["id"], db
 
 
@@ -71,7 +71,7 @@ def build_and_index(
         ["archive", "register", "--db", db, "--local-dir", str(source), "--name", name]
     )
     main(["archive", "index", "--db", db, "--archive", name])
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     return store, store.get(name)["id"], db
 
 
@@ -190,7 +190,7 @@ def test_report_on_a_partially_walked_archive_warns_before_the_figures(
             "1",
         ]
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     n_members = store.stats(row["id"])["n_members"]
     assert row["state"] != "complete"  # sanity: the walk really did stop early
@@ -252,7 +252,7 @@ def test_report_on_an_unindexed_archive_says_so_and_returns_0(
 
     # summary() itself must not crash on an empty manifest either -- guard every
     # denominator, not just the CLI's own printing.
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     archive_id = store.get("a.tar")["id"]
     result = summary(store, archive_id)
     assert result["n_members"] == 0
@@ -799,7 +799,7 @@ def test_export_warns_on_a_partially_walked_archive_before_the_wrote_lines(
             "1",
         ]
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     assert row["state"] != "complete"  # sanity: the walk really did stop early
     capsys.readouterr()

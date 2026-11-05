@@ -27,7 +27,7 @@ from dbaudit.auth import TokenProvider
 from dbaudit.cli import main
 from dbaudit.limiter import AdaptiveLimiter
 from tests.archive_fakes import build_tar, write_parts
-from tests.stores import closing
+from tests.stores import close_after_test
 
 #: Members this big are jumped over, so no request made before one reaches past it.
 BIG = 256 * 1024
@@ -202,7 +202,7 @@ def test_recheck_does_not_repeat_the_request_that_condemned_an_archive(
     with monkeypatch.context() as patch:
         patch.setattr("dbaudit.archive.reader.LEAD_STEP", 0)
         assert main(["archive", "index", "--db", db, "--archive", "a.tar", *SMALL]) == 1
-    assert closing(ArchiveStore(db)).get("a.tar")["state"] == "corrupt"
+    assert close_after_test(ArchiveStore(db)).get("a.tar")["state"] == "corrupt"
     assert server.lied >= 2
     lied = server.lied
 
@@ -212,7 +212,7 @@ def test_recheck_does_not_repeat_the_request_that_condemned_an_archive(
         )
         == 0
     )
-    assert closing(ArchiveStore(db)).get("a.tar")["state"] == "complete"
+    assert close_after_test(ArchiveStore(db)).get("a.tar")["state"] == "complete"
     assert _paths(db) == [name for name, _ in members]
     assert server.lied == lied, "--recheck asked the bad request again"
 
@@ -254,7 +254,7 @@ def test_the_audits_second_read_does_not_repeat_its_first(
     assert main(["archive", "index", "--db", db, "--archive", "a.tar", *SMALL]) == 0
     # The audit's first read of the newer row came back as member 7, its second truly.
     assert [name for offset, name in read if offset == newer] == ["m07.bin", "m03.bin"]
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     events = (
         store.connect()
         .execute(

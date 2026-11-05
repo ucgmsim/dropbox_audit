@@ -22,7 +22,7 @@ from dbaudit.auth import AuthError, TokenProvider
 from dbaudit.cli import main
 from dbaudit.limiter import AdaptiveLimiter
 from tests.archive_fakes import build_tar, write_parts
-from tests.stores import closing
+from tests.stores import close_after_test
 
 PAYLOAD = bytes(range(256)) * 30  # 7,680 bytes: spans a 4 KiB part boundary
 
@@ -214,7 +214,7 @@ def test_cat_an_offset_naming_no_member_exits_2_and_lists_candidates(
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
     capsys.readouterr()
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     matches = store.find_members(store.get("a.tar")["id"], "run/dup.txt")
     assert len(matches) == 2
 
@@ -261,7 +261,7 @@ def test_cat_with_offset_selects_the_named_duplicate(tmp_path: Path):
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     matches = store.find_members(store.get("a.tar")["id"], "run/dup.txt")
     second = matches[1]
 
@@ -293,7 +293,7 @@ def test_cat_with_offset_selects_the_named_duplicate(tmp_path: Path):
 
 def test_cat_refuses_a_stale_archive_and_writes_nothing(tmp_path: Path):
     db = setup_archive(tmp_path)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     store.mark_stale(row["id"], "parts changed underneath the index")
 
@@ -478,7 +478,7 @@ def test_cat_a_member_running_past_the_end_of_the_parts_exits_1(tmp_path: Path):
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
 
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     member = store.find_members(row["id"], "run/big.bin")[0]
     assert member["size"] == len(payload)
@@ -832,7 +832,7 @@ def test_cat_notices_a_part_that_changed_under_the_index(tmp_path: Path):
     """A part rewritten since `index` ran, without a re-register: the stored offsets now
     point at other bytes, and nothing but the anchors can tell."""
     db, source = _single_part_archive(tmp_path, AROUND)
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     member = store.find_members(store.get("a.tar")["id"], "run/data.bin")[0]
     part = min(source.iterdir())
     raw = bytearray(part.read_bytes())
@@ -1408,7 +1408,7 @@ def test_cat_confirms_the_last_read_when_nothing_follows_the_member(
         ]
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
-    assert closing(ArchiveStore(db)).get("a.tar")["state"] == "truncated"
+    assert close_after_test(ArchiveStore(db)).get("a.tar")["state"] == "truncated"
     readers = _planned(monkeypatch, {1: _back_half})
     out = tmp_path / "last.bin"
 
@@ -1560,7 +1560,7 @@ def test_cat_refuses_a_pax_member_left_in_an_older_index(
             "a.tar",
         ]
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     segment = store.segments(row["id"])[0]["id"]
     end = info.offset_data + 1024
@@ -1600,7 +1600,7 @@ def test_cat_refuses_a_member_the_archive_ends_inside(
         ]
     )
     main(["archive", "index", "--db", db, "--archive", "a.tar"])
-    assert closing(ArchiveStore(db)).get("a.tar")["state"] == "truncated"
+    assert close_after_test(ArchiveStore(db)).get("a.tar")["state"] == "truncated"
     capsys.readouterr()
     out = tmp_path / "cut.bin"
 
@@ -2047,7 +2047,7 @@ def test_cat_on_a_partial_index_does_not_take_any_header_after_the_member_on_tru
             "1024",
         ]
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     assert store.get("a.tar")["state"] == "walking"
     assert (
         store.member_at(
@@ -2406,7 +2406,7 @@ def test_cat_refuses_a_row_no_confirmed_chain_vouches_for(
             "a.tar",
         ]
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     row = store.get("a.tar")
     args = types.SimpleNamespace(
         window_min=65_536, window_max=16 << 20, batch=2_000, max_batches=None
@@ -2529,7 +2529,7 @@ def test_cat_tells_two_copies_of_a_path_apart_by_owner_and_mode(
             ("run/z.bin", _random(10, 600)),
         ],
     )
-    store = closing(ArchiveStore(db))
+    store = close_after_test(ArchiveStore(db))
     first, second = store.find_members(store.get("a.tar")["id"], "run/p.yaml")
     shift = second["hdr_offset"] - first["hdr_offset"]
     readers = _planned(monkeypatch, {1: lambda r, at, n, t: r.raw(at + shift, n)})
