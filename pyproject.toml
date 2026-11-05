@@ -9,5 +9,32 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "deptry>=0.25.1",
     "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.3",
+    "ty>=0.0.97",
 ]
+
+[tool.ruff.lint]
+extend-select = ["I", "W605", "N", "D101", "D102", "D103", "D105", "D107", "UP032", "UP035", "ANN001", "BLE001"]
+ignore = ["D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+known-first-party = ["dbaudit"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["D104"]
+"tests/**.py" = ["D"]
+"**/test*.py" = ["D"]
+
+[tool.npdlint]
+include = ["dbaudit"]
+extend-exclude = ["**/__init__.py"]
+
+[tool.numpydoc_validation]
+checks = ["GL05", "GL08", "GL10", "PR01", "PR02", "PR03", "PR04", "PR05", "PR06", "PR07", "RT01", "RT02", "RT03", "RT04", "YD01"]
+exclude = ['\.undocumented_method$', '\.__repr__$']

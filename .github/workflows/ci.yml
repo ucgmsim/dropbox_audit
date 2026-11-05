@@ -1,0 +1,13 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  ci:
+    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@v2
+    with:
+      exclude-init: false
+      enable-coverage: true
+      cov-package: dbaudit
+      cov-fail-under: 95
