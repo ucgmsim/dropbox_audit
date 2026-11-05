@@ -332,27 +332,27 @@ def cmd_init(args: SimpleNamespace) -> int:
         )
         return 2
 
-    store = Store(args.db)
-    store.init_schema()
-    store.set_meta("root", root)
-    store.set_meta("remote", args.remote)
-    store.set_meta("schema_version", "2")
-    store.set_meta("root_namespace_id", tokens.root_namespace_id())
-    store.set_meta("account_id", account.get("account_id", ""))
-    store.set_meta("team", (account.get("team") or {}).get("name", ""))
-    store.set_meta("created_at", time.time())
+    with Store(args.db) as store:
+        store.init_schema()
+        store.set_meta("root", root)
+        store.set_meta("remote", args.remote)
+        store.set_meta("schema_version", "2")
+        store.set_meta("root_namespace_id", tokens.root_namespace_id())
+        store.set_meta("account_id", account.get("account_id", ""))
+        store.set_meta("team", (account.get("team") or {}).get("name", ""))
+        store.set_meta("created_at", time.time())
 
-    store.add_shard(root, depth=0)
+        store.add_shard(root, depth=0)
 
-    print(f"initialised {args.db}")
-    print(f"  root      : {root} ({len(page.entries)}+ entries at the top level)")
-    print(
-        f"  account   : {account.get('email', '?')} / team {(account.get('team') or {}).get('name', '?')}"
-    )
-    print(f"  namespace : {tokens.root_namespace_id()}")
-    print(f"  free disk : {human_bytes(available)}")
-    print(f"\nnext: python -m dbaudit run --db {args.db}")
-    return 0
+        print(f"initialised {args.db}")
+        print(f"  root      : {root} ({len(page.entries)}+ entries at the top level)")
+        print(
+            f"  account   : {account.get('email', '?')} / team {(account.get('team') or {}).get('name', '?')}"
+        )
+        print(f"  namespace : {tokens.root_namespace_id()}")
+        print(f"  free disk : {human_bytes(available)}")
+        print(f"\nnext: python -m dbaudit run --db {args.db}")
+        return 0
 
 
 def _progress_reporter(store: Store, stop: threading.Event, interval: float) -> None:
@@ -417,129 +417,135 @@ def cmd_run(args: SimpleNamespace) -> int:
         holds the lock.
     """
     setup_logging(args.verbose, args.log)
-    store = Store(args.db)
-    if not store.is_initialised() or not store.get_meta("root"):
-        print(f"error: {args.db} is not initialised; run `init` first", file=sys.stderr)
-        return 2
-
-    lockfile = args.lock or f"{args.db}.lock"
-    try:
-        lock = InstanceLock(lockfile)
-        lock.__enter__()
-    except LockHeldError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
-
-    try:
-        remote = _crawl_remote(store)
-        try:
-            _, lister = build_lister(remote)
-        except AuthError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+    with Store(args.db) as store:
+        if not store.is_initialised() or not store.get_meta("root"):
+            print(
+                f"error: {args.db} is not initialised; run `init` first",
+                file=sys.stderr,
+            )
             return 2
 
-        limiter = AdaptiveLimiter(
-            rps=args.rps, max_rps=args.max_rps, max_concurrency=args.workers
-        )
-        crawler = Crawler(
-            store,
-            lister,
-            limiter,
-            workers=args.workers,
-            split_depth=args.split_depth,
-            queue_target=args.queue_target,
-            max_shards=args.max_shards,
-        )
-
-        stop = threading.Event()
-        hard = {"count": 0}
-
-        def handle(signum: int, frame: FrameType | None) -> None:
-            """Stop the crawl on the first signal, and exit at once on the second.
-
-            Parameters
-            ----------
-            signum : int
-                The signal number.
-            frame : FrameType or None
-                The interrupted frame; unused.
-            """
-            hard["count"] += 1
-            if hard["count"] == 1:
-                log.warning(
-                    "signal %d: finishing the page in flight, then exiting", signum
-                )
-                stop.set()
-            else:
-                log.warning("second signal: exiting immediately")
-                os._exit(1)
-
-        signal.signal(signal.SIGINT, handle)
-        signal.signal(signal.SIGTERM, handle)
-
-        store.connect().execute(
-            "INSERT INTO runs(started_at, host) VALUES(?, ?)",
-            (time.time(), socket.gethostname()),
-        )
-
-        reporter_stop = threading.Event()
-        reporter = threading.Thread(
-            target=_progress_reporter,
-            args=(Store(args.db), reporter_stop, args.progress_interval),
-            daemon=True,
-        )
-        reporter.start()
-
-        started = time.time()
-        log.info(
-            "crawling %s with %d workers at %.1f req/s",
-            store.get_meta("root"),
-            args.workers,
-            args.rps,
-        )
+        lockfile = args.lock or f"{args.db}.lock"
         try:
-            summary = crawler.run(stop_event=stop)
-        finally:
-            reporter_stop.set()
+            lock = InstanceLock(lockfile)
+            lock.__enter__()
+        except LockHeldError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
 
-        elapsed = time.time() - started
-        store.connect().execute(
-            "UPDATE runs SET finished_at=? WHERE id=(SELECT MAX(id) FROM runs)",
-            (time.time(),),
-        )
+        try:
+            remote = _crawl_remote(store)
+            try:
+                _, lister = build_lister(remote)
+            except AuthError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
 
-        log.info(
-            "finished in %s: %s files, %s dirs, %s across %d pages (%d rate-limit events)",
-            human_duration(elapsed),
-            f"{summary.files:,}",
-            f"{summary.dirs:,}",
-            human_bytes(summary.bytes),
-            summary.pages,
-            summary.rate_limit_events,
-        )
+            limiter = AdaptiveLimiter(
+                rps=args.rps, max_rps=args.max_rps, max_concurrency=args.workers
+            )
+            crawler = Crawler(
+                store,
+                lister,
+                limiter,
+                workers=args.workers,
+                split_depth=args.split_depth,
+                queue_target=args.queue_target,
+                max_shards=args.max_shards,
+            )
 
-        remaining = store.pending_count() + store.running_count()
-        if stop.is_set():
+            stop = threading.Event()
+            hard = {"count": 0}
+
+            def handle(signum: int, frame: FrameType | None) -> None:
+                """Stop the crawl on the first signal, and exit at once on the second.
+
+                Parameters
+                ----------
+                signum : int
+                    The signal number.
+                frame : FrameType or None
+                    The interrupted frame; unused.
+                """
+                hard["count"] += 1
+                if hard["count"] == 1:
+                    log.warning(
+                        "signal %d: finishing the page in flight, then exiting", signum
+                    )
+                    stop.set()
+                else:
+                    log.warning("second signal: exiting immediately")
+                    os._exit(1)
+
+            signal.signal(signal.SIGINT, handle)
+            signal.signal(signal.SIGTERM, handle)
+
+            store.connect().execute(
+                "INSERT INTO runs(started_at, host) VALUES(?, ?)",
+                (time.time(), socket.gethostname()),
+            )
+
+            reporter_stop = threading.Event()
+            # The reporter's store is its own, closed once the reporter has stopped.
+            with Store(args.db) as reporter_store:
+                reporter = threading.Thread(
+                    target=_progress_reporter,
+                    args=(reporter_store, reporter_stop, args.progress_interval),
+                    daemon=True,
+                )
+                reporter.start()
+                try:
+                    started = time.time()
+                    log.info(
+                        "crawling %s with %d workers at %.1f req/s",
+                        store.get_meta("root"),
+                        args.workers,
+                        args.rps,
+                    )
+                    summary = crawler.run(stop_event=stop)
+                finally:
+                    reporter_stop.set()
+                    reporter.join()
+
+            elapsed = time.time() - started
+            store.connect().execute(
+                "UPDATE runs SET finished_at=? WHERE id=(SELECT MAX(id) FROM runs)",
+                (time.time(),),
+            )
+
             log.info(
-                "interrupted with %d shard(s) outstanding; re-run to resume", remaining
+                "finished in %s: %s files, %s dirs, %s across %d pages (%d rate-limit events)",
+                human_duration(elapsed),
+                f"{summary.files:,}",
+                f"{summary.dirs:,}",
+                human_bytes(summary.bytes),
+                summary.pages,
+                summary.rate_limit_events,
             )
+
+            remaining = store.pending_count() + store.running_count()
+            if stop.is_set():
+                log.info(
+                    "interrupted with %d shard(s) outstanding; re-run to resume",
+                    remaining,
+                )
+                return 0
+            if summary.errors:
+                log.warning(
+                    "%d shard(s) ended in error; see `status`, and run again to "
+                    "retry them from scratch",
+                    summary.errors,
+                )
+                return 1
+            if remaining == 0:
+                store.set_meta("last_pass_completed_at", time.time())
+                if not args.no_index:
+                    log.info("crawl complete; building analysis indexes")
+                    store.build_indexes()
+                    log.info("indexes built")
             return 0
-        if summary.errors:
-            log.warning(
-                "%d shard(s) ended in error; see `status`, and run again to "
-                "retry them from scratch",
-                summary.errors,
-            )
-            return 1
-        if remaining == 0:
-            store.set_meta("last_pass_completed_at", time.time())
-            if not args.no_index:
-                log.info("crawl complete; building analysis indexes")
-                store.build_indexes()
-                log.info("indexes built")
-        return 0
-    finally:
-        lock.__exit__(None, None, None)
+        finally:
+            lock.__exit__(None, None, None)
 
 
 def cmd_status(args: SimpleNamespace) -> int:
@@ -555,43 +561,43 @@ def cmd_status(args: SimpleNamespace) -> int:
     int
         0 on success, 2 if the database is not initialised.
     """
-    store = Store(args.db)
-    root = store.get_meta("root") if store.is_initialised() else None
-    if not root:
-        print(f"error: {args.db} is not initialised", file=sys.stderr)
-        return 2
+    with Store(args.db) as store:
+        root = store.get_meta("root") if store.is_initialised() else None
+        if not root:
+            print(f"error: {args.db} is not initialised", file=sys.stderr)
+            return 2
 
-    prog = store.progress()
-    pending = store.pending_count()
-    running = store.running_count()
-    recent_429 = store.query(
-        "SELECT COUNT(*) FROM api_events WHERE kind='rate_limited' AND ts > ?",
-        (time.time() - 3600,),
-    )[0][0]
-    errors = store.query(
-        "SELECT path, error FROM shards WHERE state='error' ORDER BY id LIMIT 5"
-    )
+        prog = store.progress()
+        pending = store.pending_count()
+        running = store.running_count()
+        recent_429 = store.query(
+            "SELECT COUNT(*) FROM api_events WHERE kind='rate_limited' AND ts > ?",
+            (time.time() - 3600,),
+        )[0][0]
+        errors = store.query(
+            "SELECT path, error FROM shards WHERE state='error' ORDER BY id LIMIT 5"
+        )
 
-    print(f"root      : {root}")
-    print(
-        f"shards    : {prog['shards_done']}/{prog['shards_total']} done "
-        f"({pending} pending, {running} running, {prog['shards_error']} error)"
-    )
-    print(f"files     : {prog['files']:,}")
-    print(f"dirs      : {prog['dirs']:,}")
-    print(f"bytes     : {human_bytes(prog['bytes'])}")
-    print(f"pages     : {prog['pages']:,}")
-    print(f"429s (1h) : {recent_429}")
+        print(f"root      : {root}")
+        print(
+            f"shards    : {prog['shards_done']}/{prog['shards_total']} done "
+            f"({pending} pending, {running} running, {prog['shards_error']} error)"
+        )
+        print(f"files     : {prog['files']:,}")
+        print(f"dirs      : {prog['dirs']:,}")
+        print(f"bytes     : {human_bytes(prog['bytes'])}")
+        print(f"pages     : {prog['pages']:,}")
+        print(f"429s (1h) : {recent_429}")
 
-    completed = store.get_meta("last_pass_completed_at")
-    if completed:
-        age = time.time() - float(completed)
-        print(f"last pass : completed {human_duration(age)} ago")
-    if errors:
-        print("\nshards in error:")
-        for path, message in errors:
-            print(f"  {path}: {(message or '')[:120]}")
-    return 0
+        completed = store.get_meta("last_pass_completed_at")
+        if completed:
+            age = time.time() - float(completed)
+            print(f"last pass : completed {human_duration(age)} ago")
+        if errors:
+            print("\nshards in error:")
+            for path, message in errors:
+                print(f"  {path}: {(message or '')[:120]}")
+        return 0
 
 
 def cmd_verify(args: SimpleNamespace) -> int:
@@ -608,35 +614,35 @@ def cmd_verify(args: SimpleNamespace) -> int:
         0 if the two agree, 1 if they differ, 2 if the database is not
         initialised or the walk fails.
     """
-    store = Store(args.db)
-    if not store.is_initialised():
-        print(f"error: {args.db} is not initialised", file=sys.stderr)
-        return 2
-    target = args.path or store.get_meta("root")
-    if not target:  # `init` stopped after the schema, before it recorded the root
-        print(f"error: {args.db} is not initialised", file=sys.stderr)
-        return 2
-    print(f"verifying {target} against an independent rclone walk ...")
-    try:
-        result = verify_subtree(store, target)
-    except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    with Store(args.db) as store:
+        if not store.is_initialised():
+            print(f"error: {args.db} is not initialised", file=sys.stderr)
+            return 2
+        target = args.path or store.get_meta("root")
+        if not target:  # `init` stopped after the schema, before it recorded the root
+            print(f"error: {args.db} is not initialised", file=sys.stderr)
+            return 2
+        print(f"verifying {target} against an independent rclone walk ...")
+        try:
+            result = verify_subtree(store, target)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
-    print(f"  database : {result.db_files:,} files, {human_bytes(result.db_bytes)}")
-    print(
-        f"  rclone   : {result.rclone_files:,} files, {human_bytes(result.rclone_bytes)}"
-    )
-    print(f"  {result.differences} differences")
-    for name in result.only_in_rclone[:20]:
-        print(f"    missing from audit : {name}")
-    for name in result.only_in_db[:20]:
-        print(f"    not seen by rclone : {name}")
-    for name, db_size, remote_size in result.size_mismatches[:20]:
+        print(f"  database : {result.db_files:,} files, {human_bytes(result.db_bytes)}")
         print(
-            f"    size differs       : {name} (audit {db_size}, rclone {remote_size})"
+            f"  rclone   : {result.rclone_files:,} files, {human_bytes(result.rclone_bytes)}"
         )
-    return 0 if result.ok else 1
+        print(f"  {result.differences} differences")
+        for name in result.only_in_rclone[:20]:
+            print(f"    missing from audit : {name}")
+        for name in result.only_in_db[:20]:
+            print(f"    not seen by rclone : {name}")
+        for name, db_size, remote_size in result.size_mismatches[:20]:
+            print(
+                f"    size differs       : {name} (audit {db_size}, rclone {remote_size})"
+            )
+        return 0 if result.ok else 1
 
 
 def _space_usage(remote: str) -> tuple[int, int | None, int | None]:
@@ -681,127 +687,132 @@ def cmd_report(args: SimpleNamespace) -> int:
         0 on success, 2 if the database is not initialised or the kinds inputs
         cannot be used.
     """
-    store = Store(args.db)
-    if not store.is_initialised():
-        print(f"error: {args.db} is not initialised", file=sys.stderr)
-        return 2
-    try:
-        rules, index = _kinds_inputs(args)
-    except kinds.KindsError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    with Store(args.db) as store:
+        if not store.is_initialised():
+            print(f"error: {args.db} is not initialised", file=sys.stderr)
+            return 2
+        try:
+            rules, index = _kinds_inputs(args)
+        except kinds.KindsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
-    prog = store.progress()
-    unfinished = store.pending_count() + store.running_count() + prog["shards_error"]
-    root = store.get_meta("root")
-    print(f"# Storage audit of {root}")
-    if unfinished:
-        _warn_incomplete(unfinished)
-    print(
-        f"\n{prog['files']:,} files, {prog['dirs']:,} directories, "
-        f"{human_bytes(prog['bytes'])} of live data\n"
-    )
+        prog = store.progress()
+        unfinished = (
+            store.pending_count() + store.running_count() + prog["shards_error"]
+        )
+        root = store.get_meta("root")
+        print(f"# Storage audit of {root}")
+        if unfinished:
+            _warn_incomplete(unfinished)
+        print(
+            f"\n{prog['files']:,} files, {prog['dirs']:,} directories, "
+            f"{human_bytes(prog['bytes'])} of live data\n"
+        )
 
-    print("## Reconciliation")
-    live = store.query("SELECT COALESCE(SUM(size), 0) FROM files")[0][0]
-    try:
-        account_used, team_used, team_allocated = _space_usage(_crawl_remote(store))
-        _, _, residual = reports.reconcile(store, account_used)
-        print(f"  measured live bytes under {root}: {human_bytes(live)}")
-        print(f"  Dropbox reports for this account : {human_bytes(account_used)}")
-        if team_used:
+        print("## Reconciliation")
+        live = store.query("SELECT COALESCE(SUM(size), 0) FROM files")[0][0]
+        try:
+            account_used, team_used, team_allocated = _space_usage(_crawl_remote(store))
+            _, _, residual = reports.reconcile(store, account_used)
+            print(f"  measured live bytes under {root}: {human_bytes(live)}")
+            print(f"  Dropbox reports for this account : {human_bytes(account_used)}")
+            if team_used:
+                print(
+                    f"  team space used / allocated      : {human_bytes(team_used)} / "
+                    f"{human_bytes(team_allocated or 0)}"
+                )
+            print(f"  unaccounted for                  : {human_bytes(residual)}")
             print(
-                f"  team space used / allocated      : {human_bytes(team_used)} / "
-                f"{human_bytes(team_allocated or 0)}"
+                "  The unaccounted figure is version history, deleted-but-retained data,"
             )
-        print(f"  unaccounted for                  : {human_bytes(residual)}")
-        print("  The unaccounted figure is version history, deleted-but-retained data,")
-        print("  AND anything outside this crawl root. It isolates version/deleted")
-        print("  overhead only when the root covers everything the account owns.")
-    except Exception as exc:  # noqa: BLE001  # the live space figures are optional; the report goes on without them
-        print(f"  (could not read live space usage: {type(exc).__name__}: {exc})")
-        print(f"  measured live bytes under {root}: {human_bytes(live)}")
+            print("  AND anything outside this crawl root. It isolates version/deleted")
+            print("  overhead only when the root covers everything the account owns.")
+        except Exception as exc:  # noqa: BLE001  # the live space figures are optional; the report goes on without them
+            print(f"  (could not read live space usage: {type(exc).__name__}: {exc})")
+            print(f"  measured live bytes under {root}: {human_bytes(live)}")
 
-    print("\n## Reclaimable duplicates")
-    total_dupe = reports.total_reclaimable_duplicates(store)
-    print(
-        f"  identical content stored more than once: {human_bytes(total_dupe)} reclaimable"
-    )
-    for row in reports.duplicate_report(store, limit=args.top)[: args.top]:
+        print("\n## Reclaimable duplicates")
+        total_dupe = reports.total_reclaimable_duplicates(store)
         print(
-            f"  {human_bytes(row.reclaimable):>12}  x{row.copies:<4} "
-            f"{human_bytes(row.size):>10} each  {row.example[:80]}"
+            f"  identical content stored more than once: {human_bytes(total_dupe)} reclaimable"
         )
-
-    print("\n## Cold data")
-    for years in (2, 5, 10):
-        count, total = reports.bytes_older_than(store, years)
-        print(
-            f"  untouched for {years:>2}y+ : {human_bytes(total):>12} in {count:,} files"
-        )
-    print("  by year last modified:")
-    for row in reports.cold_bytes(store):
-        print(f"    {row.year}  {human_bytes(row.bytes):>12}  {row.files:,} files")
-
-    print("\n## Largest directories (recursive)")
-    for row in reports.top_dirs(store, limit=args.top):
-        print(
-            f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {row.path[:90]}"
-        )
-
-    print("\n## Per top-level folder")
-    for row in reports.top_level_summary(store):
-        print(
-            f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {row.path[:90]}"
-        )
-
-    print("\n## Small-file hotspots")
-    hotspots = reports.small_file_hotspots(
-        store,
-        min_files=args.hotspot_min_files,
-        max_mean_size=args.hotspot_max_mean,
-        limit=args.top,
-    )
-    if not hotspots:
-        print(
-            f"  none with >={args.hotspot_min_files:,} files averaging "
-            f"<={human_bytes(args.hotspot_max_mean)}"
-        )
-    for row in hotspots:
-        print(
-            f"  {row.files:>10,} files  mean {human_bytes(row.mean_size):>10}  "
-            f"{human_bytes(row.bytes):>12}  {row.path[:70]}"
-        )
-
-    print("\n## By file type")
-    for row in reports.extension_profile(store, limit=args.top):
-        label = "(no extension)" if row.ext == "(none)" else f".{row.ext}"
-        print(f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {label}")
-
-    print("\n## By kind")
-    print(f"  {KINDS_DATING}")
-    try:
-        counted = kinds.tally(
-            kinds.walk(store, rules, index), tree.crawl_time(store)[0]
-        )
-    finally:
-        if index is not None:
-            index.close()
-    total = counted.total()
-    older = {years: counted.group_older(years) for years in REPORT_KIND_AGES}
-    print(
-        f"  {'':<26}{KINDS_HEAD}"
-        + "".join(f"{f'> {years} years':>12}" for years in REPORT_KIND_AGES)
-    )
-    for group, (loose, tarred) in counted.groups().items():
-        print(
-            _kinds_row(group, loose, tarred, total, 26)
-            + "".join(
-                f"{_sized(sum(older[years][group])):>12}" for years in REPORT_KIND_AGES
+        for row in reports.duplicate_report(store, limit=args.top)[: args.top]:
+            print(
+                f"  {human_bytes(row.reclaimable):>12}  x{row.copies:<4} "
+                f"{human_bytes(row.size):>10} each  {row.example[:80]}"
             )
+
+        print("\n## Cold data")
+        for years in (2, 5, 10):
+            count, total = reports.bytes_older_than(store, years)
+            print(
+                f"  untouched for {years:>2}y+ : {human_bytes(total):>12} in {count:,} files"
+            )
+        print("  by year last modified:")
+        for row in reports.cold_bytes(store):
+            print(f"    {row.year}  {human_bytes(row.bytes):>12}  {row.files:,} files")
+
+        print("\n## Largest directories (recursive)")
+        for row in reports.top_dirs(store, limit=args.top):
+            print(
+                f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {row.path[:90]}"
+            )
+
+        print("\n## Per top-level folder")
+        for row in reports.top_level_summary(store):
+            print(
+                f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {row.path[:90]}"
+            )
+
+        print("\n## Small-file hotspots")
+        hotspots = reports.small_file_hotspots(
+            store,
+            min_files=args.hotspot_min_files,
+            max_mean_size=args.hotspot_max_mean,
+            limit=args.top,
         )
-    print(f"\n  {kinds.tarball_note(counted, index is not None, _sized)}")
-    return 0
+        if not hotspots:
+            print(
+                f"  none with >={args.hotspot_min_files:,} files averaging "
+                f"<={human_bytes(args.hotspot_max_mean)}"
+            )
+        for row in hotspots:
+            print(
+                f"  {row.files:>10,} files  mean {human_bytes(row.mean_size):>10}  "
+                f"{human_bytes(row.bytes):>12}  {row.path[:70]}"
+            )
+
+        print("\n## By file type")
+        for row in reports.extension_profile(store, limit=args.top):
+            label = "(no extension)" if row.ext == "(none)" else f".{row.ext}"
+            print(f"  {human_bytes(row.bytes):>12}  {row.files:>10,} files  {label}")
+
+        print("\n## By kind")
+        print(f"  {KINDS_DATING}")
+        try:
+            counted = kinds.tally(
+                kinds.walk(store, rules, index), tree.crawl_time(store)[0]
+            )
+        finally:
+            if index is not None:
+                index.close()
+        total = counted.total()
+        older = {years: counted.group_older(years) for years in REPORT_KIND_AGES}
+        print(
+            f"  {'':<26}{KINDS_HEAD}"
+            + "".join(f"{f'> {years} years':>12}" for years in REPORT_KIND_AGES)
+        )
+        for group, (loose, tarred) in counted.groups().items():
+            print(
+                _kinds_row(group, loose, tarred, total, 26)
+                + "".join(
+                    f"{_sized(sum(older[years][group])):>12}"
+                    for years in REPORT_KIND_AGES
+                )
+            )
+        print(f"\n  {kinds.tarball_note(counted, index is not None, _sized)}")
+        return 0
 
 
 def _warn_incomplete(unfinished: int) -> None:
@@ -832,13 +843,13 @@ def cmd_export(args: SimpleNamespace) -> int:
     int
         0 on success, 2 if the database is not initialised.
     """
-    store = Store(args.db)
-    if not store.is_initialised():
-        print(f"error: {args.db} is not initialised", file=sys.stderr)
-        return 2
-    for path in reports.export_csv(store, args.out):
-        print(f"wrote {path}")
-    return 0
+    with Store(args.db) as store:
+        if not store.is_initialised():
+            print(f"error: {args.db} is not initialised", file=sys.stderr)
+            return 2
+        for path in reports.export_csv(store, args.out):
+            print(f"wrote {path}")
+        return 0
 
 
 def cmd_tree(args: SimpleNamespace) -> int:
@@ -858,64 +869,64 @@ def cmd_tree(args: SimpleNamespace) -> int:
         0 on success, 2 for a missing subtree, an unusable output path or
         unusable kinds inputs.
     """
-    store = Store(args.db)
-    if not store.is_initialised():
-        print(f"error: {args.db} is not initialised", file=sys.stderr)
-        return 2
-    if args.subtree and tree.find_dir(store, args.subtree) is None:
-        print(f"error: {args.subtree} is not in {args.db}", file=sys.stderr)
-        return 2
-    # samefile also catches another name for the same file, e.g. AUDIT.DB for audit.db
-    # on a case-insensitive disk, which realpath leaves alone.
-    if os.path.realpath(args.out) == os.path.realpath(args.db) or (
-        os.path.exists(args.out) and os.path.samefile(args.out, args.db)
-    ):
-        print("error: --out names the database itself", file=sys.stderr)
-        return 2
-    folder = os.path.dirname(os.path.abspath(args.out))
-    if not os.path.isdir(folder):
-        print(f"error: {folder} is not a folder", file=sys.stderr)
-        return 2
-    try:
-        rules, index = _kinds_inputs(args)
-    except kinds.KindsError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    started = time.time()
-    try:
-        page, summary, chosen = tree.build(
-            store,
-            args.subtree or store.get_meta("root") or "/",
-            args.min_size,
-            args.max_rows,
-            os.path.basename(args.db),
-            rules,
-            index,
+    with Store(args.db) as store:
+        if not store.is_initialised():
+            print(f"error: {args.db} is not initialised", file=sys.stderr)
+            return 2
+        if args.subtree and tree.find_dir(store, args.subtree) is None:
+            print(f"error: {args.subtree} is not in {args.db}", file=sys.stderr)
+            return 2
+        # samefile also catches another name for the same file, e.g. AUDIT.DB for audit.db
+        # on a case-insensitive disk, which realpath leaves alone.
+        if os.path.realpath(args.out) == os.path.realpath(args.db) or (
+            os.path.exists(args.out) and os.path.samefile(args.out, args.db)
+        ):
+            print("error: --out names the database itself", file=sys.stderr)
+            return 2
+        folder = os.path.dirname(os.path.abspath(args.out))
+        if not os.path.isdir(folder):
+            print(f"error: {folder} is not a folder", file=sys.stderr)
+            return 2
+        try:
+            rules, index = _kinds_inputs(args)
+        except kinds.KindsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        started = time.time()
+        try:
+            page, summary, chosen = tree.build(
+                store,
+                args.subtree or store.get_meta("root") or "/",
+                args.min_size,
+                args.max_rows,
+                os.path.basename(args.db),
+                rules,
+                index,
+            )
+        finally:
+            if index is not None:
+                index.close()
+        # Written beside the target and renamed into place, so a failed run never leaves
+        # half a page behind.
+        fd, partial = tempfile.mkstemp(dir=folder, prefix=".tree-", suffix=".html")
+        try:
+            with open(fd, "w", encoding="utf-8") as out:
+                tree.render(out, page, summary, chosen)
+            # mkstemp makes the file 0600; give it what any new file would get under the umask.
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(partial, 0o666 & ~umask)
+            os.replace(partial, args.out)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(partial)
+            raise
+        print(
+            f"wrote {args.out}: {page.rows:,} rows, {human_bytes(os.path.getsize(args.out))}, "
+            f"entries under {human_bytes(page.threshold)} folded "
+            f"({human_duration(time.time() - started)})"
         )
-    finally:
-        if index is not None:
-            index.close()
-    # Written beside the target and renamed into place, so a failed run never leaves
-    # half a page behind.
-    fd, partial = tempfile.mkstemp(dir=folder, prefix=".tree-", suffix=".html")
-    try:
-        with open(fd, "w", encoding="utf-8") as out:
-            tree.render(out, page, summary, chosen)
-        # mkstemp makes the file 0600; give it what any new file would get under the umask.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(partial, 0o666 & ~umask)
-        os.replace(partial, args.out)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(partial)
-        raise
-    print(
-        f"wrote {args.out}: {page.rows:,} rows, {human_bytes(os.path.getsize(args.out))}, "
-        f"entries under {human_bytes(page.threshold)} folded "
-        f"({human_duration(time.time() - started)})"
-    )
-    return 0
+        return 0
 
 
 # ---- kinds: what the bytes are --------------------------------------------
@@ -1118,60 +1129,64 @@ def cmd_kinds(args: SimpleNamespace) -> int:
         0 on success, 2 if the database is not initialised, the subtree is not
         in it, ``out`` is not a folder or the kinds inputs cannot be used.
     """
-    store = Store(args.db)
-    if not store.is_initialised():
-        print(f"error: {args.db} is not initialised", file=sys.stderr)
-        return 2
-    found = tree.find_dir(store, args.subtree) if args.subtree else None
-    if args.subtree and found is None:
-        print(f"error: {args.subtree} is not in {args.db}", file=sys.stderr)
-        return 2
-    if args.out and os.path.exists(args.out) and not os.path.isdir(args.out):
-        print(f"error: {args.out} is not a folder", file=sys.stderr)
-        return 2
-    try:
-        rules, index = _kinds_inputs(args)
-    except kinds.KindsError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    with Store(args.db) as store:
+        if not store.is_initialised():
+            print(f"error: {args.db} is not initialised", file=sys.stderr)
+            return 2
+        found = tree.find_dir(store, args.subtree) if args.subtree else None
+        if args.subtree and found is None:
+            print(f"error: {args.subtree} is not in {args.db}", file=sys.stderr)
+            return 2
+        if args.out and os.path.exists(args.out) and not os.path.isdir(args.out):
+            print(f"error: {args.out} is not a folder", file=sys.stderr)
+            return 2
+        try:
+            rules, index = _kinds_inputs(args)
+        except kinds.KindsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
-    listed, finished = tree.crawl_time(store)
-    unfinished = (
-        store.pending_count() + store.running_count() + store.progress()["shards_error"]
-    )
-    root = store.get_meta("root")
-    print(f"# Kinds of data in {found[1] if found else root}")
-    looked = (
-        f"tarballs looked up in {os.path.basename(args.archive_db)}"
-        if index is not None
-        else "tarballs judged by their names (no --archive-db)"
-    )
-    named = f"rules {os.path.basename(args.rules)}" if args.rules else "rules built in"
-    print(
-        f"  listed {time.strftime('%Y-%m-%d', time.gmtime(listed))} · {looked} · {named}"
-    )
-    if unfinished:
-        _warn_incomplete(unfinished)
-    try:
-        counted = kinds.tally(kinds.walk(store, rules, index, args.subtree), listed)
-    finally:
-        if index is not None:
-            index.close()
-    _print_kinds(counted, index is not None)
-    if args.out:
-        about = {
-            "root": root or "",
-            "subtree": found[1] if found else "",
-            "listed": datetime.fromtimestamp(listed, UTC).isoformat(),
-            "finished": "true" if finished else "false",
-            "audit_db": args.db,
-            "archive_db": args.archive_db or "",
-            "rules": args.rules or "",
-            "undated": str(round(counted.undated)),
-        }
-        for path in kinds.write_csv(counted, args.out, about):
-            print(f"wrote {path}")
-    return 0
+        listed, finished = tree.crawl_time(store)
+        unfinished = (
+            store.pending_count()
+            + store.running_count()
+            + store.progress()["shards_error"]
+        )
+        root = store.get_meta("root")
+        print(f"# Kinds of data in {found[1] if found else root}")
+        looked = (
+            f"tarballs looked up in {os.path.basename(args.archive_db)}"
+            if index is not None
+            else "tarballs judged by their names (no --archive-db)"
+        )
+        named = (
+            f"rules {os.path.basename(args.rules)}" if args.rules else "rules built in"
+        )
+        print(
+            f"  listed {time.strftime('%Y-%m-%d', time.gmtime(listed))} · {looked} · {named}"
+        )
+        if unfinished:
+            _warn_incomplete(unfinished)
+        try:
+            counted = kinds.tally(kinds.walk(store, rules, index, args.subtree), listed)
+        finally:
+            if index is not None:
+                index.close()
+        _print_kinds(counted, index is not None)
+        if args.out:
+            about = {
+                "root": root or "",
+                "subtree": found[1] if found else "",
+                "listed": datetime.fromtimestamp(listed, UTC).isoformat(),
+                "finished": "true" if finished else "false",
+                "audit_db": args.db,
+                "archive_db": args.archive_db or "",
+                "rules": args.rules or "",
+                "undated": str(round(counted.undated)),
+            }
+            for path in kinds.write_csv(counted, args.out, about):
+                print(f"wrote {path}")
+        return 0
 
 
 def cmd_index(args: SimpleNamespace) -> int:
@@ -1188,12 +1203,14 @@ def cmd_index(args: SimpleNamespace) -> int:
         Always 0.
     """
     setup_logging(args.verbose)
-    store = Store(args.db)
-    log.info("building analysis indexes (this scans the whole table once per index)")
-    started = time.time()
-    store.build_indexes()
-    log.info("done in %s", human_duration(time.time() - started))
-    return 0
+    with Store(args.db) as store:
+        log.info(
+            "building analysis indexes (this scans the whole table once per index)"
+        )
+        started = time.time()
+        store.build_indexes()
+        log.info("done in %s", human_duration(time.time() - started))
+        return 0
 
 
 # ---- archive: what is inside the tars ------------------------------------
@@ -1512,6 +1529,7 @@ def _open_archive_store(path: str) -> ArchiveStore | None:
     except sqlite3.DatabaseError:
         # No such table, or the file is not a database at all -- both mean the same
         # thing to a caller who mistyped --db.
+        store.close_all()
         return None
     return store
 
@@ -1538,7 +1556,7 @@ def _other_kind_of_database(path: str) -> bool:
     store = _open_archive_store(path)
     if store is None:
         return True
-    store.close()
+    store.close_all()
     return False
 
 
@@ -1572,19 +1590,19 @@ def cmd_archive_register(args: SimpleNamespace) -> int:
         )
         return 2
 
-    store = ArchiveStore(args.db)
-    store.init_schema()
-    archive_id = store.register(args.name, "tar", folder, source, archive_set.parts)
-    store.seed_segments(archive_id, archive_set.parts)
+    with ArchiveStore(args.db) as store:
+        store.init_schema()
+        archive_id = store.register(args.name, "tar", folder, source, archive_set.parts)
+        store.seed_segments(archive_id, archive_set.parts)
 
-    print(f"registered {args.name} from {source}")
-    print(f"  folder : {folder}")
-    print(f"  parts  : {len(archive_set.parts)}")
-    print(f"  size   : {human_bytes(archive_set.total_size)}")
-    print(
-        f"\nnext: python -m dbaudit archive index --db {args.db} --archive {args.name}"
-    )
-    return 0
+        print(f"registered {args.name} from {source}")
+        print(f"  folder : {folder}")
+        print(f"  parts  : {len(archive_set.parts)}")
+        print(f"  size   : {human_bytes(archive_set.total_size)}")
+        print(
+            f"\nnext: python -m dbaudit archive index --db {args.db} --archive {args.name}"
+        )
+        return 0
 
 
 class _StoppedError(Exception):
@@ -2220,70 +2238,74 @@ def cmd_archive_index(args: SimpleNamespace) -> int:
             file=sys.stderr,
         )
         return 2
-    row = store.get(args.archive)
-    if row is None:
-        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
-        return 2
-
-    # Re-running `index` is how a walk resumes, so resuming a finished one reads
-    # nothing and writes nothing.
-    recheck = (
-        "\n       if that is not what you expect, `archive index --recheck` walks "
-        "the chain there again"
-    )
-    if args.recheck and row["state"] not in ("corrupt", "truncated", "unsupported"):
-        print(
-            f"error: {row['name']} is {row['state']}; --recheck asks again a verdict a "
-            f"walk reached -- corrupt, truncated or unsupported"
-            + (
-                ""
-                if row["state"] in ("complete", "stale")
-                else ", and `index` alone resumes this one"
-            ),
-            file=sys.stderr,
-        )
-        return 1
-    if row["state"] == "complete":
-        print(f"{row['name']}: complete ({row['n_members']:,} members)")
-        return 0
-    if row["state"] == "stale":
-        print(
-            f"error: {row['name']} is stale ({row['detail'] or ''}); re-register it "
-            f"to index the parts as they are now",
-            file=sys.stderr,
-        )
-        return 1
-    if row["state"] in ("truncated", "corrupt") and not args.recheck:
-        print(
-            f"error: {row['name']} is {row['state']}: {row['detail'] or ''}{recheck}",
-            file=sys.stderr,
-        )
-        return 1
-    if row["state"] == "unsupported" and not args.recheck:
-        if compressed := _compressed_as(row):
+    with store:
+        row = store.get(args.archive)
+        if row is None:
             print(
-                f"error: {row['name']} is {compressed}-compressed, not a tar: it cannot be "
-                f"walked header by header{recheck}",
+                f"error: no archive named {args.archive!r} in {args.db}",
                 file=sys.stderr,
             )
-        else:
+            return 2
+
+        # Re-running `index` is how a walk resumes, so resuming a finished one reads
+        # nothing and writes nothing.
+        recheck = (
+            "\n       if that is not what you expect, `archive index --recheck` walks "
+            "the chain there again"
+        )
+        if args.recheck and row["state"] not in ("corrupt", "truncated", "unsupported"):
             print(
-                f"error: {row['name']} is a pax-format archive, which dbaudit does not "
-                f"index: {row['detail'] or ''}{recheck}",
+                f"error: {row['name']} is {row['state']}; --recheck asks again a verdict a "
+                f"walk reached -- corrupt, truncated or unsupported"
+                + (
+                    ""
+                    if row["state"] in ("complete", "stale")
+                    else ", and `index` alone resumes this one"
+                ),
                 file=sys.stderr,
             )
-        return 1
+            return 1
+        if row["state"] == "complete":
+            print(f"{row['name']}: complete ({row['n_members']:,} members)")
+            return 0
+        if row["state"] == "stale":
+            print(
+                f"error: {row['name']} is stale ({row['detail'] or ''}); re-register it "
+                f"to index the parts as they are now",
+                file=sys.stderr,
+            )
+            return 1
+        if row["state"] in ("truncated", "corrupt") and not args.recheck:
+            print(
+                f"error: {row['name']} is {row['state']}: {row['detail'] or ''}{recheck}",
+                file=sys.stderr,
+            )
+            return 1
+        if row["state"] == "unsupported" and not args.recheck:
+            if compressed := _compressed_as(row):
+                print(
+                    f"error: {row['name']} is {compressed}-compressed, not a tar: it cannot be "
+                    f"walked header by header{recheck}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"error: {row['name']} is a pax-format archive, which dbaudit does not "
+                    f"index: {row['detail'] or ''}{recheck}",
+                    file=sys.stderr,
+                )
+            return 1
 
-    try:
-        lock = InstanceLock(args.lock or f"{args.db}.lock")
-        lock.__enter__()
-    except LockHeldError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
-    try:
-        return _run_index(args, store, row)
-    finally:
-        lock.__exit__(None, None, None)
+        try:
+            lock = InstanceLock(args.lock or f"{args.db}.lock")
+            lock.__enter__()
+        except LockHeldError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
+        try:
+            return _run_index(args, store, row)
+        finally:
+            lock.__exit__(None, None, None)
 
 
 #: The first bytes of the compressed files people name `.tar`. Such a file has no
@@ -3343,12 +3365,12 @@ def cmd_archive_run(args: SimpleNamespace) -> int:
         return 2
     workers = max(args.workers, 1)
     if args.dry_run:
-        if os.path.exists(args.db):
-            store = ArchiveStore(args.db)
-        else:  # nothing is written: a new database starts empty
-            store = ArchiveStore(":memory:")
-            store.init_schema()
-        _print_run_plan(*_run_jobs(store, listing, workers))
+        new = not os.path.exists(args.db)
+        # Nothing is written: a new database starts empty.
+        with ArchiveStore(":memory:" if new else args.db) as store:
+            if new:
+                store.init_schema()
+            _print_run_plan(*_run_jobs(store, listing, workers))
         return 0
     try:
         lock = InstanceLock(args.lock or f"{args.db}.lock")
@@ -3358,11 +3380,11 @@ def cmd_archive_run(args: SimpleNamespace) -> int:
         return 3
     try:
         # The work list is read under the lock, so no other walk changes it after.
-        store = ArchiveStore(args.db)
-        store.init_schema()
-        jobs, counts, sizes = _run_jobs(store, listing, workers)
-        _print_run_plan(jobs, counts, sizes)
-        return _run_archives(args, store, jobs)
+        with ArchiveStore(args.db) as store:
+            store.init_schema()
+            jobs, counts, sizes = _run_jobs(store, listing, workers)
+            _print_run_plan(jobs, counts, sizes)
+            return _run_archives(args, store, jobs)
     finally:
         lock.__exit__(None, None, None)
 
@@ -3485,7 +3507,7 @@ def cmd_archive_import(args: SimpleNamespace) -> int:
     if source is None:
         print(f"error: {args.source} holds no registered archives", file=sys.stderr)
         return 2
-    source.close()
+    source.close_all()
     if _no_folder(args.db, args.lock, args.from_lock):
         return 2
     if _other_kind_of_database(args.db):
@@ -3494,27 +3516,27 @@ def cmd_archive_import(args: SimpleNamespace) -> int:
     if os.path.exists(args.db) and os.path.samefile(args.db, args.source):
         print(f"error: --from names {args.db} itself", file=sys.stderr)
         return 2
-    store = ArchiveStore(args.db)
-    try:
-        # The source's lock too: a walk still writing to it would be copied half-done.
-        with (
-            InstanceLock(args.lock or f"{args.db}.lock"),
-            InstanceLock(args.from_lock or f"{args.source}.lock"),
-        ):
-            store.init_schema()
-            moved = store.import_from(args.source)
-    except LockHeldError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
-    except ValueError as exc:
-        print(f"error: {exc}; nothing was imported", file=sys.stderr)
-        return 2
-    replaced = sum(old is not None for _, _, old in moved)
-    print(
-        f"imported {len(moved):,} archives from {args.source} into {args.db}, "
-        f"{replaced:,} of them replacing one of the same content"
-    )
-    return 0
+    with ArchiveStore(args.db) as store:
+        try:
+            # The source's lock too: a walk still writing to it would be copied half-done.
+            with (
+                InstanceLock(args.lock or f"{args.db}.lock"),
+                InstanceLock(args.from_lock or f"{args.source}.lock"),
+            ):
+                store.init_schema()
+                moved = store.import_from(args.source)
+        except LockHeldError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
+        except ValueError as exc:
+            print(f"error: {exc}; nothing was imported", file=sys.stderr)
+            return 2
+        replaced = sum(old is not None for _, _, old in moved)
+        print(
+            f"imported {len(moved):,} archives from {args.source} into {args.db}, "
+            f"{replaced:,} of them replacing one of the same content"
+        )
+        return 0
 
 
 def cmd_archive_forget(args: SimpleNamespace) -> int:
@@ -3536,29 +3558,30 @@ def cmd_archive_forget(args: SimpleNamespace) -> int:
     if store is None:
         print(f"error: {args.db} holds no registered archives", file=sys.stderr)
         return 2
-    try:
-        with InstanceLock(args.lock or f"{args.db}.lock"):
-            found = store.query(
-                "SELECT id, state, n_members FROM archives WHERE name=? AND folder=?",
-                (args.archive, args.folder),
-            )
-            if not found:
-                print(
-                    f"error: no archive named {args.archive!r} in {args.folder}",
-                    file=sys.stderr,
+    with store:
+        try:
+            with InstanceLock(args.lock or f"{args.db}.lock"):
+                found = store.query(
+                    "SELECT id, state, n_members FROM archives WHERE name=? AND folder=?",
+                    (args.archive, args.folder),
                 )
-                return 2
-            for row in found:
-                what = (
-                    f"archive {row['id']}: {args.folder}/{args.archive}, {row['state']}, "
-                    f"{row['n_members']:,} members"
-                )
-                store.forget(row["id"], what)
-                print(f"forgot {what}")
-    except LockHeldError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
-    return 0
+                if not found:
+                    print(
+                        f"error: no archive named {args.archive!r} in {args.folder}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                for row in found:
+                    what = (
+                        f"archive {row['id']}: {args.folder}/{args.archive}, {row['state']}, "
+                        f"{row['n_members']:,} members"
+                    )
+                    store.forget(row["id"], what)
+                    print(f"forgot {what}")
+        except LockHeldError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 3
+        return 0
 
 
 def cmd_archive_status(args: SimpleNamespace) -> int:
@@ -3579,15 +3602,19 @@ def cmd_archive_status(args: SimpleNamespace) -> int:
     if store is None:
         print(f"error: {args.db} holds no registered archives", file=sys.stderr)
         return 2
-    if not args.archive:
-        _print_archive_summary(store, args.db)
+    with store:
+        if not args.archive:
+            _print_archive_summary(store, args.db)
+            return 0
+        row = store.get(args.archive)
+        if row is None:
+            print(
+                f"error: no archive named {args.archive!r} in {args.db}",
+                file=sys.stderr,
+            )
+            return 2
+        _print_archive_status(store, row)
         return 0
-    row = store.get(args.archive)
-    if row is None:
-        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
-        return 2
-    _print_archive_status(store, row)
-    return 0
 
 
 def _print_archive_summary(store: ArchiveStore, db: str) -> None:
@@ -3713,61 +3740,73 @@ def cmd_archive_report(args: SimpleNamespace) -> int:
             file=sys.stderr,
         )
         return 2
-    row = store.get(args.archive)
-    if row is None:
-        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
-        return 2
-
-    print(f"# {row['name']}  [{row['state']}]")
-    _print_index_completeness_warning(row)
-
-    result = archive_report.summary(store, row["id"], top=args.top)
-    if result["n_members"] == 0:
-        # T9-9: say so plainly and stop here, rather than printing a page of empty
-        # sections or dividing by a member count of zero.
-        print("\n  not indexed: 0 members recorded. Run `archive index` first.")
-        return 0
-
-    print(
-        f"\n{result['n_members']:,} members, {human_bytes(result['member_bytes'])}, "
-        f"{result['n_parts']} part(s)\n"
-    )
-
-    print("## By top-level directory")
-    for key, agg in result["by_top_dir"][: args.top]:
-        print(f"  {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {key}")
-
-    print("\n## By depth")
-    for depth in (1, 2, 3):
-        print(f"  depth {depth}:")
-        for key, agg in result["by_depth"][depth][: args.top]:
+    with store:
+        row = store.get(args.archive)
+        if row is None:
             print(
-                f"    {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {key}"
+                f"error: no archive named {args.archive!r} in {args.db}",
+                file=sys.stderr,
+            )
+            return 2
+
+        print(f"# {row['name']}  [{row['state']}]")
+        _print_index_completeness_warning(row)
+
+        result = archive_report.summary(store, row["id"], top=args.top)
+        if result["n_members"] == 0:
+            # T9-9: say so plainly and stop here, rather than printing a page of empty
+            # sections or dividing by a member count of zero.
+            print("\n  not indexed: 0 members recorded. Run `archive index` first.")
+            return 0
+
+        print(
+            f"\n{result['n_members']:,} members, {human_bytes(result['member_bytes'])}, "
+            f"{result['n_parts']} part(s)\n"
+        )
+
+        print("## By top-level directory")
+        for key, agg in result["by_top_dir"][: args.top]:
+            print(
+                f"  {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {key}"
             )
 
-    print("\n## By extension")
-    for key, agg in result["by_extension"][: args.top]:
-        label = "(no extension)" if key == "(none)" else f".{key}"
-        print(f"  {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {label}")
+        print("\n## By depth")
+        for depth in (1, 2, 3):
+            print(f"  depth {depth}:")
+            for key, agg in result["by_depth"][depth][: args.top]:
+                print(
+                    f"    {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {key}"
+                )
 
-    print(f"\n## Largest {len(result['largest'])} member(s)")
-    for member in result["largest"]:
-        path = f"{member['dir']}/{member['name']}" if member["dir"] else member["name"]
-        print(f"  {human_bytes(member['size']):>12}  {path}")
+        print("\n## By extension")
+        for key, agg in result["by_extension"][: args.top]:
+            label = "(no extension)" if key == "(none)" else f".{key}"
+            print(
+                f"  {human_bytes(agg['bytes']):>12}  {agg['count']:>10,} files  {label}"
+            )
 
-    if result["mtime_span"] is not None:
-        earliest, latest = result["mtime_span"]
-        print(f"\n## mtime span\n  {earliest} .. {latest}")
+        print(f"\n## Largest {len(result['largest'])} member(s)")
+        for member in result["largest"]:
+            path = (
+                f"{member['dir']}/{member['name']}" if member["dir"] else member["name"]
+            )
+            print(f"  {human_bytes(member['size']):>12}  {path}")
 
-    print("\n## Owners")
-    for (uname, gname), agg in result["owners"]:
-        print(f"  {agg['count']:>10,} members  {uname or '(none)'}/{gname or '(none)'}")
+        if result["mtime_span"] is not None:
+            earliest, latest = result["mtime_span"]
+            print(f"\n## mtime span\n  {earliest} .. {latest}")
 
-    print("\n## Types")
-    for type_code, agg in result["types"]:
-        print(f"  {agg['count']:>10,} members  type {type_code!r}")
+        print("\n## Owners")
+        for (uname, gname), agg in result["owners"]:
+            print(
+                f"  {agg['count']:>10,} members  {uname or '(none)'}/{gname or '(none)'}"
+            )
 
-    return 0
+        print("\n## Types")
+        for type_code, agg in result["types"]:
+            print(f"  {agg['count']:>10,} members  type {type_code!r}")
+
+        return 0
 
 
 def cmd_archive_export(args: SimpleNamespace) -> int:
@@ -3794,14 +3833,18 @@ def cmd_archive_export(args: SimpleNamespace) -> int:
             file=sys.stderr,
         )
         return 2
-    row = store.get(args.archive)
-    if row is None:
-        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
-        return 2
-    _print_index_completeness_warning(row)
-    for path in archive_report.write_csv(store, row["id"], args.out):
-        print(f"wrote {path}")
-    return 0
+    with store:
+        row = store.get(args.archive)
+        if row is None:
+            print(
+                f"error: no archive named {args.archive!r} in {args.db}",
+                file=sys.stderr,
+            )
+            return 2
+        _print_index_completeness_warning(row)
+        for path in archive_report.write_csv(store, row["id"], args.out):
+            print(f"wrote {path}")
+        return 0
 
 
 def _print_candidates(matches: Sequence[sqlite3.Row]) -> None:
@@ -4355,204 +4398,215 @@ def cmd_archive_cat(args: SimpleNamespace) -> int:
             file=sys.stderr,
         )
         return 2
-    row = store.get(args.archive)
-    if row is None:
-        print(f"error: no archive named {args.archive!r} in {args.db}", file=sys.stderr)
-        return 2
-    if row["state"] == "stale":
-        # The parts changed since this archive was indexed (Task 6's flag), so the
-        # stored offsets may no longer describe the bytes actually on Dropbox now --
-        # writing whatever currently sits at those offsets into a file the operator
-        # will trust is worse than refusing outright.
-        print(
-            f"error: {row['name']} is stale ({row['detail'] or ''}); its offsets may "
-            f"no longer match the parts -- re-register it before trusting them",
-            file=sys.stderr,
-        )
-        return 1
-
-    if row["state"] == "unsupported" and (compressed := _compressed_as(row)):
-        print(
-            f"error: {row['name']} is {compressed}-compressed, not a tar: dbaudit cannot "
-            f"extract from it",
-            file=sys.stderr,
-        )
-        return 1
-    if row["state"] == "unsupported":
-        # Its index stops at the first pax member, and pax is where a member's name and
-        # size can sit outside the checksummed header the read checks below rely on.
-        print(
-            f"error: {row['name']} is a pax-format archive, which dbaudit does not "
-            f"index or extract: {row['detail'] or ''}",
-            file=sys.stderr,
-        )
-        return 1
-
-    matches = store.find_members(row["id"], args.member)
-    if not matches:
-        print(f"error: no member {args.member!r} in {args.archive}", file=sys.stderr)
-        return 1
-
-    if args.offset is not None:
-        chosen = next((m for m in matches if m["hdr_offset"] == args.offset), None)
-        if chosen is None:
+    with store:
+        row = store.get(args.archive)
+        if row is None:
             print(
-                f"error: no member {args.member!r} at --offset {args.offset} in "
-                f"{args.archive}; candidates:",
+                f"error: no archive named {args.archive!r} in {args.db}",
+                file=sys.stderr,
+            )
+            return 2
+        if row["state"] == "stale":
+            # The parts changed since this archive was indexed (Task 6's flag), so the
+            # stored offsets may no longer describe the bytes actually on Dropbox now --
+            # writing whatever currently sits at those offsets into a file the operator
+            # will trust is worse than refusing outright.
+            print(
+                f"error: {row['name']} is stale ({row['detail'] or ''}); its offsets may "
+                f"no longer match the parts -- re-register it before trusting them",
+                file=sys.stderr,
+            )
+            return 1
+
+        if row["state"] == "unsupported" and (compressed := _compressed_as(row)):
+            print(
+                f"error: {row['name']} is {compressed}-compressed, not a tar: dbaudit cannot "
+                f"extract from it",
+                file=sys.stderr,
+            )
+            return 1
+        if row["state"] == "unsupported":
+            # Its index stops at the first pax member, and pax is where a member's name and
+            # size can sit outside the checksummed header the read checks below rely on.
+            print(
+                f"error: {row['name']} is a pax-format archive, which dbaudit does not "
+                f"index or extract: {row['detail'] or ''}",
+                file=sys.stderr,
+            )
+            return 1
+
+        matches = store.find_members(row["id"], args.member)
+        if not matches:
+            print(
+                f"error: no member {args.member!r} in {args.archive}", file=sys.stderr
+            )
+            return 1
+
+        if args.offset is not None:
+            chosen = next((m for m in matches if m["hdr_offset"] == args.offset), None)
+            if chosen is None:
+                print(
+                    f"error: no member {args.member!r} at --offset {args.offset} in "
+                    f"{args.archive}; candidates:",
+                    file=sys.stderr,
+                )
+                _print_candidates(matches)
+                return 2
+        elif len(matches) > 1:
+            print(
+                f"error: {len(matches)} members match {args.member!r}; choose one with "
+                f"--offset:",
                 file=sys.stderr,
             )
             _print_candidates(matches)
             return 2
-    elif len(matches) > 1:
-        print(
-            f"error: {len(matches)} members match {args.member!r}; choose one with "
-            f"--offset:",
-            file=sys.stderr,
-        )
-        _print_candidates(matches)
-        return 2
-    else:
-        chosen = matches[0]
+        else:
+            chosen = matches[0]
 
-    if row["state"] != "complete":
-        # A walk not yet finished can hold rows from a chain whose start nothing has
-        # confirmed -- one a cold scan began inside a tarball stored in the archive,
-        # listing that tarball's members as if they were the archive's own.
-        segment = next(
-            s
-            for s in store.segments(row["id"])
-            if s["scan_from"] <= chosen["hdr_offset"]
-            and (s["stop_at"] is None or chosen["hdr_offset"] < s["stop_at"])
-        )
-        if not segment["joined"]:
-            print(
-                f"error: {args.member!r} was found by a chain whose start is not yet "
-                f"confirmed (segment {segment['idx']}); it may belong to a tar stored "
-                f"inside the archive. Run `archive index` to finish the walk first.",
-                file=sys.stderr,
+        if row["state"] != "complete":
+            # A walk not yet finished can hold rows from a chain whose start nothing has
+            # confirmed -- one a cold scan began inside a tarball stored in the archive,
+            # listing that tarball's members as if they were the archive's own.
+            segment = next(
+                s
+                for s in store.segments(row["id"])
+                if s["scan_from"] <= chosen["hdr_offset"]
+                and (s["stop_at"] is None or chosen["hdr_offset"] < s["stop_at"])
             )
-            return 1
-
-    if chosen["type"] not in REGULAR_MEMBER_TYPES:
-        print(
-            f"error: {args.member!r} is not a regular file (type "
-            f"{chosen['type']!r}) in {args.archive}",
-            file=sys.stderr,
-        )
-        return 1
-
-    archive_set = _stored_archive_set(store, row)
-    tokens = limiter = None
-    if row["source"] == "dropbox":
-        try:
-            tokens = TokenProvider(remote=args.remote)
-        except AuthError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        # A single stream, not a pool -- but Dropbox's budget is account-wide
-        # regardless, so a 429 must still park this reader for the full Retry-After
-        # rather than a lone stream hammering straight past it (T8-7).
-        limiter = AdaptiveLimiter(rps=DEFAULT_RPS, max_concurrency=1)
-    reader = _reader_for(row, archive_set, tokens, limiter)
-    # A pass-through window (T8-6): the walker's adaptive window guesses generously
-    # because it does not know where the next header is, but cat already knows
-    # exactly what it wants. With the default window, the final fill of anything not
-    # finished in one request would drag part of the *next* member along -- real
-    # Dropbox traffic that never reaches the output. window_min=window_max=1 makes
-    # every fill want exactly what is asked, clamped only by the archive's own end; the
-    # request adds only the lead and tail of its shape (reader.py), up to 64 KiB each
-    # side within its part, which are thrown away.
-    concat = ConcatFile(archive_set, reader, window_min=1, window_max=1)
-    # What must follow the member, for the trailing anchor: the member the index says
-    # starts there, or the terminator where a complete walk ended there. A walk stopped
-    # early knows neither, and then nothing there vouches for the read.
-    end = chosen["data_offset"] + -(-chosen["size"] // BLOCK) * BLOCK
-    follows = store.member_at(row["id"], end)
-    if follows is None and row["state"] == "complete" and row["end_offset"] == end:
-        follows = "zeros"
-
-    # --out is written through a temp file in the same directory, promoted onto the
-    # target only once every byte is confirmed written -- never opened (let alone
-    # truncated) directly. Fix round 1: at CAT_CHUNK granularity a multi-part database
-    # like Task 11's needs many reads, so a ReaderError or short read on any read but
-    # the first is the ordinary failure shape, not an edge case, and it must neither
-    # leave a partial file at the target nor destroy a good one already there. The
-    # same directory keeps the final os.replace atomic rather than a cross-filesystem
-    # copy; mkstemp's own uniqueness keeps two concurrent `cat`s from colliding.
-    # stdout has no such seam -- bytes already written to it cannot be recalled, so a
-    # failure partway through is reported but not undone.
-    tmp_path = None
-    if args.out:
-        out_dir = os.path.dirname(args.out) or "."
-        try:
-            fd, tmp_path = tempfile.mkstemp(dir=out_dir, prefix=".cat-", suffix=".tmp")
-        except OSError as exc:
-            print(f"error: could not open --out {args.out!r}: {exc}", file=sys.stderr)
-            return 2
-        sink_cm = os.fdopen(fd, "wb")
-    else:
-        sink_cm = contextlib.nullcontext(sys.stdout.buffer)
-
-    written = 0
-    try:
-        with sink_cm as sink:
-            try:
-                for piece in _verified_member_bytes(
-                    concat, chosen, archive_set.total_size, follows
-                ):
-                    sink.write(piece)
-                    written += len(piece)
-            except _CatError as exc:
-                # Not one byte that failed a check was written -- but to stdout, what
-                # passed before the failure is already out.
+            if not segment["joined"]:
                 print(
-                    f"error: could not read {args.member!r} from {args.archive} "
-                    f"reliably: {exc}",
-                    file=sys.stderr,
-                )
-                return 1
-            except ReaderError as exc:
-                # A part is shorter than the index believes -- data lost or corrupted
-                # at the storage layer since this archive was indexed. Surfacing it as
-                # a clean failure beats letting a raw reader exception traceback out
-                # of a command whose whole point is to hand the caller a trustworthy
-                # file.
-                print(
-                    f"error: could not read {args.member!r} from {args.archive}: {exc}",
+                    f"error: {args.member!r} was found by a chain whose start is not yet "
+                    f"confirmed (segment {segment['idx']}); it may belong to a tar stored "
+                    f"inside the archive. Run `archive index` to finish the walk first.",
                     file=sys.stderr,
                 )
                 return 1
 
-        # By construction the loop above only exits normally once written == the size
-        # it started from; kept as an explicit check rather than trusted implicitly,
-        # because a truncated file returned with exit 0 is the one failure mode here
-        # that leaves the operator with nothing to say why (T8-8).
-        if written != chosen["size"]:
+        if chosen["type"] not in REGULAR_MEMBER_TYPES:
             print(
-                f"error: wrote {written} of {chosen['size']} byte(s) for "
-                f"{args.member!r} in {args.archive}",
+                f"error: {args.member!r} is not a regular file (type "
+                f"{chosen['type']!r}) in {args.archive}",
                 file=sys.stderr,
             )
             return 1
 
-        if tmp_path is not None:
+        archive_set = _stored_archive_set(store, row)
+        tokens = limiter = None
+        if row["source"] == "dropbox":
             try:
-                os.replace(tmp_path, args.out)
+                tokens = TokenProvider(remote=args.remote)
+            except AuthError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            # A single stream, not a pool -- but Dropbox's budget is account-wide
+            # regardless, so a 429 must still park this reader for the full Retry-After
+            # rather than a lone stream hammering straight past it (T8-7).
+            limiter = AdaptiveLimiter(rps=DEFAULT_RPS, max_concurrency=1)
+        reader = _reader_for(row, archive_set, tokens, limiter)
+        # A pass-through window (T8-6): the walker's adaptive window guesses generously
+        # because it does not know where the next header is, but cat already knows
+        # exactly what it wants. With the default window, the final fill of anything not
+        # finished in one request would drag part of the *next* member along -- real
+        # Dropbox traffic that never reaches the output. window_min=window_max=1 makes
+        # every fill want exactly what is asked, clamped only by the archive's own end; the
+        # request adds only the lead and tail of its shape (reader.py), up to 64 KiB each
+        # side within its part, which are thrown away.
+        concat = ConcatFile(archive_set, reader, window_min=1, window_max=1)
+        # What must follow the member, for the trailing anchor: the member the index says
+        # starts there, or the terminator where a complete walk ended there. A walk stopped
+        # early knows neither, and then nothing there vouches for the read.
+        end = chosen["data_offset"] + -(-chosen["size"] // BLOCK) * BLOCK
+        follows = store.member_at(row["id"], end)
+        if follows is None and row["state"] == "complete" and row["end_offset"] == end:
+            follows = "zeros"
+
+        # --out is written through a temp file in the same directory, promoted onto the
+        # target only once every byte is confirmed written -- never opened (let alone
+        # truncated) directly. Fix round 1: at CAT_CHUNK granularity a multi-part database
+        # like Task 11's needs many reads, so a ReaderError or short read on any read but
+        # the first is the ordinary failure shape, not an edge case, and it must neither
+        # leave a partial file at the target nor destroy a good one already there. The
+        # same directory keeps the final os.replace atomic rather than a cross-filesystem
+        # copy; mkstemp's own uniqueness keeps two concurrent `cat`s from colliding.
+        # stdout has no such seam -- bytes already written to it cannot be recalled, so a
+        # failure partway through is reported but not undone.
+        tmp_path = None
+        if args.out:
+            out_dir = os.path.dirname(args.out) or "."
+            try:
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=out_dir, prefix=".cat-", suffix=".tmp"
+                )
             except OSError as exc:
                 print(
-                    f"error: could not write --out {args.out!r}: {exc}", file=sys.stderr
+                    f"error: could not open --out {args.out!r}: {exc}", file=sys.stderr
                 )
                 return 2
-            tmp_path = None  # now lives at args.out; nothing left to clean up
-        return 0
-    finally:
-        # Reached on every failure return above (the temp file was never promoted) and
-        # on nothing else: the target is left exactly as it was, good copy or none.
-        if tmp_path is not None:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            sink_cm = os.fdopen(fd, "wb")
+        else:
+            sink_cm = contextlib.nullcontext(sys.stdout.buffer)
+
+        written = 0
+        try:
+            with sink_cm as sink:
+                try:
+                    for piece in _verified_member_bytes(
+                        concat, chosen, archive_set.total_size, follows
+                    ):
+                        sink.write(piece)
+                        written += len(piece)
+                except _CatError as exc:
+                    # Not one byte that failed a check was written -- but to stdout, what
+                    # passed before the failure is already out.
+                    print(
+                        f"error: could not read {args.member!r} from {args.archive} "
+                        f"reliably: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                except ReaderError as exc:
+                    # A part is shorter than the index believes -- data lost or corrupted
+                    # at the storage layer since this archive was indexed. Surfacing it as
+                    # a clean failure beats letting a raw reader exception traceback out
+                    # of a command whose whole point is to hand the caller a trustworthy
+                    # file.
+                    print(
+                        f"error: could not read {args.member!r} from {args.archive}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+            # By construction the loop above only exits normally once written == the size
+            # it started from; kept as an explicit check rather than trusted implicitly,
+            # because a truncated file returned with exit 0 is the one failure mode here
+            # that leaves the operator with nothing to say why (T8-8).
+            if written != chosen["size"]:
+                print(
+                    f"error: wrote {written} of {chosen['size']} byte(s) for "
+                    f"{args.member!r} in {args.archive}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            if tmp_path is not None:
+                try:
+                    os.replace(tmp_path, args.out)
+                except OSError as exc:
+                    print(
+                        f"error: could not write --out {args.out!r}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                tmp_path = None  # now lives at args.out; nothing left to clean up
+            return 0
+        finally:
+            # Reached on every failure return above (the temp file was never promoted) and
+            # on nothing else: the target is left exactly as it was, good copy or none.
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
 
 # ---- the command line -----------------------------------------------------
