@@ -150,6 +150,9 @@ class LocalRangeReader:
         self.archive = archive
         self.requests = 0
         self.bytes_fetched = 0
+        #: Never read: a local read does not wait. It exists so a caller can set a stop on
+        #: either kind of reader.
+        self.should_stop: Callable[[], bool] | None = None
 
     def read_range(self, part_idx: int, offset: int, length: int) -> bytes:
         """Read bytes from one part.

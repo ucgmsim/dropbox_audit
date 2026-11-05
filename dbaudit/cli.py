@@ -33,11 +33,12 @@ import threading
 import time
 import zlib
 from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import FrameType, SimpleNamespace
 from typing import Annotated, NoReturn
 
 import typer
@@ -48,12 +49,13 @@ from .api import (
     ApiError,
     AuthExpiredError,
     HttpLister,
+    Lister,
     PathNotFoundError,
     RateLimitedError,
     TransientError,
 )
 from .archive import report as archive_report
-from .archive.candidates import find_candidates
+from .archive.candidates import Listing, find_candidates
 from .archive.parts import ArchiveSet, ArchiveSetError
 from .archive.reader import (
     WINDOW_MAX,
@@ -188,7 +190,15 @@ def setup_logging(verbose: bool = False, logfile: str | None = None) -> None:
     )
 
 
-def build_lister(remote: str, tokens=None):
+def _crawl_remote(store: Store) -> str:
+    remote = store.get_meta("remote", "dropbox")
+    assert remote is not None  # the default is a str, so None cannot come back
+    return remote
+
+
+def build_lister(
+    remote: str, tokens: TokenProvider | None = None
+) -> tuple[TokenProvider, HttpLister]:
     """A lister, with its own HTTP session, over ``tokens`` or a new provider. Pass the
     provider a run already holds: each new one shells out to rclone for its token."""
     tokens = tokens or TokenProvider(remote=remote)
@@ -198,7 +208,7 @@ def build_lister(remote: str, tokens=None):
 # ---- subcommands --------------------------------------------------------
 
 
-def cmd_init(args) -> int:
+def cmd_init(args: SimpleNamespace) -> int:
     projected = args.min_free_gb * 1024**3
     available = free_bytes(args.db)
     if available < projected:
@@ -255,7 +265,7 @@ def cmd_init(args) -> int:
     return 0
 
 
-def _progress_reporter(store, stop: threading.Event, interval: float) -> None:
+def _progress_reporter(store: Store, stop: threading.Event, interval: float) -> None:
     last_files, last_time = None, time.time()
     while not stop.wait(interval):
         try:
@@ -288,7 +298,7 @@ def _progress_reporter(store, stop: threading.Event, interval: float) -> None:
         store.close()
 
 
-def cmd_run(args) -> int:
+def cmd_run(args: SimpleNamespace) -> int:
     setup_logging(args.verbose, args.log)
     store = Store(args.db)
     if not store.is_initialised() or not store.get_meta("root"):
@@ -304,7 +314,7 @@ def cmd_run(args) -> int:
         return 3
 
     try:
-        remote = store.get_meta("remote", "dropbox")
+        remote = _crawl_remote(store)
         try:
             _, lister = build_lister(remote)
         except AuthError as exc:
@@ -327,7 +337,7 @@ def cmd_run(args) -> int:
         stop = threading.Event()
         hard = {"count": 0}
 
-        def handle(signum, frame):
+        def handle(signum: int, frame: FrameType | None) -> None:
             hard["count"] += 1
             if hard["count"] == 1:
                 log.warning(
@@ -406,7 +416,7 @@ def cmd_run(args) -> int:
         lock.__exit__(None, None, None)
 
 
-def cmd_status(args) -> int:
+def cmd_status(args: SimpleNamespace) -> int:
     store = Store(args.db)
     root = store.get_meta("root") if store.is_initialised() else None
     if not root:
@@ -446,7 +456,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-def cmd_verify(args) -> int:
+def cmd_verify(args: SimpleNamespace) -> int:
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -478,7 +488,7 @@ def cmd_verify(args) -> int:
     return 0 if result.ok else 1
 
 
-def _space_usage(remote: str):
+def _space_usage(remote: str) -> tuple[int, int | None, int | None]:
     """Dropbox's own view of usage, for the reconciliation residual."""
     import requests
 
@@ -494,7 +504,7 @@ def _space_usage(remote: str):
     return body.get("used", 0), allocation.get("used"), allocation.get("allocated")
 
 
-def cmd_report(args) -> int:
+def cmd_report(args: SimpleNamespace) -> int:
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -519,9 +529,7 @@ def cmd_report(args) -> int:
     print("## Reconciliation")
     live = store.query("SELECT COALESCE(SUM(size), 0) FROM files")[0][0]
     try:
-        account_used, team_used, team_allocated = _space_usage(
-            store.get_meta("remote", "dropbox")
-        )
+        account_used, team_used, team_allocated = _space_usage(_crawl_remote(store))
         _, _, residual = reports.reconcile(store, account_used)
         print(f"  measured live bytes under {root}: {human_bytes(live)}")
         print(f"  Dropbox reports for this account : {human_bytes(account_used)}")
@@ -628,7 +636,7 @@ def _warn_incomplete(unfinished: int) -> None:
     print("  Every figure below is a lower bound.")
 
 
-def cmd_export(args) -> int:
+def cmd_export(args: SimpleNamespace) -> int:
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -638,7 +646,7 @@ def cmd_export(args) -> int:
     return 0
 
 
-def cmd_tree(args) -> int:
+def cmd_tree(args: SimpleNamespace) -> int:
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -711,7 +719,9 @@ KINDS_AGES = ((0.5, "> 6 months"), (1, "> 1 year"), (2, "> 2 years"), (5, "> 5 y
 REPORT_KIND_AGES = (2, 5, 10)  # the years Cold data uses
 
 
-def _kinds_inputs(args) -> tuple[kinds.Rules, sqlite3.Connection | None]:
+def _kinds_inputs(
+    args: SimpleNamespace,
+) -> tuple[kinds.Rules, sqlite3.Connection | None]:
     """The site rules and the archive index a command was given. Raises KindsError when
     either cannot be used."""
     rules = kinds.load_rules(args.rules)
@@ -765,9 +775,14 @@ def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
         print(_kinds_row(group, loose, tarred, total, width))
         if len(shown[group]) > 1:
             for kind in shown[group]:
+                kind_loose, kind_tarred = counted.kinds[kind]
                 print(
                     _kinds_row(
-                        "  " + kinds.KINDS[kind][0], *counted.kinds[kind], total, width
+                        "  " + kinds.KINDS[kind][0],
+                        kind_loose,
+                        kind_tarred,
+                        total,
+                        width,
                     )
                 )
     print(
@@ -818,7 +833,7 @@ def _print_kinds(counted: kinds.Tally, looked_inside: bool) -> None:
         )
 
 
-def cmd_kinds(args) -> int:
+def cmd_kinds(args: SimpleNamespace) -> int:
     store = Store(args.db)
     if not store.is_initialised():
         print(f"error: {args.db} is not initialised", file=sys.stderr)
@@ -861,7 +876,7 @@ def cmd_kinds(args) -> int:
     _print_kinds(counted, index is not None)
     if args.out:
         about = {
-            "root": root,
+            "root": root or "",
             "subtree": found[1] if found else "",
             "listed": datetime.fromtimestamp(listed, UTC).isoformat(),
             "finished": "true" if finished else "false",
@@ -875,7 +890,7 @@ def cmd_kinds(args) -> int:
     return 0
 
 
-def cmd_index(args) -> int:
+def cmd_index(args: SimpleNamespace) -> int:
     setup_logging(args.verbose)
     store = Store(args.db)
     log.info("building analysis indexes (this scans the whole table once per index)")
@@ -888,7 +903,7 @@ def cmd_index(args) -> int:
 # ---- archive: what is inside the tars ------------------------------------
 
 
-def _local_hash(path) -> str:
+def _local_hash(path: Path) -> str:
     """Dropbox's content hash for a local file.
 
     Computed here so a local archive and a Dropbox one land on the same identity
@@ -906,7 +921,7 @@ def _local_hash(path) -> str:
     return digest.hexdigest()
 
 
-def _folder_entries(lister, folder: str, name: str) -> list[dict]:
+def _folder_entries(lister: Lister, folder: str, name: str) -> list[dict[str, object]]:
     """Every file in `folder` whose name starts with `name`, across all pages.
 
     The prefix is the filter, not a guess at the part naming: `ArchiveSet.from_entries`
@@ -919,6 +934,9 @@ def _folder_entries(lister, folder: str, name: str) -> list[dict]:
         if e.get(".tag") == "file" and e["name"].startswith(name)
     ]
     while page.has_more:
+        assert (
+            page.cursor is not None
+        )  # Dropbox sends one with every page that has more
         page = lister.continue_(page.cursor)
         entries += [
             e
@@ -936,7 +954,14 @@ LISTING_ATTEMPTS = 8
 LISTING_BACKOFF = 2.0
 
 
-def _listed(lister, limiter, folder, name, stop=None, tokens=None):
+def _listed(
+    lister: Lister,
+    limiter: AdaptiveLimiter,
+    folder: str,
+    name: str,
+    stop: threading.Event | None = None,
+    tokens: TokenProvider | None = None,
+) -> list[dict[str, object]] | None:
     """`_folder_entries` through the shared limiter, the way the crawl lists, or None if
     ``stop`` is set first. After a 401 the token is dropped from ``tokens`` before the
     listing is asked again: Dropbox can refuse a token that still looks fresh here."""
@@ -963,7 +988,7 @@ def _listed(lister, limiter, folder, name, stop=None, tokens=None):
     return None
 
 
-def _archive_set(args):
+def _archive_set(args: SimpleNamespace) -> tuple[ArchiveSet, str, str]:
     """Build an ArchiveSet from Dropbox or from a local directory."""
     if args.local_dir:
         directory = Path(args.local_dir)
@@ -992,12 +1017,17 @@ def _archive_set(args):
     )
 
 
-def _stored_archive_set(store, row) -> ArchiveSet:
+def _stored_archive_set(store: ArchiveStore, row: sqlite3.Row) -> ArchiveSet:
     """Rebuild the coordinate space from what `register` recorded."""
     return ArchiveSet(store.parts_of(row["id"]))
 
 
-def _reader_for(row, archive_set, tokens=None, limiter=None):
+def _reader_for(
+    row: sqlite3.Row,
+    archive_set: ArchiveSet,
+    tokens: TokenProvider | None = None,
+    limiter: AdaptiveLimiter | None = None,
+) -> LocalRangeReader | DropboxRangeReader:
     """A reader per caller: a `requests.Session` is not thread-safe, so two chains
     cannot share one.
 
@@ -1007,10 +1037,18 @@ def _reader_for(row, archive_set, tokens=None, limiter=None):
     """
     if row["source"] == "local":
         return LocalRangeReader(row["folder"], archive_set)
+    assert tokens is not None and limiter is not None  # a Dropbox archive is given both
     return DropboxRangeReader(archive_set, tokens, limiter)
 
 
-def _fingerprint(store, row, remote, tokens, limiter, stop=None):
+def _fingerprint(
+    store: ArchiveStore,
+    row: sqlite3.Row,
+    remote: str,
+    tokens: TokenProvider | None,
+    limiter: AdaptiveLimiter | None,
+    stop: threading.Event | None = None,
+) -> tuple[list[str], list[str]] | None:
     """Compare every registered part against what the folder holds right now.
 
     Matching is by file id first and by name second: all 18 parts of v01p0_incomplete
@@ -1018,6 +1056,7 @@ def _fingerprint(store, row, remote, tokens, limiter, stop=None):
     Returns (missing, changed) part names, or None if ``stop`` is set before the folder
     is listed.
     """
+    assert limiter is not None  # only a Dropbox archive is fingerprinted, and has one
     _, lister = build_lister(remote, tokens)
     entries = _listed(lister, limiter, row["folder"], row["name"], stop, tokens)
     if entries is None:
@@ -1034,7 +1073,7 @@ def _fingerprint(store, row, remote, tokens, limiter, stop=None):
     return missing, changed
 
 
-def _open_archive_store(path):
+def _open_archive_store(path: str) -> ArchiveStore | None:
     """The archive store at `path`, or None if it holds no archive index.
 
     `index` and `status` never create one: `register` initialises the schema, so a typo
@@ -1052,7 +1091,7 @@ def _open_archive_store(path):
     return store
 
 
-def _other_kind_of_database(path) -> bool:
+def _other_kind_of_database(path: str) -> bool:
     """A file at ``path`` that is not an archive database -- the audit database, given by
     mistake -- which `run` and `import` must not add their tables to."""
     if not os.path.exists(path):
@@ -1064,7 +1103,7 @@ def _other_kind_of_database(path) -> bool:
     return False
 
 
-def cmd_archive_register(args) -> int:
+def cmd_archive_register(args: SimpleNamespace) -> int:
     try:
         archive_set, source, folder = _archive_set(args)
     except ArchiveSetError as exc:
@@ -1111,7 +1150,15 @@ class _Run:
     """
 
     def __init__(
-        self, args, store, row, archive_set, tokens, limiter, stop, on_chains=None
+        self,
+        args: SimpleNamespace,
+        store: ArchiveStore,
+        row: sqlite3.Row,
+        archive_set: ArchiveSet,
+        tokens: TokenProvider | None,
+        limiter: AdaptiveLimiter | None,
+        stop: threading.Event,
+        on_chains: Callable[[int], None] | None = None,
     ):
         self.args = args
         self.store = store
@@ -1133,7 +1180,7 @@ class _Run:
         self.failed = False
         #: Set by the first chain to meet a pax header. The format is the archive's, not
         #: one part's, so every other chain would meet it too: the walk stops.
-        self.unsupported = None
+        self.unsupported: str | None = None
         #: Workers walking or about to claim a segment, told to ``on_chains`` as it changes:
         #: `archive run` gives the streams of chains that have finished to the next archive.
         self.chains = 0
@@ -1145,13 +1192,20 @@ class _Run:
     def stopping(self) -> bool:
         return self.stop.is_set() or self.halt.is_set()
 
-    def chain(self, step) -> None:
+    def chain(self, step: int) -> None:
         with self.chain_lock:  # so the reports land in the order counts changed
             self.chains += step
             if self.on_chains is not None:
                 self.on_chains(self.chains)
 
-    def commit(self, segment_id, members, next_offset, requests, bytes_fetched) -> None:
+    def commit(
+        self,
+        segment_id: int,
+        members: list[Member],
+        next_offset: int,
+        requests: int,
+        bytes_fetched: int,
+    ) -> None:
         """Write one batch, or refuse to once `--max-batches` has been reached.
 
         Refusing *before* the write is what makes `--max-batches N` mean exactly N
@@ -1190,7 +1244,7 @@ class _Run:
                     self.halt.set()
 
 
-def _chain_start(run, segment, concat):
+def _chain_start(run: _Run, segment: sqlite3.Row, concat: ConcatFile) -> int | None:
     """Where a chain with no start yet begins: where the chain before it crossed into this
     part, which is exactly where the join would start it, or else the first header a scan
     finds -- None if there is none. The scan gives way, before every read, to that crossing
@@ -1200,6 +1254,7 @@ def _chain_start(run, segment, concat):
         if segment["idx"] == 0:
             return None
         before = run.store.segment(run.archive_id, segment["idx"] - 1)
+        assert before is not None  # segments are seeded for every index in turn
         return before["exit_offset"] if before["state"] == "crossed" else None
 
     try:
@@ -1216,7 +1271,7 @@ def _chain_start(run, segment, concat):
         return crossed()
 
 
-def _walk_segment(run, segment) -> None:
+def _walk_segment(run: _Run, segment: sqlite3.Row) -> None:
     """One chain: find where it starts if it has none, then walk to its boundary."""
     args = run.args
     reader = _reader_for(run.row, run.archive_set, run.tokens, run.limiter)
@@ -1238,7 +1293,7 @@ def _walk_segment(run, segment) -> None:
     def charged():
         spent["requests"], spent["bytes"] = reader.requests, reader.bytes_fetched
 
-    def commit(members, next_offset):
+    def commit(members: list[Member], next_offset: int) -> None:
         requests, fetched = delta()
         run.commit(segment["id"], members, next_offset, requests, fetched)
         charged()  # only once the write went through
@@ -1322,7 +1377,7 @@ def _walk_segment(run, segment) -> None:
     run.store.finish_segment(segment["id"], result, requests, fetched)
 
 
-def _worker(run) -> None:
+def _worker(run: _Run) -> None:
     """Claim segments until there are none left, or until the run is stopping."""
     owner = f"{os.getpid()}:{threading.get_ident()}"
     run.chain(1)
@@ -1367,7 +1422,7 @@ _ROW_FIELDS = (
 )
 
 
-def _row_of(item):
+def _row_of(item: sqlite3.Row | Member | None) -> tuple[object, ...] | None:
     """A stored row or a freshly read Member, as one comparable tuple."""
     if item is None:
         return None
@@ -1376,7 +1431,7 @@ def _row_of(item):
     return tuple(getattr(item, field) for field in _ROW_FIELDS)
 
 
-def _audit_repeated_paths(run) -> list[int]:
+def _audit_repeated_paths(run: _Run) -> list[int]:
     """Read again every row whose path the index holds more than once, and walk again
     each segment holding a row that disagrees. Returns those segments' indexes.
 
@@ -1417,12 +1472,12 @@ def _audit_repeated_paths(run) -> list[int]:
         window_max=run.args.window_max,
     )
 
-    def disagrees(row):
+    def disagrees(row: sqlite3.Row) -> bool:
         if run.stopping():
             raise _StoppedError("stopped during the audit")
         return _row_of(read_member(concat, row["hdr_offset"])) != _row_of(row)
 
-    def confirmed(row):
+    def confirmed(row: sqlite3.Row) -> bool:
         concat.drop_cache()  # a second request, asked differently
         return disagrees(row)
 
@@ -1451,7 +1506,7 @@ def _audit_repeated_paths(run) -> list[int]:
     return redo
 
 
-def _join(store, archive_id):
+def _join(store: ArchiveStore, archive_id: int):
     """Confirm each chain's start against its predecessor's exit; repair what disagrees.
 
     Walk from segment 0, which is joined by construction: a tar begins at offset 0, so
@@ -1511,7 +1566,7 @@ def _join(store, archive_id):
         return _BLOCKED, segment  # pending | walking | error: no verdict yet
 
 
-def cmd_archive_index(args) -> int:
+def cmd_archive_index(args: SimpleNamespace) -> int:
     setup_logging(args.verbose)
     if _no_folder(args.lock):
         return 2
@@ -1599,7 +1654,13 @@ COMPRESSION = (
 )
 
 
-def _compression(row, archive_set, tokens, limiter, should_stop=None) -> str | None:
+def _compression(
+    row: sqlite3.Row,
+    archive_set: ArchiveSet,
+    tokens: TokenProvider | None,
+    limiter: AdaptiveLimiter | None,
+    should_stop: Callable[[], bool] | None = None,
+) -> str | None:
     """The compression format the archive's first bytes announce, or None.
 
     A format is named only once two readings agree, as every verdict is: the second asks
@@ -1622,7 +1683,7 @@ def _compression(row, archive_set, tokens, limiter, should_stop=None) -> str | N
     return found
 
 
-def _compressed_as(row) -> str | None:
+def _compressed_as(row: sqlite3.Row) -> str | None:
     """The compression format an `unsupported` archive was recorded under, or None for a
     pax archive."""
     fmt, compressed, _ = (row["detail"] or "").partition("-compressed: ")
@@ -1637,22 +1698,22 @@ class _Walked:
 
     state: str
     code: int
-    errors: list = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     started: bool = True
     stopped: bool = False
     bug: bool = False
 
 
 def _walk_archive(
-    args,
-    store,
-    row,
-    tokens,
-    limiter,
-    stop,
-    check_before=True,
-    recheck=False,
-    on_chains=None,
+    args: SimpleNamespace,
+    store: ArchiveStore,
+    row: sqlite3.Row,
+    tokens: TokenProvider | None,
+    limiter: AdaptiveLimiter | None,
+    stop: threading.Event,
+    check_before: bool = True,
+    recheck: bool = False,
+    on_chains: Callable[[int], None] | None = None,
 ) -> _Walked:
     """Walk one registered archive to a verdict, or until ``stop`` is set.
 
@@ -1815,7 +1876,9 @@ def _walk_archive(
         try:
             # Listed even when stopping: a verdict is recorded only after this check. A walk
             # with no verdict to record skips it; the next lists the folder before it begins.
-            missing, changed = _fingerprint(store, row, args.remote, tokens, limiter)
+            fingerprinted = _fingerprint(store, row, args.remote, tokens, limiter)
+            assert fingerprinted is not None  # no stop was passed, so the listing ran
+            missing, changed = fingerprinted
         except Exception as exc:  # noqa: BLE001  # a failed re-list is logged; the walk's verdict still stands
             log.warning(
                 "could not re-list %s to fingerprint it: %s: %s",
@@ -1964,7 +2027,7 @@ def _walk_archive(
     return _Walked(state, 0, stopped=True)
 
 
-def _run_index(args, store, row) -> int:
+def _run_index(args: SimpleNamespace, store: ArchiveStore, row: sqlite3.Row) -> int:
     dropbox = row["source"] == "dropbox"
     workers = max(args.workers, 1)
     tokens = limiter = None
@@ -1977,7 +2040,7 @@ def _run_index(args, store, row) -> int:
     stop = threading.Event()
     hard = {"count": 0}
 
-    def handle(signum, frame):
+    def handle(signum: int, frame: FrameType | None) -> None:
         hard["count"] += 1
         if hard["count"] == 1:
             # Flag first, then log: the log line is then proof the walk is already
@@ -2032,7 +2095,7 @@ def _run_index(args, store, row) -> int:
     return walked.code
 
 
-def _print_archive_status(store, row) -> None:
+def _print_archive_status(store: ArchiveStore, row: sqlite3.Row) -> None:
     stats = store.stats(row["id"])
     total = stats["total_size"] or 1
     ratio = (
@@ -2094,7 +2157,9 @@ def _print_archive_status(store, row) -> None:
 VERDICTS = frozenset({"complete", "truncated", "corrupt", "unsupported"})
 
 
-def _run_jobs(store, listing, workers):
+def _run_jobs(
+    store: ArchiveStore, listing: Listing, workers: int
+) -> tuple[list[Job], Counter[str], Counter[str]]:
     """What `archive run` has to walk, largest first, and a count of everything else.
 
     Every valid archive the listing names that has no verdict yet, and every archive the
@@ -2118,7 +2183,15 @@ def _run_jobs(store, listing, workers):
             copies_of[candidate.set_hash].append((candidate.folder, candidate.name))
     jobs, counts, sizes, places, ids = [], Counter(), Counter(), set(), set()
 
-    def add(kind, folder, name, size, chains, archive_id, copies=()):
+    def add(
+        kind: str,
+        folder: str,
+        name: str,
+        size: int,
+        chains: int,
+        archive_id: int | None,
+        copies: Iterable[tuple[str, str]] = (),
+    ) -> None:
         # An archive that moved is listed where it is now, and is in the database where
         # it was registered: one walk, from where it is now, which comes first.
         if (folder, name) in places or archive_id in ids:
@@ -2194,19 +2267,27 @@ class _Walking:
     def __init__(self):
         self._lock, self._hashes = threading.Lock(), set()
 
-    def claim(self, set_hash) -> bool:
+    def claim(self, set_hash: str) -> bool:
         with self._lock:
             if set_hash in self._hashes:
                 return False
             self._hashes.add(set_hash)
             return True
 
-    def release(self, set_hash) -> None:
+    def release(self, set_hash: str) -> None:
         with self._lock:
             self._hashes.discard(set_hash)
 
 
-def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
+def _walk_job(
+    args: SimpleNamespace,
+    store: ArchiveStore,
+    job: Job,
+    tokens: TokenProvider,
+    limiter: AdaptiveLimiter,
+    stop: threading.Event,
+    walking: _Walking,
+) -> Done:
     """One archive at its turn. One listing of its folder registers what is there now:
     the same row, with its walk so far, if the content is unchanged -- wherever it was
     registered before -- or a new one if not. Then the walk. If the archive has gone, or
@@ -2264,7 +2345,7 @@ def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
             if row["state"] in VERDICTS:
                 return Done("done")  # this content was walked before
 
-            def chains(n):
+            def chains(n: int) -> None:
                 job.chains = max(1, n)  # the scheduler counts this one's chains now
 
             walked = _walk_archive(
@@ -2292,7 +2373,7 @@ def _walk_job(args, store, job, tokens, limiter, stop, walking) -> Done:
         store.close()  # this thread's own connection
 
 
-def _record_bug(store, job, exc) -> None:
+def _record_bug(store: ArchiveStore, job: Job, exc: Exception) -> None:
     """Leave the archive an unexpected failure stopped in `error`, saying why."""
     detail = f"{type(exc).__name__}: {exc}"
     try:
@@ -2304,7 +2385,7 @@ def _record_bug(store, job, exc) -> None:
         store.close()  # this thread's own connection
 
 
-def _print_run_plan(jobs, counts, sizes) -> None:
+def _print_run_plan(jobs: list[Job], counts: Counter[str], sizes: Counter[str]) -> None:
     total = sum(job.size for job in jobs)
     print(
         f"archive run: {len(jobs):,} archives to walk ({human_bytes(total)}): "
@@ -2335,7 +2416,7 @@ def _no_folder(*paths) -> bool:
     return False
 
 
-def cmd_archive_run(args) -> int:
+def cmd_archive_run(args: SimpleNamespace) -> int:
     setup_logging(args.verbose)
     if not 1 <= args.streams <= args.max_streams:
         print(
@@ -2391,7 +2472,7 @@ def cmd_archive_run(args) -> int:
         lock.__exit__(None, None, None)
 
 
-def _run_limiter(args) -> AdaptiveLimiter:
+def _run_limiter(args: SimpleNamespace) -> AdaptiveLimiter:
     """One limiter for every walk and listing: Dropbox limits per account. The rate starts
     where the streams need it, a request costing about 1.5 s, so the stream count is what
     Dropbox's pushback adjusts."""
@@ -2403,14 +2484,14 @@ def _run_limiter(args) -> AdaptiveLimiter:
     )
 
 
-def _run_archives(args, store, jobs) -> int:
+def _run_archives(args: SimpleNamespace, store: ArchiveStore, jobs: list[Job]) -> int:
     tokens = TokenProvider(remote=args.remote)  # one, so its token is cached once
     limiter = _run_limiter(args)
     stop = threading.Event()
     walking = _Walking()
     hard = {"count": 0}
 
-    def handle(signum, frame):
+    def handle(signum: int, frame: FrameType | None) -> None:
         hard["count"] += 1
         if hard["count"] == 1:
             stop.set()
@@ -2452,7 +2533,7 @@ def _run_archives(args, store, jobs) -> int:
     return 0
 
 
-def cmd_archive_import(args) -> int:
+def cmd_archive_import(args: SimpleNamespace) -> int:
     source = _open_archive_store(args.source)
     if source is None:
         print(f"error: {args.source} holds no registered archives", file=sys.stderr)
@@ -2489,7 +2570,7 @@ def cmd_archive_import(args) -> int:
     return 0
 
 
-def cmd_archive_forget(args) -> int:
+def cmd_archive_forget(args: SimpleNamespace) -> int:
     if _no_folder(args.lock):
         return 2
     store = _open_archive_store(args.db)
@@ -2521,7 +2602,7 @@ def cmd_archive_forget(args) -> int:
     return 0
 
 
-def cmd_archive_status(args) -> int:
+def cmd_archive_status(args: SimpleNamespace) -> int:
     store = _open_archive_store(args.db)
     if store is None:
         print(f"error: {args.db} holds no registered archives", file=sys.stderr)
@@ -2537,7 +2618,7 @@ def cmd_archive_status(args) -> int:
     return 0
 
 
-def _print_archive_summary(store, db) -> None:
+def _print_archive_summary(store: ArchiveStore, db: str) -> None:
     """Every archive in the database, by state, and the ones mid-walk: what `archive
     run` has done so far, readable from any shell. One archive's full status is
     `--archive`."""
@@ -2571,7 +2652,7 @@ def _print_archive_summary(store, db) -> None:
             )
 
 
-def _print_index_completeness_warning(row) -> None:
+def _print_index_completeness_warning(row: sqlite3.Row) -> None:
     """The "this index may not be the whole archive" warning, shared by `report` and
     `export` rather than restated by each (T9-8; extended from `report` alone to
     `export` too in Task 9's fix round 1).
@@ -2617,7 +2698,7 @@ def _print_index_completeness_warning(row) -> None:
         print("  that are no longer there.")
 
 
-def cmd_archive_report(args) -> int:
+def cmd_archive_report(args: SimpleNamespace) -> int:
     """Print the rollups `archive_report.summary` computes over one archive's
     manifest, laid out the way `cmd_report` lays out the audit's own numbers.
 
@@ -2689,7 +2770,7 @@ def cmd_archive_report(args) -> int:
     return 0
 
 
-def cmd_archive_export(args) -> int:
+def cmd_archive_export(args: SimpleNamespace) -> int:
     """Write one archive's manifest and rollups as CSV, and print each path written --
     the same convention `cmd_export` uses for the audit's own CSV export.
     """
@@ -2711,7 +2792,7 @@ def cmd_archive_export(args) -> int:
     return 0
 
 
-def _print_candidates(matches) -> None:
+def _print_candidates(matches: Sequence[sqlite3.Row]) -> None:
     """The offset/size/mtime of every member a path matched, so `--offset` can name
     one of them. Shared by the two `cat` outcomes that need it: ambiguous (no
     `--offset` given) and a given `--offset` that names none of them.
@@ -2735,7 +2816,9 @@ def _ambiguous(shared: bytes) -> bool:
     ) * AMBIGUOUS_RATIO < len(shared)
 
 
-def _plan_reads(archive_set, hdr_offset, data_offset, end, stop):
+def _plan_reads(
+    archive_set: ArchiveSet, hdr_offset: int, data_offset: int, end: int, stop: int
+) -> list[tuple[int, int]]:
     """The reads that cover [hdr_offset, stop), as (offset, length) pairs.
 
     Each is at most CAT_CHUNK, and consecutive ones share bytes, so every read is checked
@@ -2748,7 +2831,7 @@ def _plan_reads(archive_set, hdr_offset, data_offset, end, stop):
     header sequence [hdr_offset, data_offset), and what follows it [end, stop).
     """
 
-    def part_end(offset):
+    def part_end(offset: int) -> int:
         idx, _ = archive_set.locate(offset)
         part = archive_set.parts[idx]
         return part.offset + part.size
@@ -2777,14 +2860,14 @@ def _plan_reads(archive_set, hdr_offset, data_offset, end, stop):
             at = end_of_read - CAT_OVERLAP
 
 
-def _headers_mismatch(block, member):
+def _headers_mismatch(block: bytes, member: sqlite3.Row) -> str | None:
     """Why ``block`` -- the bytes from a member's first header to its data -- is not the
     member its index row describes, or None if it is. Every field the row holds is
     compared: a read of another member's headers is caught even at the same size, and so
     is a part rewritten under the index."""
     try:
         with tarfile.open(fileobj=io.BytesIO(block), mode="r:") as sequence:
-            info = sequence.firstmember
+            info = sequence.firstmember  # ty: ignore[unresolved-attribute]  # real TarFile attribute; typeshed omits it
     except tarfile.ReadError as exc:
         return f"no header there ({exc})"
     if info is None:
@@ -2812,7 +2895,12 @@ def _headers_mismatch(block, member):
     return None
 
 
-def _verified_member_bytes(concat, member, total, follows):
+def _verified_member_bytes(
+    concat: ConcatFile,
+    member: sqlite3.Row,
+    total: int,
+    follows: sqlite3.Row | str | None,
+) -> Iterator[bytes]:
     """Yield one member's bytes, none of them before a second request vouches for them.
 
     A tar keeps no checksum of member data, and Dropbox has answered range requests with
@@ -2852,8 +2940,11 @@ def _verified_member_bytes(concat, member, total, follows):
             f"before this member does"
         )
     end = data_offset + -(-size // BLOCK) * BLOCK  # where the next header sits
-    known = follows not in ("zeros", None)  # the next member's index row
-    stop = min(follows["data_offset"] if known else end + BLOCK, total)
+    successor = follows if isinstance(follows, sqlite3.Row) else None
+    known = successor is not None  # the next member's index row
+    stop = min(
+        successor["data_offset"] if successor is not None else end + BLOCK, total
+    )
     plan = _plan_reads(concat.archive, hdr, data_offset, end, stop)
     last = len(plan) - 1
     # Part boundaries inside the two anchors, where a read spans them. The bytes of the
@@ -2862,7 +2953,7 @@ def _verified_member_bytes(concat, member, total, follows):
     head_cuts = [b for b in bounds if hdr < b < data_offset]
     tail_cuts = [b for b in bounds if end < b < stop]
 
-    def fetch(i):
+    def fetch(i: int) -> bytes:
         at, length = plan[i]
         concat.drop_cache()  # a re-read must be a new request
         concat.seek(at)
@@ -2871,20 +2962,20 @@ def _verified_member_bytes(concat, member, total, follows):
             raise _CatError(f"read {len(buf):,} of {length:,} byte(s) at {at:,}")
         return buf
 
-    def shared(i, buf, side):
+    def shared(i: int, buf: bytes, side: str) -> bytes:
         """The bytes read i has in common with read i+1 ("tail") or read i-1 ("head")."""
         j = i if side == "tail" else i - 1
         lo, hi = plan[j + 1][0], plan[j][0] + plan[j][1]
         return buf[lo - plan[i][0] : hi - plan[i][0]]
 
-    def head_ok(i, buf, head):
+    def head_ok(i: int, buf: bytes, head: bytes | None) -> bool:
         """Read i agrees with the read written before it -- or, the first read, with
         the member's own headers."""
         if i == 0:
             return _headers_mismatch(buf[: data_offset - hdr], member) is None
         return shared(i, buf, "head") == head
 
-    def trailer(buf):
+    def trailer(buf: bytes) -> bytes | None:
         """What follows the member, as the last read has it: the next member's header
         sequence, or one block. None if the archive ends first."""
         at = plan[last][0]
@@ -2892,11 +2983,11 @@ def _verified_member_bytes(concat, member, total, follows):
             return buf[end - at : stop - at]  # short only if the parts shrank: refused
         return buf[end - at : end - at + BLOCK] if stop >= end + BLOCK else None
 
-    def trailer_ok(block):
+    def trailer_ok(block: bytes | None) -> bool:
         if block is None:
             return True
-        if known:
-            return _headers_mismatch(block, follows) is None
+        if successor is not None:
+            return _headers_mismatch(block, successor) is None
         if not any(block[:BLOCK]):
             return True
         if follows == "zeros":
@@ -2907,7 +2998,7 @@ def _verified_member_bytes(concat, member, total, follows):
             return False
         return True
 
-    def settle(i, buf):
+    def settle(i: int, buf: bytes) -> bytes:
         """Read i as the fetches settle it: the version that leads every other by two.
         Normally that is ``buf`` and one fresh fetch agreeing with it. Once fetches have
         disagreed it takes more, so a wrong body served twice cannot outvote a right one
@@ -2921,7 +3012,7 @@ def _verified_member_bytes(concat, member, total, follows):
             digest = hashlib.sha256(again).digest()
             votes[digest] += 1
             kept.setdefault(digest, again)
-            (lead, top), *rest = votes.most_common(2) + [(None, 0)]
+            (lead, top), *rest = votes.most_common(2) + [(b"", 0)]
             if top - rest[0][1] >= 2:
                 return kept[lead]
             leader = votes.most_common(1)[0][0]
@@ -2930,7 +3021,7 @@ def _verified_member_bytes(concat, member, total, follows):
 
     written = data_offset
 
-    def release(i, buf):
+    def release(i: int, buf: bytes) -> bytes:
         nonlocal written
         at = plan[i][0]
         lo, hi = max(written, at), min(data_offset + size, at + plan[i][1])
@@ -3024,7 +3115,7 @@ def _verified_member_bytes(concat, member, total, follows):
         yield piece
 
 
-def cmd_archive_cat(args) -> int:
+def cmd_archive_cat(args: SimpleNamespace) -> int:
     """Extract one member's bytes by path, addressed directly through the index
     rather than a search: a walk already recorded `data_offset` and `size` for every
     member, so retrieving one is a direct read, not a scan. Each read is checked against
@@ -3262,13 +3353,17 @@ archive_app = typer.Typer(
 app.add_typer(archive_app, name="archive")
 
 
-def _run(ctx: typer.Context, body, params: dict) -> NoReturn:
+def _run(
+    ctx: typer.Context,
+    body: Callable[[SimpleNamespace], int],
+    params: dict[str, object],
+) -> NoReturn:
     options = {name: value for name, value in params.items() if name != "ctx"}
     verbose = ctx.find_root().params["verbose"]
     raise typer.Exit(body(SimpleNamespace(**options, verbose=verbose)))
 
 
-def arguments(command, **given) -> SimpleNamespace:
+def arguments(command: Callable[..., object], **given: object) -> SimpleNamespace:
     """What `command`'s body would get: its defaults, with `given` over them."""
     defaults = {
         name: parameter.default
@@ -3401,7 +3496,7 @@ def tree_command(
             show_default=False,
             help="fold entries smaller than this, e.g. 100MiB (default 1GiB)",
         ),
-    ] = DEFAULT_TREE_MIN_SIZE,
+    ] = DEFAULT_TREE_MIN_SIZE,  # ty: ignore[invalid-parameter-default]  # Typer parses the default through parse_size
     max_rows: Annotated[
         int,
         typer.Option(
