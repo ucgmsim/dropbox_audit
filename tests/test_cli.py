@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import runpy
 import signal
 import sqlite3
@@ -24,6 +25,20 @@ from dbaudit.tree import Summary
 from dbaudit.verify import VerifyResult, verify_subtree
 from tests.fakes import TREE, FakeLister
 from tests.listing_fakes import LISTED, archive, archive_index, file, listing
+
+# GitHub Actions sets GITHUB_ACTIONS=true on every runner. Typer reads that
+# variable when it is imported and, if it is set, styles its help and error
+# messages with terminal codes for colour and bold, as if writing to a terminal.
+# Those codes can fall inside the phrases these tests look for, so the tests
+# strip them first. Only runs under GitHub Actions are affected (or runs with
+# FORCE_COLOR or PY_COLORS set). Anywhere else Typer prints plain text, and
+# plain() returns it unchanged.
+_STYLE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(text: str) -> str:
+    """Return ``text`` without terminal styling, as a reader of the help sees it."""
+    return _STYLE.sub("", text)
 
 
 def seeded_db(tmp_path: Path):
@@ -192,7 +207,7 @@ def test_every_command_has_help(
     command: tuple[str, ...], capsys: pytest.CaptureFixture[str]
 ):
     assert main([*command, "--help"]) == 0
-    assert "Usage: dbaudit " + " ".join(command) in capsys.readouterr().out
+    assert "Usage: dbaudit " + " ".join(command) in plain(capsys.readouterr().out)
 
 
 # What each body got from argparse, so scripts that run dbaudit keep working.
@@ -406,14 +421,14 @@ def test_a_body_s_exit_code_is_the_command_s(monkeypatch: pytest.MonkeyPatch):
 
 def test_a_missing_option_is_a_usage_error(capsys: pytest.CaptureFixture[str]):
     assert main(["status"]) == 2
-    assert "Missing option '--db'" in capsys.readouterr().err
+    assert "Missing option '--db'" in plain(capsys.readouterr().err)
 
 
 def test_a_word_where_a_number_goes_is_a_usage_error(
     capsys: pytest.CaptureFixture[str],
 ):
     assert main(["report", "--db", "a.db", "--top", "many"]) == 2
-    assert "'many' is not a valid int" in capsys.readouterr().err
+    assert "'many' is not a valid int" in plain(capsys.readouterr().err)
 
 
 def test_no_command_shows_the_commands(capsys: pytest.CaptureFixture[str]):
@@ -427,7 +442,7 @@ def test_register_takes_exactly_one_place(
     where: list[str], capsys: pytest.CaptureFixture[str]
 ):
     assert main(["archive", "register", "--db", "x.db", "--name", "a.tar", *where]) == 2
-    assert "exactly one of --folder and --local-dir" in capsys.readouterr().err
+    assert "exactly one of --folder and --local-dir" in plain(capsys.readouterr().err)
 
 
 def test_arguments_fills_in_a_commands_defaults():
