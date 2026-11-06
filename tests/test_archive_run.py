@@ -1133,6 +1133,10 @@ def test_many_archives_walked_at_once_give_exactly_the_rows_walked_one_at_a_time
         world.add(f"/R/f{i:03d}", f"a{i:03d}.tar", data, part_size=part_size)
     world.install(monkeypatch)
     many, single = str(tmp_path / "many.db"), str(tmp_path / "single.db")
+    # One connection stays open across the 400 commands below. SQLite checkpoints and
+    # fsyncs the WAL whenever the last connection to a file closes, and each command
+    # closes its store; holding one keeps that to the end of the test.
+    close_after_test(ArchiveStore(single)).init_schema()
     assert run(many, world.audit_db(), "--streams", "24", "--max-streams", "24") == 0
     for folder, name in names.items():
         assert (
