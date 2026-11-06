@@ -11,6 +11,7 @@ bytes. ``--unshaped`` does that for every test, which sends the requests ConcatF
 before shapes: the tests that fail then are the ones that need shapes to pass.
 """
 
+import gc
 import os
 import random
 from types import SimpleNamespace
@@ -46,6 +47,8 @@ def _shapes(request: pytest.FixtureRequest):
 
 @pytest.fixture(autouse=True)
 def _close_stores():
-    """Close the stores the test handed to `tests.stores.close_after_test`."""
+    """Close the stores the test handed to `tests.stores.close_after_test`, then
+    collect garbage so that a connection this test leaked is reported against it."""
     yield
     stores.close_opened()
+    gc.collect()

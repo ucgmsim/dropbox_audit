@@ -282,6 +282,7 @@ DBAUDIT_FUZZ=300 uv run pytest tests/test_confirming_reads_fuzz.py   # 300 rando
 uvx lefthook install                                 # once per clone: CI's checks run before every push
 uvx lefthook run pre-push --all-files --no-tty       # CI's checks now, without pushing
 uv run pytest --cov=dbaudit                          # coverage; CI requires 95%
+PYTHONTRACEMALLOC=20 uv run pytest                   # a ResourceWarning then names the line that opened the leaked connection
 ```
 
 CI runs the team's shared checks (ucgmsim/meta-ci-action) on every push to main.
