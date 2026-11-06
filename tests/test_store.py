@@ -439,6 +439,16 @@ def test_close_all_closes_a_connection_another_thread_opened(tmp_path: Path):
             other.submit(theirs.execute, "SELECT 1").result()
 
 
+def test_the_lookup_caches_start_empty_after_close_all(tmp_path: Path):
+    store = new_store(tmp_path)
+    before = store._caches()
+    before[0]["/teamspace"] = 1
+    store.close_all()
+    after = store._caches()
+    assert all(new is not old for new, old in zip(after, before))
+    assert after[0] == {}
+
+
 def test_a_store_opens_new_connections_after_close_all(tmp_path: Path):
     store = new_store(tmp_path)
     with ThreadPoolExecutor(max_workers=1) as other:
@@ -447,7 +457,6 @@ def test_a_store_opens_new_connections_after_close_all(tmp_path: Path):
         assert store.get_meta("root") == "/TeamSpace"
         assert other.submit(store.get_meta, "root").result() == "/TeamSpace"
         assert other.submit(store.connect).result() is not theirs
-    store.close_all()
 
 
 def test_a_with_block_closes_the_store_when_it_ends(tmp_path: Path):

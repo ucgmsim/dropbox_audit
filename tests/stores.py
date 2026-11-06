@@ -20,5 +20,11 @@ def close_after_test[S: Store | ArchiveStore](store: S) -> S:
 
 def close_opened() -> None:
     """Close every store handed to `close_after_test` since the last call."""
+    first: Exception | None = None
     while _opened:
-        _opened.pop().close_all()
+        try:
+            _opened.pop().close_all()
+        except Exception as exc:  # noqa: BLE001 - close the rest, then raise the first
+            first = first or exc
+    if first is not None:
+        raise first

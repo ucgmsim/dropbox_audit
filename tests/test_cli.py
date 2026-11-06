@@ -902,7 +902,6 @@ def test_the_progress_reporter_logs_counts_then_rate_and_eta(
         "shards 1/2 done (0 error) | 100 files, 2 dirs, 2.0 KiB",
         "shards 1/2 done (0 error) | 700 files, 2 dirs, 2.0 KiB | 60 files/s | eta~11s",
     ]
-    writer.close()
 
 
 def test_the_progress_reporter_reports_no_eta_while_nothing_is_done(
@@ -925,7 +924,6 @@ def test_the_progress_reporter_reports_no_eta_while_nothing_is_done(
     reader.close()
     last = [r.getMessage() for r in caplog.records if r.name == "dbaudit"][-1]
     assert last == "shards 0/2 done (0 error) | 50 files, 0 dirs, 0 B | 40 files/s"
-    writer.close()
 
 
 def test_status_says_how_long_ago_the_last_pass_completed(

@@ -979,7 +979,6 @@ def test_a_store_opens_new_connections_after_close_all(tmp_path: Path):
         assert store.get("a.tar")["n_parts"] == 2
         assert other.submit(store.get, "a.tar").result()["n_parts"] == 2
         assert other.submit(store.connect).result() is not theirs
-    store.close_all()
 
 
 def test_a_with_block_closes_the_store_when_it_ends(tmp_path: Path):
