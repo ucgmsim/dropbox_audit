@@ -38,6 +38,8 @@ class ThreadConnections:
             `close` or `close_all` has closed it since.
         """
         if getattr(self._local, "generation", None) != self._generation:
+            # This thread's connection, if any, was closed by `close_all`.
+            self._local.conn = None
             return None
         return self._local.conn
 
