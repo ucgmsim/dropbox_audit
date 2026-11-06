@@ -687,7 +687,7 @@ def cmd_report(args: SimpleNamespace) -> int:
         0 on success, 2 if the database is not initialised or the kinds inputs
         cannot be used.
     """
-    with Store(args.db) as store:
+    with Store(args.db) as store, contextlib.ExitStack() as stack:
         if not store.is_initialised():
             print(f"error: {args.db} is not initialised", file=sys.stderr)
             return 2
@@ -696,6 +696,8 @@ def cmd_report(args: SimpleNamespace) -> int:
         except kinds.KindsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        if index is not None:
+            stack.callback(index.close)
 
         prog = store.progress()
         unfinished = (
@@ -790,13 +792,9 @@ def cmd_report(args: SimpleNamespace) -> int:
 
         print("\n## By kind")
         print(f"  {KINDS_DATING}")
-        try:
-            counted = kinds.tally(
-                kinds.walk(store, rules, index), tree.crawl_time(store)[0]
-            )
-        finally:
-            if index is not None:
-                index.close()
+        counted = kinds.tally(
+            kinds.walk(store, rules, index), tree.crawl_time(store)[0]
+        )
         total = counted.total()
         older = {years: counted.group_older(years) for years in REPORT_KIND_AGES}
         print(
@@ -869,7 +867,7 @@ def cmd_tree(args: SimpleNamespace) -> int:
         0 on success, 2 for a missing subtree, an unusable output path or
         unusable kinds inputs.
     """
-    with Store(args.db) as store:
+    with Store(args.db) as store, contextlib.ExitStack() as stack:
         if not store.is_initialised():
             print(f"error: {args.db} is not initialised", file=sys.stderr)
             return 2
@@ -892,20 +890,18 @@ def cmd_tree(args: SimpleNamespace) -> int:
         except kinds.KindsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        if index is not None:
+            stack.callback(index.close)
         started = time.time()
-        try:
-            page, summary, chosen = tree.build(
-                store,
-                args.subtree or store.get_meta("root") or "/",
-                args.min_size,
-                args.max_rows,
-                os.path.basename(args.db),
-                rules,
-                index,
-            )
-        finally:
-            if index is not None:
-                index.close()
+        page, summary, chosen = tree.build(
+            store,
+            args.subtree or store.get_meta("root") or "/",
+            args.min_size,
+            args.max_rows,
+            os.path.basename(args.db),
+            rules,
+            index,
+        )
         # Written beside the target and renamed into place, so a failed run never leaves
         # half a page behind.
         fd, partial = tempfile.mkstemp(dir=folder, prefix=".tree-", suffix=".html")
@@ -1129,7 +1125,7 @@ def cmd_kinds(args: SimpleNamespace) -> int:
         0 on success, 2 if the database is not initialised, the subtree is not
         in it, ``out`` is not a folder or the kinds inputs cannot be used.
     """
-    with Store(args.db) as store:
+    with Store(args.db) as store, contextlib.ExitStack() as stack:
         if not store.is_initialised():
             print(f"error: {args.db} is not initialised", file=sys.stderr)
             return 2
@@ -1145,6 +1141,8 @@ def cmd_kinds(args: SimpleNamespace) -> int:
         except kinds.KindsError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        if index is not None:
+            stack.callback(index.close)
 
         listed, finished = tree.crawl_time(store)
         unfinished = (
@@ -1167,11 +1165,7 @@ def cmd_kinds(args: SimpleNamespace) -> int:
         )
         if unfinished:
             _warn_incomplete(unfinished)
-        try:
-            counted = kinds.tally(kinds.walk(store, rules, index, args.subtree), listed)
-        finally:
-            if index is not None:
-                index.close()
+        counted = kinds.tally(kinds.walk(store, rules, index, args.subtree), listed)
         _print_kinds(counted, index is not None)
         if args.out:
             about = {
